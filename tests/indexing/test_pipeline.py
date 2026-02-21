@@ -269,7 +269,7 @@ class TestIndexingPipelineRun:
         # Три блока которые PassthroughChunker вернёт как три чанка
         from morag.indexing.chunker import Chunker
         class TripleChunker(Chunker):
-            def chunk(self, block):
+            async def chunk(self, block):
                 return ['A', 'B', 'C']
 
         pipeline._chunker = TripleChunker()

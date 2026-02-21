@@ -130,7 +130,7 @@ class IndexingPipeline:
         chunk_texts: list[str] = []
         for pack in packs:
             block_text = '\n\n'.join(pack)
-            chunk_texts.extend(self._chunker.chunk(block_text))
+            chunk_texts.extend(await self._chunker.chunk(block_text))
 
         total = len(chunk_texts)
         logger.debug('Document %s: %d block(s) -> %d chunk(s)', document.id, len(packs), total)
