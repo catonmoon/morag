@@ -72,7 +72,7 @@ class IndexingPipeline:
         Актуальные документы пропускаются.
         """
         documents = source.load()
-        logger.info('Загружено документов из source: %d', len(documents))
+        logger.info('Loaded %d document(s) from source', len(documents))
 
         to_index: list[Document] = []
         for document in documents:
@@ -80,7 +80,7 @@ class IndexingPipeline:
             if result is not None:
                 to_index.append(result)
 
-        logger.info('Документов к индексации: %d, пропущено: %d', len(to_index), len(documents) - len(to_index))
+        logger.info('Documents to index: %d, skipped: %d', len(to_index), len(documents) - len(to_index))
         return to_index
 
     async def _prepare_document(self, document: Document) -> Document | None:
@@ -96,11 +96,11 @@ class IndexingPipeline:
                 if status is not None:
                     count, total = status
                     if count == total:
-                        logger.debug('Документ актуален, пропускаем: %s', document.id)
+                        logger.debug('Document is up to date, skipping: %s', document.id)
                         return None
 
             # Документ изменился или индексация была прервана — удаляем каскадно
-            logger.debug('Переиндексация документа: %s', document.id)
+            logger.debug('Re-indexing document: %s', document.id)
             await self._chunk_repo.delete_by_doc_id(document.id)
             await self._doc_repo.delete(document.id)
 
@@ -110,7 +110,7 @@ class IndexingPipeline:
 
         # Сохраняем документ до начала чанкования
         await self._doc_repo.upsert(document)
-        logger.debug('Документ сохранён: %s', document.id)
+        logger.debug('Document saved: %s', document.id)
 
         return document
 
@@ -133,7 +133,7 @@ class IndexingPipeline:
             chunk_texts.extend(self._chunker.chunk(block_text))
 
         total = len(chunk_texts)
-        logger.debug('Документ %s: %d блоков → %d чанков', document.id, len(packs), total)
+        logger.debug('Document %s: %d block(s) -> %d chunk(s)', document.id, len(packs), total)
 
         # Собираем Chunk-объекты с order/total, генерируем context, применяем процессоры
         chunks: list[Chunk] = []
@@ -156,4 +156,4 @@ class IndexingPipeline:
             chunks.append(chunk)
 
         await self._chunk_repo.upsert_batch(chunks)
-        logger.info('Чанки сохранены: %s (%d шт.)', document.id, total)
+        logger.info('Chunks saved: %s (%d)', document.id, total)
