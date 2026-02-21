@@ -1,0 +1,46 @@
+from __future__ import annotations
+
+import json
+import logging
+
+from openai import AsyncOpenAI
+
+logger = logging.getLogger(__name__)
+
+
+class LLMClient:
+    """Async OpenAI-compatible LLM client.
+
+    Works with OpenAI, Ollama, LM Studio and any OpenAI-compatible server
+    via the base_url parameter.
+    """
+
+    def __init__(self, base_url: str, model: str, api_key: str = 'ollama') -> None:
+        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        self._model = model
+
+    async def complete(self, messages: list[dict]) -> str:
+        """Send a chat completion request and return the response text."""
+        response = await self._client.chat.completions.create(
+            model=self._model,
+            messages=messages,
+        )
+        return response.choices[0].message.content or ''
+
+    async def complete_json(self, messages: list[dict]) -> dict:
+        """Send a chat completion request expecting a JSON response.
+
+        Passes response_format={"type": "json_object"} to instruct the model
+        to return valid JSON. Raises ValueError if the response cannot be parsed.
+        """
+        response = await self._client.chat.completions.create(
+            model=self._model,
+            messages=messages,
+            response_format={'type': 'json_object'},
+        )
+        content = response.choices[0].message.content or '{}'
+        try:
+            return json.loads(content)
+        except json.JSONDecodeError as e:
+            logger.warning('LLM returned invalid JSON: %s', e)
+            raise ValueError(f'LLM returned invalid JSON: {e}') from e
