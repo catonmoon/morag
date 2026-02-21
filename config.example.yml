@@ -1,0 +1,9 @@
+sources:
+  markdown:
+    path: /path/to/your/docs
+
+qdrant:
+  host: localhost
+  port: 6333
+  collection_docs: docs
+  collection_chunks: chunks

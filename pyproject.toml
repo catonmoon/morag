@@ -1,0 +1,41 @@
+[project]
+name = "morag"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "chukanov",email = "chukanov@gmail.com"}
+]
+requires-python = ">=3.12"
+dependencies = [
+    "tiktoken>=0.9.0",
+    "numpy>=2.0.0",
+    "qdrant-client>=1.9.0",
+    "pyyaml>=6.0",
+]
+
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+pytest-asyncio = "^1.0"
+ruff = "^0.11.0"
+
+
+# https://docs.astral.sh/ruff/settings/#top-level
+[tool.ruff]
+line-length = 100
+indent-width = 4
+show-fixes = true
+
+# https://docs.astral.sh/ruff/settings/#format
+[tool.ruff.format]
+quote-style = "single"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["src"]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

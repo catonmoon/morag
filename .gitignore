@@ -1,0 +1,17 @@
+# Project data
+data/
+volumes/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Coverage
+coverage_html/
+.coverage
+
+# Env
+.env
+config.yml

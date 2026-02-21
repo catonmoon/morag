@@ -1,0 +1,9 @@
+sources:
+  markdown:
+    path: /app/data   # смонтированная папка с MD-файлами
+
+qdrant:
+  host: qdrant        # имя сервиса в docker-compose сети
+  port: 6333
+  collection_docs: docs
+  collection_chunks: chunks
