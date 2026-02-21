@@ -1,0 +1,29 @@
+services:
+
+  qdrant:
+    image: qdrant/qdrant:v1.17.0
+    ports:
+      - "6335:6333"   # REST API + веб-дашборд: http://localhost:6335/dashboard
+      - "6336:6334"   # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/localhost/6333'"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  morag-indexer:
+    build: .
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    volumes:
+      - ./config.docker.yml:/app/config.yml:ro   # конфиг с qdrant host: qdrant
+      - ./data:/app/data:ro                       # папка с MD-документами
+    restart: "no"   # разовый запуск: проиндексировал и вышел
+
+volumes:
+  qdrant_data:
