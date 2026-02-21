@@ -28,10 +28,10 @@ async def cmd_index(config_path: str) -> None:
     """Индексировать документы из источника в Qdrant."""
     config = load_config(config_path)
 
-    logger.info('Подключение к Qdrant %s:%d', config.qdrant.host, config.qdrant.port)
+    logger.info('Connecting to Qdrant %s:%d', config.qdrant.host, config.qdrant.port)
     client = AsyncQdrantClient(host=config.qdrant.host, port=config.qdrant.port)
 
-    logger.info('Проверка коллекций...')
+    logger.info('Ensuring collections...')
     await ensure_docs_collection(client, config.qdrant.collection_docs)
     await ensure_chunks_collection(client, config.qdrant.collection_chunks)
 
@@ -40,7 +40,7 @@ async def cmd_index(config_path: str) -> None:
     chunk_repo = ChunkRepository(client, config.qdrant.collection_chunks)
     pipeline = IndexingPipeline(doc_repo, chunk_repo)
 
-    logger.info('Источник: %s', config.sources.markdown.path)
+    logger.info('Source: %s', config.sources.markdown.path)
     await pipeline.run(source)
 
     await client.close()
