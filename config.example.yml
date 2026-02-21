@@ -7,3 +7,13 @@ qdrant:
   port: 6333
   collection_docs: docs
   collection_chunks: chunks
+
+llm:
+  base_url: http://localhost:11434/v1
+  model: qwen2.5-coder:7b
+  api_key: ollama
+
+indexing:
+  chunker: passthrough  # passthrough | llm
+  context: noop         # noop | llm
+  block_limit: 32000
