@@ -11,7 +11,10 @@ import sys
 from qdrant_client import AsyncQdrantClient
 
 from morag.config import load_config
+from morag.indexing.chunker import LLMChunker, PassthroughChunker
+from morag.indexing.context import LLMContextGenerator, NoopContextGenerator
 from morag.indexing.pipeline import IndexingPipeline
+from morag.llm.client import LLMClient
 from morag.sources.markdown import MarkdownSource
 from morag.storage.collections import ensure_chunks_collection, ensure_docs_collection
 from morag.storage.repository import ChunkRepository, DocRepository
@@ -38,9 +41,27 @@ async def cmd_index(config_path: str) -> None:
     source = MarkdownSource(config.sources.markdown.path)
     doc_repo = DocRepository(client, config.qdrant.collection_docs)
     chunk_repo = ChunkRepository(client, config.qdrant.collection_chunks)
-    pipeline = IndexingPipeline(doc_repo, chunk_repo)
+
+    llm_client = LLMClient(
+        base_url=config.llm.base_url,
+        model=config.llm.model,
+        api_key=config.llm.api_key,
+    )
+
+    chunker = LLMChunker(llm_client) if config.indexing.chunker == 'llm' else PassthroughChunker()
+    context_generator = (
+        LLMContextGenerator(llm_client) if config.indexing.context == 'llm' else NoopContextGenerator()
+    )
+
+    pipeline = IndexingPipeline(
+        doc_repo, chunk_repo,
+        chunker=chunker,
+        context_generator=context_generator,
+        block_limit=config.indexing.block_limit,
+    )
 
     logger.info('Source: %s', config.sources.markdown.path)
+    logger.info('Chunker: %s, context: %s', config.indexing.chunker, config.indexing.context)
     await pipeline.run(source)
 
     await client.close()

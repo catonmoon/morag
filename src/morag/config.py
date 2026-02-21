@@ -21,9 +21,23 @@ class QdrantConfig(BaseModel):
     collection_chunks: str = 'chunks'
 
 
+class LLMConfig(BaseModel):
+    base_url: str = 'http://localhost:11434/v1'
+    model: str = 'qwen2.5-coder:7b'
+    api_key: str = 'ollama'
+
+
+class IndexingConfig(BaseModel):
+    chunker: str = 'passthrough'  # 'passthrough' | 'llm'
+    context: str = 'noop'         # 'noop' | 'llm'
+    block_limit: int = 32000
+
+
 class Config(BaseModel):
     sources: SourcesConfig
     qdrant: QdrantConfig = QdrantConfig()
+    llm: LLMConfig = LLMConfig()
+    indexing: IndexingConfig = IndexingConfig()
 
 
 def load_config(path: str | Path = 'config.yml') -> Config:

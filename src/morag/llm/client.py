@@ -19,11 +19,12 @@ class LLMClient:
         self._client = AsyncOpenAI(base_url=base_url, api_key=api_key)
         self._model = model
 
-    async def complete(self, messages: list[dict]) -> str:
+    async def complete(self, messages: list[dict], temperature: float = 0.0) -> str:
         """Send a chat completion request and return the response text."""
         response = await self._client.chat.completions.create(
             model=self._model,
             messages=messages,
+            temperature=temperature,
         )
         return response.choices[0].message.content or ''
 
