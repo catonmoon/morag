@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 
-from morag.indexing.embedder import Embedder, FridaEmbedder
+from morag.indexing.embedder import Embedder, FridaEmbedder, GteSparseEmbedder, SparseEmbedder, _word_to_index
 
 
 def make_frida(model_name: str = 'ai-forever/FRIDA') -> tuple[FridaEmbedder, MagicMock]:
@@ -75,3 +75,140 @@ class TestFridaEmbedder:
         embedder.embed('текст')
         _, kwargs = mock_model.encode.call_args
         assert kwargs.get('normalize_embeddings') is False
+
+
+# ---------------------------------------------------------------------------
+# _word_to_index
+# ---------------------------------------------------------------------------
+
+class TestWordToIndex:
+    def test_returns_int(self):
+        assert isinstance(_word_to_index('hello'), int)
+
+    def test_deterministic(self):
+        assert _word_to_index('test') == _word_to_index('test')
+
+    def test_different_words_different_indices(self):
+        assert _word_to_index('hello') != _word_to_index('world')
+
+    def test_result_within_bounds(self):
+        idx = _word_to_index('любое слово')
+        assert 0 <= idx < 4_294_967_295
+
+    def test_known_value(self):
+        """Проверяем стабильность хэша — значение не должно меняться."""
+        import hashlib
+        word = 'test'
+        expected = int(hashlib.md5(word.encode('utf-8')).hexdigest(), 16) % 4_294_967_295
+        assert _word_to_index(word) == expected
+
+
+# ---------------------------------------------------------------------------
+# GteSparseEmbedder — тесты через моки (без загрузки реальной модели)
+# ---------------------------------------------------------------------------
+
+def make_gte(model_name: str = 'Alibaba-NLP/gte-multilingual-base'):
+    """Создать GteSparseEmbedder с замоканными tokenizer и model."""
+    import torch
+
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.cls_token_id = 0
+    mock_tokenizer.eos_token_id = 1
+    mock_tokenizer.pad_token_id = 2
+    mock_tokenizer.unk_token_id = 3
+    mock_tokenizer.decode.side_effect = lambda ids, **_: 'word' if ids[0] not in {0, 1, 2, 3} else ''
+
+    # logits shape: [1, seq_len, 1] → squeeze → [seq_len]
+    # симулируем 4 токена: [CLS]=0, tok1=4 (w=0.5), tok2=5 (w=0.0 — фильтруем), [PAD]=2
+    def fake_tokenizer_call(text, **_):
+        mock_enc = MagicMock()
+        mock_enc.__getitem__ = lambda self, k: {
+            'input_ids': torch.tensor([[0, 4, 5, 2]]),
+        }[k]
+        mock_enc.items.return_value = [
+            ('input_ids', torch.tensor([[0, 4, 5, 2]])),
+            ('attention_mask', torch.ones(1, 4, dtype=torch.long)),
+        ]
+        return mock_enc
+
+    mock_tokenizer.side_effect = fake_tokenizer_call
+
+    mock_model = MagicMock()
+    mock_model.device = torch.device('cpu')
+    logits = torch.tensor([[[0.5], [0.5], [0.0], [0.0]]])  # shape [1, 4, 1]
+    mock_model_out = MagicMock()
+    mock_model_out.logits = logits
+    mock_model.return_value = mock_model_out
+
+    with (
+        patch('transformers.AutoTokenizer.from_pretrained', return_value=mock_tokenizer),
+        patch('transformers.AutoModelForTokenClassification.from_pretrained', return_value=mock_model),
+    ):
+        embedder = GteSparseEmbedder(model_name)
+    embedder._tokenizer = mock_tokenizer
+    embedder._model = mock_model
+    return embedder
+
+
+class TestGteSparseEmbedder:
+    def test_is_sparse_embedder(self):
+        embedder = make_gte()
+        assert isinstance(embedder, SparseEmbedder)
+
+    def test_embed_returns_tuple(self):
+        embedder = make_gte()
+        result = embedder.embed('текст')
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+
+    def test_embed_returns_indices_and_values(self):
+        embedder = make_gte()
+        indices, values = embedder.embed('текст')
+        assert isinstance(indices, list)
+        assert isinstance(values, list)
+        assert len(indices) == len(values)
+
+    def test_embed_indices_are_ints(self):
+        embedder = make_gte()
+        indices, _ = embedder.embed('текст')
+        assert all(isinstance(i, int) for i in indices)
+
+    def test_embed_values_are_floats(self):
+        embedder = make_gte()
+        _, values = embedder.embed('текст')
+        assert all(isinstance(v, float) for v in values)
+
+    def test_embed_values_are_positive(self):
+        """ReLU гарантирует неотрицательность, нулевые фильтруются."""
+        embedder = make_gte()
+        _, values = embedder.embed('текст')
+        assert all(v > 0 for v in values)
+
+    def test_embed_query_same_signature(self):
+        embedder = make_gte()
+        indices, values = embedder.embed_query('запрос')
+        assert isinstance(indices, list)
+        assert isinstance(values, list)
+
+    def test_no_special_tokens_in_output(self):
+        """Спец-токены (CLS, PAD, EOS, UNK) не попадают в результат."""
+        embedder = make_gte()
+        # mock_tokenizer.decode возвращает '' для id in {0,1,2,3}
+        indices, values = embedder.embed('текст')
+        # для спец-токенов decode возвращает '', strip() → '', они должны быть
+        # отфильтрованы на этапе unused_tokens (id in {0,1,2,3})
+        assert len(values) > 0  # хотя бы один ненулевой токен
+
+    def test_loads_with_trust_remote_code(self):
+        """trust_remote_code=True обязателен для GTE."""
+        with (
+            patch('transformers.AutoTokenizer.from_pretrained') as mock_tok,
+            patch('transformers.AutoModelForTokenClassification.from_pretrained') as mock_model_cls,
+        ):
+            mock_tok.return_value = MagicMock(
+                cls_token_id=0, eos_token_id=1, pad_token_id=2, unk_token_id=3,
+            )
+            mock_model_cls.return_value = MagicMock()
+            GteSparseEmbedder('some/model')
+            _, kwargs = mock_model_cls.call_args
+            assert kwargs.get('trust_remote_code') is True

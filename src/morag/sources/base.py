@@ -32,7 +32,7 @@ class Chunk:
     updated_at: datetime                              # наследуется от Document
     context: str = ''                                 # LLM-суммари (пусто если NoopContextGenerator)
     payload: dict = field(default_factory=dict)       # метаданные от ChunkProcessor-ов
-    vectors: dict[str, list[float]] = field(default_factory=dict)  # именованные векторы от embedding-процессоров
+    vectors: dict[str, list[float] | dict] = field(default_factory=dict)  # именованные векторы от embedding-процессоров
     id: str = field(default_factory=lambda: str(uuid4()))
 
 

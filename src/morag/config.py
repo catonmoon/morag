@@ -32,6 +32,7 @@ class IndexingConfig(BaseModel):
     context: str = 'noop'               # 'noop' | 'llm'
     block_limit: int = 32000
     dense_model: str = 'ai-forever/FRIDA'  # модель для dense-эмбеддингов
+    sparse_model: str = 'Alibaba-NLP/gte-multilingual-base'  # модель для sparse-эмбеддингов
 
 
 class Config(BaseModel):
