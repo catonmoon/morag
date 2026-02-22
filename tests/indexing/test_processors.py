@@ -2,9 +2,21 @@ from datetime import datetime, timezone
 
 import pytest
 
-from morag.indexing.embedder import Embedder
-from morag.indexing.processors import ChunkProcessor, DenseEmbeddingProcessor, DocumentProcessor
+from morag.indexing.embedder import Embedder, SparseEmbedder
+from morag.indexing.processors import ChunkProcessor, DenseEmbeddingProcessor, DocumentProcessor, SparseEmbeddingProcessor
 from morag.sources.base import Chunk, Document
+
+
+class FakeSparseEmbedder(SparseEmbedder):
+    """Детерминированный sparse-эмбеддер для тестов."""
+
+    def embed(self, text: str) -> tuple[list[int], list[float]]:
+        indices = [hash(text) % 1000, (hash(text) + 1) % 1000]
+        values = [0.7, 0.3]
+        return indices, values
+
+    def embed_query(self, text: str) -> tuple[list[int], list[float]]:
+        return self.embed(text)
 
 
 class FakeEmbedder(Embedder):
@@ -196,3 +208,63 @@ class TestDenseEmbeddingProcessor:
         result = processor.process(chunk, make_document())
         assert result.vectors['existing'] == [9.0, 8.0, 7.0, 6.0]
         assert 'full' in result.vectors
+
+
+# ---------------------------------------------------------------------------
+# SparseEmbeddingProcessor
+# ---------------------------------------------------------------------------
+
+class TestSparseEmbeddingProcessor:
+    def test_is_chunk_processor(self):
+        assert isinstance(SparseEmbeddingProcessor(FakeSparseEmbedder()), ChunkProcessor)
+
+    def test_adds_keywords_vector(self):
+        processor = SparseEmbeddingProcessor(FakeSparseEmbedder())
+        chunk = make_chunk()
+        result = processor.process(chunk, make_document())
+        assert 'keywords' in result.vectors
+
+    def test_keywords_vector_is_dict(self):
+        processor = SparseEmbeddingProcessor(FakeSparseEmbedder())
+        chunk = make_chunk()
+        result = processor.process(chunk, make_document())
+        vec = result.vectors['keywords']
+        assert isinstance(vec, dict)
+
+    def test_keywords_vector_has_indices_and_values(self):
+        processor = SparseEmbeddingProcessor(FakeSparseEmbedder())
+        chunk = make_chunk()
+        result = processor.process(chunk, make_document())
+        vec = result.vectors['keywords']
+        assert 'indices' in vec
+        assert 'values' in vec
+
+    def test_keywords_indices_and_values_same_length(self):
+        processor = SparseEmbeddingProcessor(FakeSparseEmbedder())
+        chunk = make_chunk()
+        result = processor.process(chunk, make_document())
+        vec = result.vectors['keywords']
+        assert len(vec['indices']) == len(vec['values'])
+
+    def test_keywords_uses_chunk_text(self):
+        """Sparse-вектор зависит от текста чанка."""
+        embedder = FakeSparseEmbedder()
+        processor = SparseEmbeddingProcessor(embedder)
+
+        chunk_a = make_chunk()
+        chunk_a.text = 'Первый текст'
+        chunk_b = make_chunk()
+        chunk_b.text = 'Второй текст'
+
+        result_a = processor.process(chunk_a, make_document())
+        result_b = processor.process(chunk_b, make_document())
+        assert result_a.vectors['keywords'] != result_b.vectors['keywords']
+
+    def test_does_not_overwrite_other_vectors(self):
+        """Процессор не затирает уже существующие векторы."""
+        processor = SparseEmbeddingProcessor(FakeSparseEmbedder())
+        chunk = make_chunk()
+        chunk.vectors['full'] = [1.0, 2.0, 3.0, 4.0]
+        result = processor.process(chunk, make_document())
+        assert result.vectors['full'] == [1.0, 2.0, 3.0, 4.0]
+        assert 'keywords' in result.vectors

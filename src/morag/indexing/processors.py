@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from morag.indexing.embedder import Embedder
+from morag.indexing.embedder import Embedder, SparseEmbedder
 from morag.sources.base import Chunk, Document
 
 
@@ -47,4 +47,21 @@ class DenseEmbeddingProcessor(ChunkProcessor):
     def process(self, chunk: Chunk, document: Document) -> Chunk:
         full_text = f'{chunk.path}\n{chunk.text}\n{chunk.context}'
         chunk.vectors['full'] = self._embedder.embed(full_text)
+        return chunk
+
+
+class SparseEmbeddingProcessor(ChunkProcessor):
+    """Добавляет sparse-вектор 'keywords' в chunk.vectors.
+
+    Вектор строится из основного текста чанка без контекста —
+    sparse-поиск ориентирован на точное совпадение ключевых слов.
+    Сохраняется в формате {'indices': [...], 'values': [...]}.
+    """
+
+    def __init__(self, embedder: SparseEmbedder) -> None:
+        self._embedder = embedder
+
+    def process(self, chunk: Chunk, document: Document) -> Chunk:
+        indices, values = self._embedder.embed(chunk.text)
+        chunk.vectors['keywords'] = {'indices': indices, 'values': values}
         return chunk

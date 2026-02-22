@@ -18,6 +18,11 @@ RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
 # Скачать FRIDA во время сборки
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('ai-forever/FRIDA')"
 
+# Скачать GTE sparse во время сборки
+RUN python -c "from transformers import AutoTokenizer, AutoModelForTokenClassification; \
+    AutoTokenizer.from_pretrained('Alibaba-NLP/gte-multilingual-base'); \
+    AutoModelForTokenClassification.from_pretrained('Alibaba-NLP/gte-multilingual-base', trust_remote_code=True)"
+
 # Исходный код
 COPY src/ ./src/
 COPY cli/ ./cli/

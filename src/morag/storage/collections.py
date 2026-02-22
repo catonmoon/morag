@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from qdrant_client import AsyncQdrantClient
-from qdrant_client.models import Distance, PayloadSchemaType, VectorParams
+from qdrant_client.models import Distance, PayloadSchemaType, SparseVectorParams, VectorParams
 
 
 async def ensure_docs_collection(client: AsyncQdrantClient, name: str = 'docs') -> None:
@@ -29,6 +29,7 @@ async def ensure_chunks_collection(
     client: AsyncQdrantClient,
     name: str = 'chunks',
     vectors_config: dict[str, VectorParams] | None = None,
+    sparse_vectors_config: dict[str, SparseVectorParams] | None = None,
 ) -> None:
     """Создать коллекцию чанков если не существует.
 
@@ -42,6 +43,7 @@ async def ensure_chunks_collection(
     await client.create_collection(
         collection_name=name,
         vectors_config=vectors_config or {},
+        sparse_vectors_config=sparse_vectors_config,
     )
     await client.create_payload_index(
         collection_name=name,
@@ -61,3 +63,8 @@ def make_dense_vector_config(size: int, distance: Distance = Distance.COSINE) ->
 def frida_vectors_config() -> dict[str, VectorParams]:
     """Конфиг именованных векторов для коллекции чанков с FRIDA-эмбеддингами."""
     return {'full': VectorParams(size=FRIDA_DIM, distance=Distance.COSINE)}
+
+
+def gte_sparse_vectors_config() -> dict[str, SparseVectorParams]:
+    """Конфиг sparse-векторов для коллекции чанков с GTE-эмбеддингами."""
+    return {'keywords': SparseVectorParams()}
