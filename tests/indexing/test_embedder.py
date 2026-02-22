@@ -96,11 +96,16 @@ class TestWordToIndex:
         assert 0 <= idx < 4_294_967_295
 
     def test_known_value(self):
-        """Проверяем стабильность хэша — значение не должно меняться."""
-        import hashlib
-        word = 'test'
-        expected = int(hashlib.md5(word.encode('utf-8')).hexdigest(), 16) % 4_294_967_295
-        assert _word_to_index(word) == expected
+        """Стабильность хэша: конкретное значение не должно меняться никогда.
+
+        Если этот тест падает — все сохранённые коллекции в Qdrant становятся
+        несовместимыми с новым кодом. Изменять число ЗАПРЕЩЕНО.
+        """
+        assert _word_to_index('test') == 1085751994
+
+    def test_case_sensitive(self):
+        """Нет lowercase: 'Python' и 'python' — разные токены, разные индексы."""
+        assert _word_to_index('Python') != _word_to_index('python')
 
 
 # ---------------------------------------------------------------------------
@@ -191,13 +196,55 @@ class TestGteSparseEmbedder:
         assert isinstance(values, list)
 
     def test_no_special_tokens_in_output(self):
-        """Спец-токены (CLS, PAD, EOS, UNK) не попадают в результат."""
+        """Спец-токены (CLS, PAD, EOS, UNK) не попадают в результат.
+
+        Mock: 4 токена — [CLS]=0, tok=4, zero_tok=5, [PAD]=2.
+        CLS и PAD в unused_tokens, tok=5 отфильтрован по weight=0.
+        Должен остаться ровно 1 токен.
+        """
         embedder = make_gte()
-        # mock_tokenizer.decode возвращает '' для id in {0,1,2,3}
         indices, values = embedder.embed('текст')
-        # для спец-токенов decode возвращает '', strip() → '', они должны быть
-        # отфильтрованы на этапе unused_tokens (id in {0,1,2,3})
-        assert len(values) > 0  # хотя бы один ненулевой токен
+        assert len(values) == 1
+
+    def test_deduplication_keeps_max_weight(self):
+        """Если одно слово встречается дважды, берётся максимальный вес, а не сумма."""
+        import torch
+
+        # Два токена с одинаковым decode → одно слово, веса 0.3 и 0.9
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.cls_token_id = 0
+        mock_tokenizer.eos_token_id = None
+        mock_tokenizer.pad_token_id = None
+        mock_tokenizer.unk_token_id = None
+        mock_tokenizer.decode.return_value = 'word'  # оба токена → одно слово
+
+        def fake_call(text, **_):
+            enc = MagicMock()
+            enc.items.return_value = [('input_ids', torch.tensor([[4, 5]]))]
+            enc.__getitem__ = lambda s, k: torch.tensor([[4, 5]])
+            return enc
+
+        mock_tokenizer.side_effect = fake_call
+
+        mock_model = MagicMock()
+        mock_model.device = torch.device('cpu')
+        out = MagicMock()
+        out.logits = torch.tensor([[[0.3], [0.9]]])  # tok4=0.3, tok5=0.9
+        mock_model.return_value = out
+
+        with (
+            patch('transformers.AutoTokenizer.from_pretrained', return_value=mock_tokenizer),
+            patch('transformers.AutoModelForTokenClassification.from_pretrained', return_value=mock_model),
+        ):
+            embedder = GteSparseEmbedder()
+        embedder._tokenizer = mock_tokenizer
+        embedder._model = mock_model
+
+        indices, values = embedder.embed('word word')
+
+        assert len(indices) == 1          # одно уникальное слово
+        assert len(values) == 1
+        assert values[0] == pytest.approx(0.9)  # max, не сумма (1.2) и не первый (0.3)
 
     def test_loads_with_trust_remote_code(self):
         """trust_remote_code=True обязателен для GTE."""
