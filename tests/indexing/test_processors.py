@@ -2,8 +2,27 @@ from datetime import datetime, timezone
 
 import pytest
 
-from morag.indexing.processors import ChunkProcessor, DocumentProcessor
+from morag.indexing.embedder import Embedder
+from morag.indexing.processors import ChunkProcessor, DenseEmbeddingProcessor, DocumentProcessor
 from morag.sources.base import Chunk, Document
+
+
+class FakeEmbedder(Embedder):
+    """Детерминированный эмбеддер для тестов: вектор уникален для каждого текста."""
+
+    DIM = 4
+
+    def embed(self, text: str) -> list[float]:
+        h = float(hash(text) % 100000)
+        return [h, float(len(text)), 1.0, 0.0]
+
+    def embed_query(self, text: str) -> list[float]:
+        h = float(hash(text) % 100000)
+        return [0.0, h, float(len(text)), 1.0]
+
+    @property
+    def dim(self) -> int:
+        return self.DIM
 
 
 def make_document() -> Document:
@@ -110,3 +129,70 @@ class TestChunkProcessor:
         chunk = make_chunk()
         result = processor.process(chunk, doc)
         assert result.payload.get('source_type') == 'markdown'
+
+
+# ---------------------------------------------------------------------------
+# DenseEmbeddingProcessor
+# ---------------------------------------------------------------------------
+
+class TestDenseEmbeddingProcessor:
+    def test_is_chunk_processor(self):
+        assert isinstance(DenseEmbeddingProcessor(FakeEmbedder()), ChunkProcessor)
+
+    def test_adds_full_vector(self):
+        processor = DenseEmbeddingProcessor(FakeEmbedder())
+        chunk = make_chunk()
+        result = processor.process(chunk, make_document())
+        assert 'full' in result.vectors
+
+    def test_vector_is_list_of_floats(self):
+        processor = DenseEmbeddingProcessor(FakeEmbedder())
+        chunk = make_chunk()
+        result = processor.process(chunk, make_document())
+        vec = result.vectors['full']
+        assert isinstance(vec, list)
+        assert all(isinstance(v, float) for v in vec)
+
+    def test_vector_length_matches_embedder_dim(self):
+        embedder = FakeEmbedder()
+        processor = DenseEmbeddingProcessor(embedder)
+        chunk = make_chunk()
+        result = processor.process(chunk, make_document())
+        assert len(result.vectors['full']) == embedder.dim
+
+    def test_full_text_includes_path(self):
+        """Вектор зависит от path чанка."""
+        embedder = FakeEmbedder()
+        processor = DenseEmbeddingProcessor(embedder)
+
+        chunk_a = make_chunk()
+        chunk_a.path = 'docs/guide.md'
+        chunk_b = make_chunk()
+        chunk_b.path = 'docs/faq.md'
+
+        result_a = processor.process(chunk_a, make_document())
+        result_b = processor.process(chunk_b, make_document())
+        assert result_a.vectors['full'] != result_b.vectors['full']
+
+    def test_full_text_includes_context(self):
+        """Вектор зависит от context чанка."""
+        embedder = FakeEmbedder()
+        processor = DenseEmbeddingProcessor(embedder)
+
+        chunk_a = make_chunk()
+        chunk_a.context = 'Контекст А'
+        chunk_b = make_chunk()
+        chunk_b.context = 'Контекст Б'
+
+        result_a = processor.process(chunk_a, make_document())
+        result_b = processor.process(chunk_b, make_document())
+        assert result_a.vectors['full'] != result_b.vectors['full']
+
+    def test_does_not_overwrite_other_vectors(self):
+        """Процессор не затирает уже существующие векторы."""
+        processor = DenseEmbeddingProcessor(FakeEmbedder())
+        chunk = make_chunk()
+        chunk.vectors['existing'] = [9.0, 8.0, 7.0, 6.0]
+        result = processor.process(chunk, make_document())
+        assert result.vectors['existing'] == [9.0, 8.0, 7.0, 6.0]
+        assert 'full' in result.vectors

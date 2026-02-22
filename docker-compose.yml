@@ -16,7 +16,9 @@ services:
       start_period: 5s
 
   morag-indexer:
-    build: .
+    build:
+      context: .
+      network: host
     depends_on:
       qdrant:
         condition: service_healthy

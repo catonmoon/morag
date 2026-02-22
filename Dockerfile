@@ -9,11 +9,14 @@ ENV POETRY_VIRTUALENVS_CREATE=false \
 RUN pip install --no-cache-dir poetry
 
 # Зависимости отдельным слоем для кэша
-COPY pyproject.toml poetry.lock ./
-RUN poetry install --without dev --no-root
+COPY requirements.txt ./
+RUN pip install --no-cache-dir --timeout 300 --retries 5 -r requirements.txt
 
 # Скачать tiktoken-энкодинг во время сборки, чтобы не делать это при запуске
 RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
+
+# Скачать FRIDA во время сборки
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('ai-forever/FRIDA')"
 
 # Исходный код
 COPY src/ ./src/

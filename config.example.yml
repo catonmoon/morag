@@ -14,6 +14,7 @@ llm:
   api_key: ollama
 
 indexing:
-  chunker: passthrough  # passthrough | llm
-  context: noop         # noop | llm
+  chunker: passthrough          # passthrough | llm
+  context: noop                 # noop | llm
   block_limit: 32000
+  dense_model: ai-forever/FRIDA
