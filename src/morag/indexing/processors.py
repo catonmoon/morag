@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from morag.indexing.embedder import Embedder
 from morag.sources.base import Chunk, Document
 
 
@@ -31,3 +32,19 @@ class ChunkProcessor(ABC):
     def process(self, chunk: Chunk, document: Document) -> Chunk:
         """Обработать чанк и вернуть обновлённую версию."""
         ...
+
+
+class DenseEmbeddingProcessor(ChunkProcessor):
+    """Добавляет dense-вектор 'full' в chunk.vectors.
+
+    Вектор строится из конкатенации path + text + context —
+    это даёт полное представление чанка в контексте документа.
+    """
+
+    def __init__(self, embedder: Embedder) -> None:
+        self._embedder = embedder
+
+    def process(self, chunk: Chunk, document: Document) -> Chunk:
+        full_text = f'{chunk.path}\n{chunk.text}\n{chunk.context}'
+        chunk.vectors['full'] = self._embedder.embed(full_text)
+        return chunk

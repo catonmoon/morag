@@ -28,9 +28,10 @@ class LLMConfig(BaseModel):
 
 
 class IndexingConfig(BaseModel):
-    chunker: str = 'passthrough'  # 'passthrough' | 'llm'
-    context: str = 'noop'         # 'noop' | 'llm'
+    chunker: str = 'passthrough'         # 'passthrough' | 'llm'
+    context: str = 'noop'               # 'noop' | 'llm'
     block_limit: int = 32000
+    dense_model: str = 'ai-forever/FRIDA'  # модель для dense-эмбеддингов
 
 
 class Config(BaseModel):

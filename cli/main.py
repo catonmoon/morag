@@ -13,10 +13,12 @@ from qdrant_client import AsyncQdrantClient
 from morag.config import load_config
 from morag.indexing.chunker import LLMChunker, PassthroughChunker
 from morag.indexing.context import LLMContextGenerator, NoopContextGenerator
+from morag.indexing.embedder import FridaEmbedder
 from morag.indexing.pipeline import IndexingPipeline
+from morag.indexing.processors import DenseEmbeddingProcessor
 from morag.llm.client import LLMClient
 from morag.sources.markdown import MarkdownSource
-from morag.storage.collections import ensure_chunks_collection, ensure_docs_collection
+from morag.storage.collections import ensure_chunks_collection, ensure_docs_collection, frida_vectors_config
 from morag.storage.repository import ChunkRepository, DocRepository
 
 logging.basicConfig(
@@ -36,7 +38,10 @@ async def cmd_index(config_path: str) -> None:
 
     logger.info('Ensuring collections...')
     await ensure_docs_collection(client, config.qdrant.collection_docs)
-    await ensure_chunks_collection(client, config.qdrant.collection_chunks)
+    await ensure_chunks_collection(
+        client, config.qdrant.collection_chunks,
+        vectors_config=frida_vectors_config(),
+    )
 
     source = MarkdownSource(config.sources.markdown.path)
     doc_repo = DocRepository(client, config.qdrant.collection_docs)
@@ -53,10 +58,14 @@ async def cmd_index(config_path: str) -> None:
         LLMContextGenerator(llm_client) if config.indexing.context == 'llm' else NoopContextGenerator()
     )
 
+    embedder = FridaEmbedder(config.indexing.dense_model)
+    chunk_processors = [DenseEmbeddingProcessor(embedder)]
+
     pipeline = IndexingPipeline(
         doc_repo, chunk_repo,
         chunker=chunker,
         context_generator=context_generator,
+        chunk_processors=chunk_processors,
         block_limit=config.indexing.block_limit,
     )
 

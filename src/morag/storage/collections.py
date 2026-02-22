@@ -50,6 +50,14 @@ async def ensure_chunks_collection(
     )
 
 
+FRIDA_DIM = 1024
+
+
 def make_dense_vector_config(size: int, distance: Distance = Distance.COSINE) -> VectorParams:
     """Вспомогательная функция для создания конфига dense-вектора."""
     return VectorParams(size=size, distance=distance)
+
+
+def frida_vectors_config() -> dict[str, VectorParams]:
+    """Конфиг именованных векторов для коллекции чанков с FRIDA-эмбеддингами."""
+    return {'full': VectorParams(size=FRIDA_DIM, distance=Distance.COSINE)}
