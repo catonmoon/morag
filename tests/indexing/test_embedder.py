@@ -6,10 +6,14 @@ import pytest
 from morag.indexing.embedder import Embedder, FridaEmbedder, GteSparseEmbedder, SparseEmbedder, _word_to_index
 
 
+_MOCK_DIM = 768
+
+
 def make_frida(model_name: str = 'ai-forever/FRIDA') -> tuple[FridaEmbedder, MagicMock]:
     """Создать FridaEmbedder с заглушкой SentenceTransformer."""
     mock_model = MagicMock()
-    mock_model.encode.side_effect = lambda text, **_: np.zeros(FridaEmbedder.DIM, dtype=np.float32)
+    mock_model.get_sentence_embedding_dimension.return_value = _MOCK_DIM
+    mock_model.encode.side_effect = lambda text, **_: np.zeros(_MOCK_DIM, dtype=np.float32)
     with patch('sentence_transformers.SentenceTransformer', return_value=mock_model):
         embedder = FridaEmbedder(model_name)
     return embedder, mock_model
@@ -20,9 +24,9 @@ class TestFridaEmbedder:
         embedder, _ = make_frida()
         assert isinstance(embedder, Embedder)
 
-    def test_dim_is_1024(self):
+    def test_dim_from_model(self):
         embedder, _ = make_frida()
-        assert embedder.dim == 1024
+        assert embedder.dim == _MOCK_DIM
 
     def test_embed_returns_list_of_floats(self):
         embedder, _ = make_frida()
@@ -33,12 +37,12 @@ class TestFridaEmbedder:
     def test_embed_returns_correct_length(self):
         embedder, _ = make_frida()
         result = embedder.embed('тестовый текст')
-        assert len(result) == FridaEmbedder.DIM
+        assert len(result) == _MOCK_DIM
 
     def test_embed_query_returns_correct_length(self):
         embedder, _ = make_frida()
         result = embedder.embed_query('поисковый запрос')
-        assert len(result) == FridaEmbedder.DIM
+        assert len(result) == _MOCK_DIM
 
     def test_embed_uses_document_prefix(self):
         embedder, mock_model = make_frida()
@@ -65,7 +69,8 @@ class TestFridaEmbedder:
     def test_loads_model_with_given_name(self):
         with patch('sentence_transformers.SentenceTransformer') as mock_cls:
             mock_cls.return_value = MagicMock()
-            mock_cls.return_value.encode.return_value = np.zeros(FridaEmbedder.DIM, dtype=np.float32)
+            mock_cls.return_value.get_sentence_embedding_dimension.return_value = _MOCK_DIM
+            mock_cls.return_value.encode.return_value = np.zeros(_MOCK_DIM, dtype=np.float32)
             FridaEmbedder('custom/model')
             mock_cls.assert_called_once_with('custom/model')
 

@@ -41,13 +41,12 @@ class FridaEmbedder(Embedder):
     для запросов — 'search_query:'.
     """
 
-    DIM = 1024
-
     def __init__(self, model_name: str = 'ai-forever/FRIDA') -> None:
         from sentence_transformers import SentenceTransformer
         logger.info('Loading embedding model: %s', model_name)
         self._model = SentenceTransformer(model_name)
-        logger.info('Embedding model loaded, dim=%d', self.DIM)
+        self._dim = self._model.get_sentence_embedding_dimension()
+        logger.info('Embedding model loaded, dim=%d', self._dim)
 
     def embed(self, text: str) -> list[float]:
         return self._model.encode(_DOCUMENT_PREFIX + text, normalize_embeddings=False).tolist()
@@ -57,7 +56,7 @@ class FridaEmbedder(Embedder):
 
     @property
     def dim(self) -> int:
-        return self.DIM
+        return self._dim
 
 
 class SparseEmbedder(ABC):
@@ -125,15 +124,33 @@ class GteSparseEmbedder(SparseEmbedder):
     Не использует префиксы и не меняет регистр текста.
     """
 
-    def __init__(self, model_name: str = 'Alibaba-NLP/gte-multilingual-base') -> None:
+    def __init__(
+        self,
+        model_name: str = 'Alibaba-NLP/gte-multilingual-base',
+        device: str | None = None,
+    ) -> None:
         import torch
         from transformers import AutoModelForTokenClassification, AutoTokenizer
 
-        logger.info('Loading sparse embedding model: %s', model_name)
+        if device is not None:
+            self._device = torch.device(device)
+        elif torch.cuda.is_available():
+            self._device = torch.device('cuda')
+        else:
+            # MPS causes AcceleratorError in GTE's custom RoPE kernel regardless of dtype;
+            # CPU is used as a safe fallback on Apple Silicon and other non-CUDA systems.
+            self._device = torch.device('cpu')
+
+        logger.info('Loading sparse embedding model: %s on %s', model_name, self._device)
         self._tokenizer = AutoTokenizer.from_pretrained(model_name)
+        # Explicit fp16 on CUDA avoids buffer corruption from "torch_dtype: float16" in model config.
+        # On CPU float16 is unsupported for some ops; use float32.
+        model_dtype = torch.float16 if self._device.type == 'cuda' else torch.float32
         self._model = AutoModelForTokenClassification.from_pretrained(
-            model_name, trust_remote_code=True,
-        ).eval()
+            model_name,
+            trust_remote_code=True,
+            torch_dtype=model_dtype,
+        ).to(self._device).eval()
         self._torch = torch
 
         self._unused_tokens = {
@@ -150,13 +167,22 @@ class GteSparseEmbedder(SparseEmbedder):
         enc = self._tokenizer(
             text,
             return_tensors='pt',
+            padding=True,
             truncation=True,
             max_length=8192,
         )
+        enc = {k: v.to(self._model.device) for k, v in enc.items()}
+        # GTE registers position_ids as a persistent=False buffer; model.to(dtype) converts
+        # it to float, corrupting integer index values. Pass explicit int64 position_ids to
+        # bypass the corrupted internal buffer entirely.
+        enc['position_ids'] = self._torch.arange(
+            enc['input_ids'].shape[1], dtype=self._torch.long, device=self._model.device,
+        ).unsqueeze(0)
         with self._torch.no_grad():
             out = self._model(**enc, return_dict=True)
-        token_weights = self._torch.relu(out.logits).squeeze(-1)
-        tw = token_weights[0].cpu().numpy().tolist()
+        logits = out.logits.detach().cpu()
+        token_weights = self._torch.relu(logits).squeeze(-1)
+        tw = token_weights[0].numpy().tolist()
         ids = enc['input_ids'][0].cpu().numpy().tolist()
         return _token_weights_to_sparse(tw, ids, self._unused_tokens, self._tokenizer.decode)
 

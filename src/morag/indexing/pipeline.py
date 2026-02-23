@@ -88,6 +88,7 @@ class IndexingPipeline:
 
         Возвращает обработанный документ или None если документ актуален.
         """
+        logger.info('Preparing document: %s (size=%d)', document.id, document.size)
         existing = await self._doc_repo.get_by_id(document.id)
 
         if existing is not None:
@@ -96,11 +97,11 @@ class IndexingPipeline:
                 if status is not None:
                     count, total = status
                     if count == total:
-                        logger.debug('Document is up to date, skipping: %s', document.id)
+                        logger.info('Document up to date, skipping: %s', document.id)
                         return None
 
             # Документ изменился или индексация была прервана — удаляем каскадно
-            logger.debug('Re-indexing document: %s', document.id)
+            logger.info('Re-indexing document: %s', document.id)
             await self._chunk_repo.delete_by_doc_id(document.id)
             await self._doc_repo.delete(document.id)
 
@@ -110,7 +111,7 @@ class IndexingPipeline:
 
         # Сохраняем документ до начала чанкования
         await self._doc_repo.upsert(document)
-        logger.debug('Document saved: %s', document.id)
+        logger.info('Document saved: %s', document.id)
 
         return document
 
@@ -122,22 +123,29 @@ class IndexingPipeline:
 
     async def _chunk_document(self, document: Document) -> None:
         """Разбить документ на чанки и сохранить в Qdrant."""
+        logger.info('Chunking document: %s', document.id)
+
         # Pre-split на блоки + жадная упаковка
         blocks = self._splitter.split(document.text)
         packs = pack_blocks(blocks, self._token_counter, self._block_limit)
+        logger.info('  Pre-split: %d block(s) -> %d pack(s)', len(blocks), len(packs))
 
         # Chunker: каждая пачка → список текстов чанков
         chunk_texts: list[str] = []
-        for pack in packs:
+        for i, pack in enumerate(packs):
             block_text = '\n\n'.join(pack)
-            chunk_texts.extend(await self._chunker.chunk(block_text))
+            logger.info('  Chunking pack %d/%d (%d chars)...', i + 1, len(packs), len(block_text))
+            new_chunks = await self._chunker.chunk(block_text)
+            logger.info('    -> %d chunk(s)', len(new_chunks))
+            chunk_texts.extend(new_chunks)
 
         total = len(chunk_texts)
-        logger.debug('Document %s: %d block(s) -> %d chunk(s)', document.id, len(packs), total)
+        logger.info('  Total chunks: %d', total)
 
         # Собираем Chunk-объекты с order/total, генерируем context, применяем процессоры
         chunks: list[Chunk] = []
         for order, text in enumerate(chunk_texts):
+            logger.info('  Processing chunk %d/%d: %s...', order + 1, total, repr(text[:60]))
             context = await self._context_generator.generate(document.text, text)
 
             chunk = Chunk(
@@ -153,6 +161,12 @@ class IndexingPipeline:
             for processor in self._chunk_processors:
                 chunk = processor.process(chunk, document)
 
+            vec_summary = ', '.join(
+                f"{k}:dense({len(v)})" if isinstance(v, list)
+                else f"{k}:sparse({len(v['indices'])})"
+                for k, v in chunk.vectors.items()
+            )
+            logger.info('    vectors: [%s]', vec_summary)
             chunks.append(chunk)
 
         await self._chunk_repo.upsert_batch(chunks)
