@@ -1,6 +1,6 @@
 sources:
   markdown:
-    path: /path/to/your/docs
+    path: examples              # готовые тестовые документы; замените на свой путь
 
 qdrant:
   host: localhost
