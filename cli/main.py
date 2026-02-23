@@ -28,7 +28,7 @@ from morag.storage.repository import ChunkRepository, DocRepository
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s  %(levelname)-8s  %(message)s',
+    format='%(asctime)s  %(levelname)-8s  %(name)s  %(message)s',
     datefmt='%H:%M:%S',
 )
 logger = logging.getLogger(__name__)
@@ -41,11 +41,13 @@ async def cmd_index(config_path: str) -> None:
     logger.info('Connecting to Qdrant %s:%d', config.qdrant.host, config.qdrant.port)
     client = AsyncQdrantClient(host=config.qdrant.host, port=config.qdrant.port)
 
+    embedder = FridaEmbedder(config.indexing.dense_model)
+
     logger.info('Ensuring collections...')
     await ensure_docs_collection(client, config.qdrant.collection_docs)
     await ensure_chunks_collection(
         client, config.qdrant.collection_chunks,
-        vectors_config=frida_vectors_config(),
+        vectors_config=frida_vectors_config(embedder.dim),
         sparse_vectors_config=gte_sparse_vectors_config(),
     )
 
@@ -63,9 +65,7 @@ async def cmd_index(config_path: str) -> None:
     context_generator = (
         LLMContextGenerator(llm_client) if config.indexing.context == 'llm' else NoopContextGenerator()
     )
-
-    embedder = FridaEmbedder(config.indexing.dense_model)
-    sparse_embedder = GteSparseEmbedder(config.indexing.sparse_model)
+    sparse_embedder = GteSparseEmbedder(config.indexing.sparse_model, device=config.indexing.sparse_device)
     chunk_processors = [
         DenseEmbeddingProcessor(embedder),
         SparseEmbeddingProcessor(sparse_embedder),
@@ -96,10 +96,18 @@ def main() -> None:
         help='Путь к конфигу (по умолчанию: config.yml)',
     )
 
+    parser.add_argument(
+        '-v', '--debug', action='store_true',
+        help='Включить DEBUG-логирование (показывает сырые ответы LLM)',
+    )
+
     subparsers = parser.add_subparsers(dest='command', required=True)
     subparsers.add_parser('index', help='Индексировать документы из источника')
 
     args = parser.parse_args()
+
+    if args.debug:
+        logging.getLogger('morag').setLevel(logging.DEBUG)
 
     if args.command == 'index':
         asyncio.run(cmd_index(args.config))
