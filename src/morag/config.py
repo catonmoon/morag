@@ -33,6 +33,7 @@ class IndexingConfig(BaseModel):
     block_limit: int = 32000
     dense_model: str = 'ai-forever/FRIDA'  # модель для dense-эмбеддингов
     sparse_model: str = 'Alibaba-NLP/gte-multilingual-base'  # модель для sparse-эмбеддингов
+    sparse_device: str | None = None  # устройство для sparse-модели: 'cpu' | 'mps' | 'cuda' | None (авто)
 
 
 class Config(BaseModel):

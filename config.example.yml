@@ -19,3 +19,4 @@ indexing:
   block_limit: 32000
   dense_model: ai-forever/FRIDA
   sparse_model: Alibaba-NLP/gte-multilingual-base
+  # sparse_device: mps            # cpu | mps | cuda | (not set = auto-detect)

@@ -40,8 +40,9 @@ class LLMClient:
             response_format={'type': 'json_object'},
         )
         content = response.choices[0].message.content or '{}'
+        logger.debug('LLM raw response: %s', content)
         try:
             return json.loads(content)
         except json.JSONDecodeError as e:
-            logger.warning('LLM returned invalid JSON: %s', e)
+            logger.warning('LLM returned invalid JSON: %s\nRaw content: %s', e, content)
             raise ValueError(f'LLM returned invalid JSON: {e}') from e
