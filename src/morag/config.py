@@ -31,6 +31,7 @@ class IndexingConfig(BaseModel):
     chunker: str = 'passthrough'         # 'passthrough' | 'llm'
     context: str = 'noop'               # 'noop' | 'llm'
     block_limit: int = 32000
+    llm_context_window: int = 32768     # контекстное окно LLM (токенов); используется для расчёта безопасного лимита блока
     dense_model: str = 'ai-forever/FRIDA'  # модель для dense-эмбеддингов
     sparse_model: str = 'Alibaba-NLP/gte-multilingual-base'  # модель для sparse-эмбеддингов
     sparse_device: str | None = None  # устройство для sparse-модели: 'cpu' | 'mps' | 'cuda' | None (авто)

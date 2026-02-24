@@ -16,7 +16,8 @@ llm:
 indexing:
   chunker: passthrough          # passthrough | llm
   context: noop                 # noop | llm
-  block_limit: 32000
+  block_limit: 32000            # в llm-режиме автоматически ограничивается: min(block_limit, (llm_context_window - 512) / 2)
+  llm_context_window: 32768     # контекстное окно LLM в токенах (qwen2.5: 32768, llama3: 8192, ...)
   dense_model: ai-forever/FRIDA
   sparse_model: Alibaba-NLP/gte-multilingual-base
   # sparse_device: mps            # cpu | mps | cuda | (not set = auto-detect)

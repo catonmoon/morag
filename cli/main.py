@@ -71,16 +71,31 @@ async def cmd_index(config_path: str) -> None:
         SparseEmbeddingProcessor(sparse_embedder),
     ]
 
+    # В LLM-режиме блок + ответ LLM должны влезть в контекстное окно.
+    # Ответ ≈ такого же размера как вход, поэтому безопасный лимит: (context_window - overhead) / 2.
+    _LLM_PROMPT_OVERHEAD = 512  # токенов на системный промпт + запас
+    if config.indexing.chunker == 'llm':
+        llm_safe_limit = (config.indexing.llm_context_window - _LLM_PROMPT_OVERHEAD) // 2
+        block_limit = min(config.indexing.block_limit, llm_safe_limit)
+        if block_limit < config.indexing.block_limit:
+            logger.info(
+                'LLM block limit capped: %d → %d (context_window=%d, overhead=%d)',
+                config.indexing.block_limit, block_limit,
+                config.indexing.llm_context_window, _LLM_PROMPT_OVERHEAD,
+            )
+    else:
+        block_limit = config.indexing.block_limit
+
     pipeline = IndexingPipeline(
         doc_repo, chunk_repo,
         chunker=chunker,
         context_generator=context_generator,
         chunk_processors=chunk_processors,
-        block_limit=config.indexing.block_limit,
+        block_limit=block_limit,
     )
 
     logger.info('Source: %s', config.sources.markdown.path)
-    logger.info('Chunker: %s, context: %s', config.indexing.chunker, config.indexing.context)
+    logger.info('Chunker: %s, context: %s, block_limit: %d', config.indexing.chunker, config.indexing.context, block_limit)
     await pipeline.run(source)
 
     await client.close()
