@@ -15,3 +15,6 @@ coverage_html/
 # Env
 .env
 config.yml
+
+# Claude Code internal instructions — never commit
+CLAUDE.md
