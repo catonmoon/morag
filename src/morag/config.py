@@ -6,12 +6,23 @@ import yaml
 from pydantic import BaseModel
 
 
-class MarkdownSourceConfig(BaseModel):
+class LocalDocumentsConfig(BaseModel):
     path: str
 
 
+class ConfluenceConfig(BaseModel):
+    url: str
+    username: str
+    password: str | None = None        # on-premise
+    api_token: str | None = None       # Atlassian Cloud
+    spaces: list[str] = []             # список space key для индексации; пусто — все доступные
+    ancestor_ids: list[str] = []       # фильтр по ancestor page id; пусто — без фильтра
+    skip_ancestor_ids: list[str] = []  # исключить страницы и всех их потомков
+
+
 class SourcesConfig(BaseModel):
-    markdown: MarkdownSourceConfig
+    local_documents: LocalDocumentsConfig | None = None
+    confluence: ConfluenceConfig | None = None
 
 
 class QdrantConfig(BaseModel):
@@ -41,6 +52,7 @@ class Config(BaseModel):
     sources: SourcesConfig
     qdrant: QdrantConfig = QdrantConfig()
     llm: LLMConfig = LLMConfig()
+    llm_vision: LLMConfig | None = None  # multimodal LLM для распознавания изображений (опционально)
     indexing: IndexingConfig = IndexingConfig()
 
 

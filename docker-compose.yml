@@ -3,8 +3,8 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.17.0
     ports:
-      - "6335:6333"   # REST API + веб-дашборд: http://localhost:6335/dashboard
-      - "6336:6334"   # gRPC
+      - "6333:6333"   # REST API + веб-дашборд: http://localhost:6333/dashboard
+      - "6334:6334"   # gRPC
     volumes:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
@@ -27,5 +27,84 @@ services:
       - ./data:/app/data:ro                       # папка с MD-документами
     restart: "no"   # разовый запуск: проиндексировал и вышел
 
+  embedder-frida:
+    build:
+      context: services/embedder_frida
+      network: host
+    ports:
+      - "8082:8082"
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  embedder-gte:
+    build:
+      context: services/embedder_gte
+      network: host
+    ports:
+      - "8081:8081"
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  pipelines:
+    build:
+      context: services/pipeline
+    ports:
+      - "9099:9099"
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION=chunks
+      - QDRANT_NUM_RESULTS=50
+      - NEIGHBOR_WINDOW=1
+      - SPARSE_EMBED_URL=http://embedder-gte:8081
+      - DENSE_EMBED_URL=http://embedder-frida:8082
+      - LLM_URL=${LLM_URL:-http://host.docker.internal:11434/v1}
+      - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
+      - LLM_API_KEY=${LLM_API_KEY:-ollama}
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      embedder-frida:
+        condition: service_healthy
+      embedder-gte:
+        condition: service_healthy
+    restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:latest
+    profiles:
+      - webui
+    ports:
+      - "3000:8080"
+    environment:
+      - OPENAI_API_BASE_URL=http://pipelines:9099
+      - OPENAI_API_KEY=0p3n-w3bu!
+      - WEBUI_AUTH=False
+    depends_on:
+      - pipelines
+    volumes:
+      - open_webui_data:/app/backend/data
+    restart: unless-stopped
+
 volumes:
   qdrant_data:
+  open_webui_data:

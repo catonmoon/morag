@@ -142,7 +142,7 @@ class GteSparseEmbedder(SparseEmbedder):
             self._device = torch.device('cpu')
 
         logger.info('Loading sparse embedding model: %s on %s', model_name, self._device)
-        self._tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self._tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         # Explicit fp16 on CUDA avoids buffer corruption from "torch_dtype: float16" in model config.
         # On CPU float16 is unsupported for some ops; use float32.
         model_dtype = torch.float16 if self._device.type == 'cuda' else torch.float32

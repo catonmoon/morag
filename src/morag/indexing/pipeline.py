@@ -71,7 +71,7 @@ class IndexingPipeline:
         Возвращает только те документы которые требуют (пере)индексации.
         Актуальные документы пропускаются.
         """
-        documents = source.load()
+        documents = await source.load()
         logger.info('Loaded %d document(s) from source', len(documents))
 
         to_index: list[Document] = []

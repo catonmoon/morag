@@ -1,6 +1,7 @@
 # Project data
 data/
 volumes/
+old/
 
 # Python
 __pycache__/

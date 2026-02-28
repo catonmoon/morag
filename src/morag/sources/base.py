@@ -17,6 +17,8 @@ class Document:
     source_type: str                           # "markdown" | "confluence"
     size: int = 0                              # размер файла в байтах
     indexed_at: datetime | None = None        # дата индексации (выставляется репозиторием при upsert)
+    creator: str | None = None                # автор документа (из frontmatter / git / Confluence history)
+    created_at: datetime | None = None        # дата создания документа
     payload: dict = field(default_factory=dict)  # метаданные от DocumentProcessor-ов
 
 
@@ -40,6 +42,6 @@ class Source(ABC):
     """Абстрактный источник документов."""
 
     @abstractmethod
-    def load(self) -> list[Document]:
+    async def load(self) -> list[Document]:
         """Загрузить все документы из источника."""
         ...

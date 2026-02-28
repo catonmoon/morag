@@ -1,6 +1,14 @@
 sources:
-  markdown:
+  local_documents:
     path: examples              # готовые тестовые документы; замените на свой путь
+  confluence:
+    url: https://your-company.atlassian.net   # или https://confluence.your-company.com для on-premise
+    username: your-email@example.com
+    api_token: your-api-token                 # Atlassian Cloud: токен из id.atlassian.com/manage-profile/security/api-tokens
+    # password: your-password                 # on-premise: пароль (вместо api_token)
+    # spaces: [ML, DEV]                       # индексировать только эти space key; пусто — все доступные
+    # ancestor_ids: ["123456", "789012"]       # индексировать только потомков этих страниц (приоритет над spaces)
+    # skip_ancestor_ids: ["333444"]            # исключить эти страницы и всех их потомков
 
 qdrant:
   host: localhost
@@ -12,6 +20,13 @@ llm:
   base_url: http://localhost:11434/v1
   model: qwen2.5-coder:7b
   api_key: ollama
+
+# llm_vision — multimodal LLM для описания изображений со страниц Confluence (опционально)
+# Если не задан, изображения пропускаются при индексации
+# llm_vision:
+#   base_url: http://localhost:11434/v1
+#   model: llava:7b
+#   api_key: ollama
 
 indexing:
   chunker: passthrough          # passthrough | llm

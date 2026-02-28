@@ -17,7 +17,7 @@ class MarkdownSource(Source):
     def __init__(self, root: Path | str) -> None:
         self._root = Path(root).resolve()
 
-    def load(self) -> list[Document]:
+    async def load(self) -> list[Document]:
         """Загрузить все MD-файлы из корневой директории."""
         docs: list[Document] = []
 

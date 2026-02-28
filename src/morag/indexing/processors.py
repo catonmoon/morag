@@ -65,3 +65,18 @@ class SparseEmbeddingProcessor(ChunkProcessor):
         indices, values = self._embedder.embed(chunk.text)
         chunk.vectors['keywords'] = {'indices': indices, 'values': values}
         return chunk
+
+
+class MetadataProcessor(ChunkProcessor):
+    """Копирует creator и created_at из Document в chunk.payload.
+
+    Позволяет использовать метаданные автора и даты создания
+    в результатах поиска без дополнительных запросов к коллекции docs.
+    """
+
+    def process(self, chunk: Chunk, document: Document) -> Chunk:
+        if document.creator is not None:
+            chunk.payload['creator'] = document.creator
+        if document.created_at is not None:
+            chunk.payload['created_at'] = document.created_at.isoformat()
+        return chunk

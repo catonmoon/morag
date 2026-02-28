@@ -13,6 +13,8 @@ dependencies = [
     "pyyaml>=6.0",
     "openai>=1.0.0",
     "sentence-transformers>=3.0.0",
+    "atlassian-python-api>=3.41.0",
+    "markdownify>=0.13.0",
 ]
 
 

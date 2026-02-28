@@ -26,8 +26,9 @@ def _doc_id_to_point_id(doc_id: str) -> str:
 
 def _payload_to_document(payload: dict) -> Document:
     """Восстановить Document из Qdrant payload."""
-    core_keys = {'id', 'path', 'text', 'updated_at', 'source_type', 'size', 'indexed_at'}
+    core_keys = {'id', 'path', 'text', 'updated_at', 'source_type', 'size', 'indexed_at', 'creator', 'created_at'}
     indexed_at_raw = payload.get('indexed_at')
+    created_at_raw = payload.get('created_at')
     return Document(
         id=payload['id'],
         path=payload['path'],
@@ -36,6 +37,8 @@ def _payload_to_document(payload: dict) -> Document:
         source_type=payload['source_type'],
         size=payload.get('size', 0),
         indexed_at=datetime.fromisoformat(indexed_at_raw) if indexed_at_raw else None,
+        creator=payload.get('creator'),
+        created_at=datetime.fromisoformat(created_at_raw) if created_at_raw else None,
         payload={k: v for k, v in payload.items() if k not in core_keys},
     )
 
@@ -73,6 +76,10 @@ class DocRepository:
             'indexed_at': datetime.now(timezone.utc).isoformat(),
             **document.payload,
         }
+        if document.creator is not None:
+            payload['creator'] = document.creator
+        if document.created_at is not None:
+            payload['created_at'] = document.created_at.isoformat()
         await self._client.upsert(
             collection_name=self._collection,
             points=[PointStruct(id=point_id, vector={}, payload=payload)],

@@ -28,6 +28,31 @@ class LLMClient:
         )
         return response.choices[0].message.content or ''
 
+    async def complete_vision(self, prompt: str, image_base64: str, media_type: str = 'image/png') -> str:
+        """Описать изображение через multimodal LLM (Vision).
+
+        Принимает изображение в формате base64 и текстовый запрос.
+        Возвращает текстовое описание изображения.
+        """
+        messages = [
+            {
+                'role': 'user',
+                'content': [
+                    {
+                        'type': 'image_url',
+                        'image_url': {'url': f'data:{media_type};base64,{image_base64}'},
+                    },
+                    {'type': 'text', 'text': prompt},
+                ],
+            }
+        ]
+        response = await self._client.chat.completions.create(
+            model=self._model,
+            messages=messages,
+            temperature=0.0,
+        )
+        return response.choices[0].message.content or ''
+
     async def complete_json(self, messages: list[dict]) -> dict:
         """Send a chat completion request expecting a JSON response.
 
