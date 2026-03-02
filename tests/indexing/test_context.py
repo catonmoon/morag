@@ -61,11 +61,12 @@ class TestLLMContextGenerator:
         messages = mock_client.complete.call_args[0][0]
         assert 'Уникальный текст чанка' in messages[0]['content']
 
-    async def test_uses_temperature_03(self, generator, mock_client):
+    async def test_uses_deterministic_params(self, generator, mock_client):
+        from morag.indexing.context import _LLM_PARAMS
         mock_client.complete.return_value = 'ok'
         await generator.generate('Документ', 'Чанк')
         _, kwargs = mock_client.complete.call_args
-        assert kwargs.get('temperature') == 0.3
+        assert kwargs.get('params') == _LLM_PARAMS
 
     async def test_fallback_on_exception(self, generator, mock_client):
         mock_client.complete.side_effect = Exception('network error')

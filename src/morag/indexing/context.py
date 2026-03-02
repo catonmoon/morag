@@ -4,8 +4,14 @@ import logging
 from abc import ABC, abstractmethod
 
 from morag.indexing.token_counter import TokenCounter, TiktokenCounter
+from morag.llm.client import GenerationParams
 
 logger = logging.getLogger(__name__)
+
+_LLM_PARAMS = GenerationParams(
+    temperature=0.0, top_p=1.0, top_k=0,
+    frequency_penalty=0.0, presence_penalty=0.0, seed=42,
+)
 
 _PROMPT_TEMPLATE = """\
 Ты — ассистент, который помогает дать контекст смысловым фрагментам документов.
@@ -92,10 +98,7 @@ class LLMContextGenerator(ContextGenerator):
         prompt = _PROMPT_TEMPLATE.format(doc_text=doc_text, chunk_text=chunk_text)
         messages = [{'role': 'user', 'content': prompt}]
         try:
-            kwargs: dict = {'temperature': 0.3}
-            if self._max_output_tokens is not None:
-                kwargs['max_tokens'] = self._max_output_tokens
-            return await self._client.complete(messages, **kwargs)
+            return await self._client.complete(messages, params=_LLM_PARAMS, max_tokens=self._max_output_tokens)
         except Exception:
             logger.warning('LLMContextGenerator: failed to generate context, returning empty string')
             return ''

@@ -2,10 +2,23 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 
 from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class GenerationParams:
+    """Параметры семплинга для LLM."""
+
+    temperature: float = 0.0
+    top_p: float = 1.0
+    top_k: int = 0
+    frequency_penalty: float = 0.0
+    presence_penalty: float = 0.0
+    seed: int | None = None
 
 
 class LLMClient:
@@ -20,10 +33,26 @@ class LLMClient:
         self._model = model
 
     async def complete(
-        self, messages: list[dict], temperature: float = 0.0, max_tokens: int | None = None
+        self,
+        messages: list[dict],
+        params: GenerationParams | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         """Send a chat completion request and return the response text."""
-        kwargs: dict = dict(model=self._model, messages=messages, temperature=temperature)
+        if params is None:
+            params = GenerationParams()
+        kwargs: dict = dict(
+            model=self._model,
+            messages=messages,
+            temperature=params.temperature,
+            top_p=params.top_p,
+            frequency_penalty=params.frequency_penalty,
+            presence_penalty=params.presence_penalty,
+        )
+        if params.seed is not None:
+            kwargs['seed'] = params.seed
+        if params.top_k != 0:
+            kwargs['extra_body'] = {'top_k': params.top_k}
         if max_tokens is not None:
             kwargs['max_tokens'] = max_tokens
         response = await self._client.chat.completions.create(**kwargs)
@@ -54,20 +83,37 @@ class LLMClient:
         )
         return response.choices[0].message.content or ''
 
-    async def complete_json(self, messages: list[dict], schema: dict, schema_name: str = 'response') -> dict:
+    async def complete_json(
+        self,
+        messages: list[dict],
+        schema: dict,
+        schema_name: str = 'response',
+        params: GenerationParams | None = None,
+    ) -> dict:
         """Send a chat completion request expecting a JSON response matching the given schema.
 
         Passes response_format={"type": "json_schema", ...} to enforce structured output.
         Raises ValueError if the response cannot be parsed.
         """
-        response = await self._client.chat.completions.create(
+        if params is None:
+            params = GenerationParams()
+        kwargs: dict = dict(
             model=self._model,
             messages=messages,
             response_format={
                 'type': 'json_schema',
                 'json_schema': {'name': schema_name, 'schema': schema},
             },
+            temperature=params.temperature,
+            top_p=params.top_p,
+            frequency_penalty=params.frequency_penalty,
+            presence_penalty=params.presence_penalty,
         )
+        if params.seed is not None:
+            kwargs['seed'] = params.seed
+        if params.top_k != 0:
+            kwargs['extra_body'] = {'top_k': params.top_k}
+        response = await self._client.chat.completions.create(**kwargs)
         content = response.choices[0].message.content or '{}'
         logger.debug('LLM raw response: %s', content)
         try:

@@ -59,25 +59,31 @@ class TestLLMClient:
         assert result == ''
 
     async def test_complete_json_parses_json(self, client, mock_openai):
+        schema = {'type': 'object', 'properties': {'key': {'type': 'string'}}, 'required': ['key']}
         mock_openai.chat.completions.create.return_value = make_completion('{"key": "value"}')
-        result = await client.complete_json([{'role': 'user', 'content': 'return json'}])
+        result = await client.complete_json([{'role': 'user', 'content': 'return json'}], schema=schema)
         assert result == {'key': 'value'}
 
     async def test_complete_json_requests_json_format(self, client, mock_openai):
+        schema = {'type': 'object', 'properties': {}, 'required': []}
         mock_openai.chat.completions.create.return_value = make_completion('{}')
-        await client.complete_json([{'role': 'user', 'content': 'return json'}])
+        await client.complete_json([{'role': 'user', 'content': 'return json'}], schema=schema, schema_name='test')
 
         call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
-        assert call_kwargs['response_format'] == {'type': 'json_object'}
+        assert call_kwargs['response_format']['type'] == 'json_schema'
+        assert call_kwargs['response_format']['json_schema']['name'] == 'test'
+        assert call_kwargs['response_format']['json_schema']['schema'] == schema
 
     async def test_complete_json_raises_on_invalid_json(self, client, mock_openai):
+        schema = {'type': 'object', 'properties': {}, 'required': []}
         mock_openai.chat.completions.create.return_value = make_completion('not json at all')
         with pytest.raises(ValueError, match='invalid JSON'):
-            await client.complete_json([{'role': 'user', 'content': 'return json'}])
+            await client.complete_json([{'role': 'user', 'content': 'return json'}], schema=schema)
 
     async def test_complete_json_returns_empty_dict_on_empty_content(self, client, mock_openai):
+        schema = {'type': 'object', 'properties': {}, 'required': []}
         mock_openai.chat.completions.create.return_value = make_completion(None)
-        result = await client.complete_json([{'role': 'user', 'content': 'return json'}])
+        result = await client.complete_json([{'role': 'user', 'content': 'return json'}], schema=schema)
         assert result == {}
 
     async def test_client_passes_base_url_and_api_key(self):

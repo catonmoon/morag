@@ -88,3 +88,10 @@ class TestLLMChunker:
         messages = mock_client.complete_json.call_args[0][0]
         system_message = next(m for m in messages if m['role'] == 'system')
         assert len(system_message['content']) > 0
+
+    async def test_passes_deterministic_params(self, chunker, mock_client):
+        from morag.indexing.chunker import _LLM_PARAMS
+        mock_client.complete_json.return_value = {'chunks': ['ok']}
+        await chunker.chunk('Текст')
+        _, kwargs = mock_client.complete_json.call_args
+        assert kwargs.get('params') == _LLM_PARAMS

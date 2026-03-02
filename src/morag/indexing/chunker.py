@@ -3,7 +3,14 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 
+from morag.llm.client import GenerationParams
+
 logger = logging.getLogger(__name__)
+
+_LLM_PARAMS = GenerationParams(
+    temperature=0.0, top_p=1.0, top_k=0,
+    frequency_penalty=0.0, presence_penalty=0.0, seed=42,
+)
 
 _CHUNKS_SCHEMA = {
     'type': 'object',
@@ -109,7 +116,7 @@ class LLMChunker(Chunker):
     async def _try_chunk(self, messages: list[dict], attempt: int) -> list[str] | None:
         """Одна попытка чанкинга. Возвращает список чанков или None при неудаче."""
         try:
-            data = await self._client.complete_json(messages, schema=_CHUNKS_SCHEMA, schema_name='chunks')
+            data = await self._client.complete_json(messages, schema=_CHUNKS_SCHEMA, schema_name='chunks', params=_LLM_PARAMS)
         except ValueError:
             logger.warning('LLMChunker: attempt %d — invalid JSON response', attempt)
             return None
