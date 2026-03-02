@@ -274,6 +274,46 @@ class TestFixedSizeSplitter:
         for chunk in chunks:
             assert all(w == 'слово' for w in chunk.split())
 
+    def test_split_oversized_table_by_rows_not_sentences(self, counter):
+        """Таблица с точками внутри ячеек не должна разрезаться по предложениям."""
+        # Ячейка содержит 'альт. поход)' — ровно такой же паттерн, что ломал реальные данные.
+        # sentence splitter разрезал бы строку таблицы на 'альт.' и 'поход)'.
+        # Ожидаем: каждая строка таблицы остаётся целой.
+        rows = (
+            '| Айвазян Артур | Разработка | Получение ИНН через сайт (альт. поход), сервис Саруман |\n'
+            '| Михайлов Максим | Разработка | Другая задача |\n'
+            '| Петров Владимир | Разработка |  |'
+        )
+        table = f'| Команда | Роль | Задача |\n|---|---|---|\n{rows}'
+        # Лимит меньше всей таблицы, но больше одной строки с заголовком
+        splitter = FixedSizeSplitter(counter=counter, limit=30)
+        chunks = splitter.split(table)
+        # Строка с 'альт. поход)' должна быть в одном чанке целиком
+        row_with_dot = '| Айвазян Артур | Разработка | Получение ИНН через сайт (альт. поход), сервис Саруман |'
+        matching = [c for c in chunks if row_with_dot in c]
+        assert len(matching) == 1, f'Строка таблицы разорвана или потеряна. Чанки:\n' + '\n---\n'.join(chunks)
+
+    def test_split_table_chunks_all_have_header(self, counter):
+        """После разбивки таблицы каждый чанк содержит шапку."""
+        rows = '\n'.join(f'| Row {i} | Value {i} |' for i in range(1, 20))
+        table = f'| Name | Value |\n|---|---|\n{rows}'
+        splitter = FixedSizeSplitter(counter=counter, limit=40)
+        chunks = splitter.split(table)
+        assert len(chunks) > 1
+        for chunk in chunks:
+            assert '| Name | Value |' in chunk, f'Шапка отсутствует в чанке:\n{chunk}'
+            assert '|---|---|' in chunk, f'Разделитель отсутствует в чанке:\n{chunk}'
+
+    def test_is_table_detects_markdown_table(self):
+        table = '| A | B |\n|---|---|\n| 1 | 2 |'
+        assert FixedSizeSplitter._is_table(table) is True
+
+    def test_is_table_rejects_plain_text(self):
+        assert FixedSizeSplitter._is_table('Обычный текст без таблицы.') is False
+
+    def test_is_table_rejects_table_without_separator(self):
+        assert FixedSizeSplitter._is_table('| A | B |\n| 1 | 2 |') is False
+
 
 # ---------------------------------------------------------------------------
 # RecursiveSplitter

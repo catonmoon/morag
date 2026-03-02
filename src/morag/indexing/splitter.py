@@ -210,6 +210,9 @@ class SemanticSplitter(BlockSplitter):
 class FixedSizeSplitter(BlockSplitter):
     """Последний резерв: разбивает по абзацам, предложениям, словам и символам."""
 
+    _TABLE_ROW_RE = re.compile(r'^\s*\|')
+    _TABLE_SEP_RE = re.compile(r'^\s*\|[\s\-:|]+\|\s*$')
+
     def __init__(self, counter: TokenCounter, limit: int) -> None:
         self._counter = counter
         self._limit = limit
@@ -246,8 +249,74 @@ class FixedSizeSplitter(BlockSplitter):
 
         return chunks if chunks else [text]
 
+    @classmethod
+    def _is_table(cls, text: str) -> bool:
+        """Проверяет, является ли текст Markdown-таблицей с заголовком и разделителем."""
+        lines = text.strip().split('\n')
+        if len(lines) < 3:
+            return False
+        return (
+            bool(cls._TABLE_ROW_RE.match(lines[0]))
+            and any(cls._TABLE_SEP_RE.match(line) for line in lines[:3])
+        )
+
+    def _split_table_rows(self, text: str) -> list[str]:
+        """Разбивает Markdown-таблицу на чанки по строкам с дублированием шапки.
+
+        Возвращает [text] если таблица содержит только одну строку данных и не может
+        быть разбита дальше (сигнал для RecursiveSplitter о том, что прогресса нет).
+        """
+        lines = text.split('\n')
+        header_lines: list[str] = []
+        separator: str | None = None
+        data_rows: list[str] = []
+        phase = 'header'
+
+        for line in lines:
+            if phase == 'header':
+                if self._TABLE_SEP_RE.match(line):
+                    separator = line
+                    phase = 'data'
+                elif self._TABLE_ROW_RE.match(line):
+                    header_lines.append(line)
+            elif phase == 'data':
+                if self._TABLE_ROW_RE.match(line):
+                    data_rows.append(line)
+                else:
+                    break
+
+        if not data_rows:
+            return [text]
+
+        header_parts = header_lines + ([separator] if separator else [])
+        header_text = '\n'.join(header_parts)
+        header_tokens = self._counter.count(header_text)
+
+        chunks: list[str] = []
+        current: list[str] = []
+        current_tokens = 0
+
+        for row in data_rows:
+            row_tokens = self._counter.count(row)
+            if current and current_tokens + row_tokens + header_tokens > self._limit:
+                chunks.append(header_text + '\n' + '\n'.join(current))
+                current = [row]
+                current_tokens = row_tokens
+            else:
+                current.append(row)
+                current_tokens += row_tokens
+
+        if current:
+            chunks.append(header_text + '\n' + '\n'.join(current))
+
+        return chunks if len(chunks) > 1 else [text]
+
     def _split_oversized(self, text: str) -> list[str]:
-        """Последовательно пробует: предложения → слова → символы."""
+        """Последовательно пробует: таблица → предложения → слова → символы."""
+        if self._is_table(text):
+            result = self._split_table_rows(text)
+            if len(result) > 1:
+                return result
         sentences = [s for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
         if len(sentences) > 1:
             return self._pack_and_recurse(sentences, ' ', self._split_by_words)

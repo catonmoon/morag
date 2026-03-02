@@ -216,6 +216,8 @@ class ConfluenceSource(Source):
         for tag in soup.find_all(['script', 'style']):
             tag.decompose()
 
+        _remove_vendor_ui_blocks(soup)
+
         if self._vision_client:
             await self._replace_images_with_descriptions(soup, page_id)
 
@@ -284,6 +286,37 @@ class ConfluenceSource(Source):
         except Exception:
             logger.warning('Page %s: failed to download image: %s', page_id, src, exc_info=True)
             return None
+
+
+# Домены, характерные для UI-артефактов плагинов Confluence (Table Filter and Charts и т.п.)
+_VENDOR_UI_DOMAINS = ('docs.stiltsoft.com', 'survey.alchemer.com')
+# Теги, при достижении которых прекращаем подъём по DOM (структурные контейнеры)
+_BLOCK_STOP_TAGS = frozenset({'body', 'html', 'table', 'tr', 'td', 'th'})
+# Теги блочных контейнеров — кандидаты на удаление как корень макроса
+_BLOCK_CONTAINER_TAGS = frozenset({'div', 'section', 'aside', 'nav', 'header', 'footer', 'ul', 'ol'})
+
+
+def _remove_vendor_ui_blocks(soup: BeautifulSoup) -> None:
+    """Удалить блоки UI-артефактов плагинов по ссылкам на домены вендоров.
+
+    Ищет <a> теги с href на известные домены (stiltsoft, alchemer),
+    поднимается по DOM до наибольшего блочного предка и удаляет его целиком.
+    Это убирает мусор от макросов типа Table Filter and Charts из Confluence.
+    """
+    to_remove: set = set()
+    for a_tag in soup.find_all('a', href=True):
+        href = a_tag.get('href', '')
+        if not any(domain in href for domain in _VENDOR_UI_DOMAINS):
+            continue
+        target = a_tag
+        for parent in a_tag.parents:
+            if parent.name in _BLOCK_STOP_TAGS:
+                break
+            if parent.name in _BLOCK_CONTAINER_TAGS:
+                target = parent
+        to_remove.add(target)
+    for el in to_remove:
+        el.decompose()
 
 
 def _html_to_markdown(html: str) -> str:
