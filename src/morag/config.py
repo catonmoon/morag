@@ -18,6 +18,7 @@ class ConfluenceConfig(BaseModel):
     spaces: list[str] = []             # список space key для индексации; пусто — все доступные
     ancestor_ids: list[str] = []       # фильтр по ancestor page id; пусто — без фильтра
     skip_ancestor_ids: list[str] = []  # исключить страницы и всех их потомков
+    min_image_size_bytes: int | None = None  # пропускать изображения меньше этого размера (байт); None — без фильтрации
 
 
 class SourcesConfig(BaseModel):
@@ -43,6 +44,7 @@ class IndexingConfig(BaseModel):
     context: str = 'noop'               # 'noop' | 'llm'
     block_limit: int = 32000
     llm_context_window: int = 32768     # контекстное окно LLM (токенов); используется для расчёта безопасного лимита блока
+    context_max_output_tokens: int | None = None  # лимит токенов в ответе LLMContextGenerator; None — без ограничения
     dense_model: str = 'ai-forever/FRIDA'  # модель для dense-эмбеддингов
     sparse_model: str = 'Alibaba-NLP/gte-multilingual-base'  # модель для sparse-эмбеддингов
     sparse_device: str | None = None  # устройство для sparse-модели: 'cpu' | 'mps' | 'cuda' | None (авто)

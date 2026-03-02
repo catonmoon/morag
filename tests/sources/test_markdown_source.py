@@ -105,3 +105,72 @@ class TestMarkdownSource:
         source = MarkdownSource(tmp_path)
         docs = await source.load()
         assert docs[0].text == content
+
+
+class TestMarkdownSourceGetMetadata:
+    async def test_returns_stubs_with_empty_text(self, source):
+        stubs = await source.get_metadata()
+        assert all(d.text == '' for d in stubs)
+
+    async def test_same_count_as_load(self, source):
+        stubs = await source.get_metadata()
+        docs = await source.load()
+        assert len(stubs) == len(docs)
+
+    async def test_stubs_have_correct_ids(self, source):
+        stubs = await source.get_metadata()
+        ids = {s.id for s in stubs}
+        assert 'overview.md' in ids
+        assert 'changelog.md' in ids
+
+    async def test_stubs_source_type_is_markdown(self, source):
+        stubs = await source.get_metadata()
+        assert all(s.source_type == 'markdown' for s in stubs)
+
+    async def test_stubs_size_matches_load(self, source):
+        stubs = await source.get_metadata()
+        docs = await source.load()
+        stubs_by_id = {s.id: s for s in stubs}
+        for doc in docs:
+            assert stubs_by_id[doc.id].size == doc.size
+
+    async def test_stubs_updated_at_matches_load(self, source):
+        stubs = await source.get_metadata()
+        docs = await source.load()
+        stubs_by_id = {s.id: s for s in stubs}
+        for doc in docs:
+            assert stubs_by_id[doc.id].updated_at == doc.updated_at
+
+    async def test_empty_directory_returns_empty_list(self, tmp_path):
+        source = MarkdownSource(tmp_path)
+        assert await source.get_metadata() == []
+
+    async def test_stubs_are_sorted(self, source):
+        stubs = await source.get_metadata()
+        ids = [s.id for s in stubs]
+        assert ids == sorted(ids)
+
+
+class TestMarkdownSourceLoadOne:
+    async def test_returns_full_document(self, source):
+        doc = await source.load_one('overview.md')
+        assert doc is not None
+        assert doc.id == 'overview.md'
+        assert len(doc.text) > 0
+
+    async def test_text_matches_file_content(self, tmp_path):
+        content = '# Тест\n\nТекст файла.'
+        (tmp_path / 'test.md').write_text(content, encoding='utf-8')
+        source = MarkdownSource(tmp_path)
+        doc = await source.load_one('test.md')
+        assert doc is not None
+        assert doc.text == content
+
+    async def test_returns_none_for_nonexistent_id(self, source):
+        doc = await source.load_one('nonexistent.md')
+        assert doc is None
+
+    async def test_nested_path(self, source):
+        doc = await source.load_one('api/endpoints.md')
+        assert doc is not None
+        assert doc.id == 'api/endpoints.md'

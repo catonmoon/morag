@@ -24,6 +24,28 @@ def make_document(doc_id: str = 'test.md', updated_at: datetime | None = None, *
     return Document(**defaults)
 
 
+def make_stub(doc_id: str = 'test.md', updated_at: datetime | None = None, **kwargs) -> Document:
+    """Стаб метаданных документа (text='')."""
+    defaults = dict(
+        id=doc_id,
+        path=doc_id,
+        text='',
+        updated_at=updated_at or datetime(2024, 1, 1, tzinfo=timezone.utc),
+        source_type='markdown',
+        size=1024,
+    )
+    defaults.update(kwargs)
+    return Document(**defaults)
+
+
+def setup_source(source: MagicMock, docs: list[Document]) -> None:
+    """Настроить мок источника: get_metadata возвращает стабы, load_one — полные документы."""
+    stubs = [make_stub(d.id, d.updated_at, size=d.size, source_type=d.source_type) for d in docs]
+    source.get_metadata.return_value = stubs
+    docs_by_id = {d.id: d for d in docs}
+    source.load_one.side_effect = lambda doc_id: docs_by_id.get(doc_id)
+
+
 @pytest.fixture
 def doc_repo() -> AsyncMock:
     return AsyncMock(spec=DocRepository)
@@ -49,7 +71,7 @@ class TestIndexingPipeline:
         doc_repo.get_by_id.return_value = None
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [make_document()]
+        setup_source(source, [make_document()])
 
         result = await pipeline.index_source(source)
 
@@ -63,13 +85,14 @@ class TestIndexingPipeline:
         chunk_repo.get_index_status.return_value = (3, 3)
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [make_document(updated_at=ts, size=1024)]
+        source.get_metadata.return_value = [make_stub(updated_at=ts, size=1024)]
 
         result = await pipeline.index_source(source)
 
         assert result == []
         doc_repo.upsert.assert_not_called()
         chunk_repo.delete_by_doc_id.assert_not_called()
+        source.load_one.assert_not_called()
 
     async def test_reindexes_when_updated_at_changed(self, pipeline, doc_repo, chunk_repo):
         """Документ с изменённым updated_at должен быть переиндексирован."""
@@ -79,7 +102,7 @@ class TestIndexingPipeline:
         doc_repo.get_by_id.return_value = make_document(updated_at=old_ts)
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [make_document(updated_at=new_ts)]
+        setup_source(source, [make_document(updated_at=new_ts)])
 
         result = await pipeline.index_source(source)
 
@@ -94,7 +117,7 @@ class TestIndexingPipeline:
         doc_repo.get_by_id.return_value = make_document(updated_at=ts, size=1024)
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [make_document(updated_at=ts, size=2048)]
+        setup_source(source, [make_document(updated_at=ts, size=2048)])
 
         result = await pipeline.index_source(source)
 
@@ -110,7 +133,7 @@ class TestIndexingPipeline:
         chunk_repo.get_index_status.return_value = (2, 5)  # неполная индексация
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [make_document(updated_at=ts)]
+        setup_source(source, [make_document(updated_at=ts)])
 
         result = await pipeline.index_source(source)
 
@@ -124,7 +147,7 @@ class TestIndexingPipeline:
         chunk_repo.get_index_status.return_value = None
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [make_document(updated_at=ts)]
+        setup_source(source, [make_document(updated_at=ts)])
 
         result = await pipeline.index_source(source)
 
@@ -142,7 +165,7 @@ class TestIndexingPipeline:
         pipeline_with_proc = IndexingPipeline(doc_repo, chunk_repo, doc_processors=[processor])
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [make_document()]
+        setup_source(source, [make_document()])
 
         result = await pipeline_with_proc.index_source(source)
 
@@ -167,7 +190,7 @@ class TestIndexingPipeline:
         p = IndexingPipeline(doc_repo, chunk_repo, doc_processors=chain)
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [make_document()]
+        setup_source(source, [make_document()])
 
         await p.index_source(source)
 
@@ -178,11 +201,11 @@ class TestIndexingPipeline:
         doc_repo.get_by_id.return_value = None
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [
+        setup_source(source, [
             make_document('a.md'),
             make_document('b.md'),
             make_document('c.md'),
-        ]
+        ])
 
         result = await pipeline.index_source(source)
 
@@ -200,11 +223,37 @@ class TestIndexingPipeline:
         doc_repo.upsert.side_effect = track_upsert
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [make_document()]
+        setup_source(source, [make_document()])
 
         result = await pipeline.index_source(source)
 
         assert result[0].id in upsert_called_before_return
+
+    async def test_load_one_not_called_for_up_to_date(self, pipeline, doc_repo, chunk_repo):
+        """load_one не вызывается для актуальных документов."""
+        ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        doc_repo.get_by_id.return_value = make_document(updated_at=ts, size=1024)
+        chunk_repo.get_index_status.return_value = (5, 5)
+
+        source = MagicMock(spec=Source)
+        source.get_metadata.return_value = [make_stub(updated_at=ts, size=1024)]
+
+        await pipeline.index_source(source)
+
+        source.load_one.assert_not_called()
+
+    async def test_load_one_called_for_stale_document(self, pipeline, doc_repo, chunk_repo):
+        """load_one вызывается для устаревших документов."""
+        doc_repo.get_by_id.return_value = None
+
+        source = MagicMock(spec=Source)
+        doc = make_document()
+        source.get_metadata.return_value = [make_stub()]
+        source.load_one.return_value = doc
+
+        await pipeline.index_source(source)
+
+        source.load_one.assert_called_once_with('test.md')
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +275,7 @@ class TestIndexingPipelineRun:
         pipeline = self._make_pipeline(doc_repo, chunk_repo)
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [make_document(text='# Заголовок\n\nТекст.')]
+        setup_source(source, [make_document(text='# Заголовок\n\nТекст.')])
 
         await pipeline.run(source)
 
@@ -242,7 +291,7 @@ class TestIndexingPipelineRun:
         pipeline = self._make_pipeline(doc_repo, chunk_repo)
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [make_document(updated_at=ts, size=1024)]
+        source.get_metadata.return_value = [make_stub(updated_at=ts, size=1024)]
 
         await pipeline.run(source)
 
@@ -254,7 +303,7 @@ class TestIndexingPipelineRun:
         pipeline = self._make_pipeline(doc_repo, chunk_repo)
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [make_document('guide.md')]
+        setup_source(source, [make_document('guide.md')])
 
         await pipeline.run(source)
 
@@ -275,7 +324,7 @@ class TestIndexingPipelineRun:
         pipeline._chunker = TripleChunker()
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [make_document()]
+        setup_source(source, [make_document()])
 
         await pipeline.run(source)
 
@@ -290,7 +339,7 @@ class TestIndexingPipelineRun:
         pipeline = self._make_pipeline(doc_repo, chunk_repo)
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [make_document()]
+        setup_source(source, [make_document()])
 
         await pipeline.run(source)
 
@@ -309,7 +358,7 @@ class TestIndexingPipelineRun:
         pipeline = self._make_pipeline(doc_repo, chunk_repo, chunk_processors=[TagProcessor()])
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [make_document()]
+        setup_source(source, [make_document()])
 
         await pipeline.run(source)
 
@@ -322,10 +371,10 @@ class TestIndexingPipelineRun:
         pipeline = self._make_pipeline(doc_repo, chunk_repo)
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [
+        setup_source(source, [
             make_document('a.md'),
             make_document('b.md'),
-        ]
+        ])
 
         await pipeline.run(source)
 
@@ -338,7 +387,7 @@ class TestIndexingPipelineRun:
         pipeline = self._make_pipeline(doc_repo, chunk_repo)
 
         source = MagicMock(spec=Source)
-        source.load.return_value = [make_document(updated_at=ts)]
+        setup_source(source, [make_document(updated_at=ts)])
 
         await pipeline.run(source)
 

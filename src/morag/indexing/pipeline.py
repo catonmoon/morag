@@ -66,22 +66,52 @@ class IndexingPipeline:
         )
 
     async def index_source(self, source: Source) -> list[Document]:
-        """Загрузить все документы из source и подготовить к чанкованию.
+        """Загрузить документы из source и подготовить к чанкованию.
 
-        Возвращает только те документы которые требуют (пере)индексации.
-        Актуальные документы пропускаются.
+        Сначала запрашивает только метаданные (get_metadata), затем загружает полный
+        контент (load_one) только для документов, которые требуют (пере)индексации.
+        Возвращает только те документы, которые прошли подготовку.
         """
-        documents = await source.load()
-        logger.info('Loaded %d document(s) from source', len(documents))
+        stubs = await source.get_metadata()
+        total = len(stubs)
+        logger.info('Loaded metadata for %d document(s) from source', total)
 
         to_index: list[Document] = []
-        for document in documents:
+        for i, stub in enumerate(stubs):
+            logger.info('[%d/%d] Checking: %s', i + 1, total, stub.id)
+            if await self._is_up_to_date(stub):
+                logger.info('Document up to date, skipping: %s', stub.id)
+                continue
+
+            document = await source.load_one(stub.id)
+            if document is None:
+                logger.warning('Failed to load document: %s', stub.id)
+                continue
+
             result = await self._prepare_document(document)
             if result is not None:
                 to_index.append(result)
 
-        logger.info('Documents to index: %d, skipped: %d', len(to_index), len(documents) - len(to_index))
+        logger.info('Documents to index: %d, skipped: %d', len(to_index), total - len(to_index))
         return to_index
+
+    async def _is_up_to_date(self, stub: Document) -> bool:
+        """Проверить актуальность документа по стабу метаданных без загрузки контента."""
+        existing = await self._doc_repo.get_by_id(stub.id)
+        if existing is None:
+            return False
+
+        same_content = existing.updated_at == stub.updated_at
+        if stub.source_type != 'confluence':
+            same_content = same_content and existing.size == stub.size
+        if not same_content:
+            return False
+
+        status = await self._chunk_repo.get_index_status(stub.id)
+        if status is None:
+            return False
+        count, total = status
+        return count == total
 
     async def _prepare_document(self, document: Document) -> Document | None:
         """Проверить idempotency, удалить устаревшее, сохранить документ.
@@ -92,7 +122,12 @@ class IndexingPipeline:
         existing = await self._doc_repo.get_by_id(document.id)
 
         if existing is not None:
-            if existing.updated_at == document.updated_at and existing.size == document.size:
+            # Для Confluence size нестабилен (зависит от конвертации HTML→MD),
+            # поэтому ориентируемся только на дату последнего изменения.
+            same_content = existing.updated_at == document.updated_at
+            if document.source_type != 'confluence':
+                same_content = same_content and existing.size == document.size
+            if same_content:
                 status = await self._chunk_repo.get_index_status(document.id)
                 if status is not None:
                     count, total = status
@@ -118,12 +153,14 @@ class IndexingPipeline:
     async def run(self, source: Source) -> None:
         """Полный цикл индексации: загрузка → чанкование → сохранение в Qdrant."""
         documents = await self.index_source(source)
-        for document in documents:
-            await self._chunk_document(document)
+        total = len(documents)
+        for i, document in enumerate(documents):
+            await self._chunk_document(document, pos=i + 1, total=total)
+        logger.info('Indexing complete: %d document(s) indexed', total)
 
-    async def _chunk_document(self, document: Document) -> None:
+    async def _chunk_document(self, document: Document, pos: int = 1, total: int = 1) -> None:
         """Разбить документ на чанки и сохранить в Qdrant."""
-        logger.info('Chunking document: %s', document.id)
+        logger.info('[%d/%d] Chunking: %s', pos, total, document.id)
 
         # Pre-split на блоки + жадная упаковка
         blocks = self._splitter.split(document.text)

@@ -57,23 +57,39 @@ class ConfluenceSource(Source):
         self._ancestor_ids = config.ancestor_ids
         self._skip_ancestor_ids = config.skip_ancestor_ids
         self._vision_client = vision_client
+        self._min_image_size_bytes = config.min_image_size_bytes
 
-    async def load(self) -> list[Document]:
-        """Загрузить все страницы из Confluence согласно конфигу."""
-        pages = self._fetch_pages()
-        logger.info('Fetched %d pages from Confluence', len(pages))
+    async def get_metadata(self) -> list[Document]:
+        """Вернуть стабы страниц Confluence: только метаданные, без тела и изображений."""
+        pages = self._fetch_pages_metadata()
+        logger.info('Fetched metadata for %d pages from Confluence', len(pages))
 
-        docs: list[Document] = []
+        stubs: list[Document] = []
         for page in pages:
-            doc = await self._page_to_document(page)
-            if doc is not None:
-                docs.append(doc)
+            try:
+                stub = self._page_to_stub(page)
+                if stub is not None:
+                    stubs.append(stub)
+            except Exception:
+                page_id = page.get('content', {}).get('id') or page.get('id', '?')
+                logger.exception('Failed to get metadata for page id=%s', page_id)
+        return stubs
 
-        logger.info('Converted %d pages to documents', len(docs))
-        return docs
+    async def load_one(self, doc_id: str) -> Document | None:
+        """Загрузить одну страницу Confluence целиком по page_id."""
+        try:
+            page = await asyncio.to_thread(
+                self._client.get_page_by_id,
+                doc_id,
+                expand='body.view,history.lastUpdated,history.createdBy,history.createdDate,space',
+            )
+            return await self._page_to_document(page)
+        except Exception:
+            logger.exception('Failed to load page id=%s', doc_id)
+            return None
 
-    def _fetch_pages(self) -> list[dict]:
-        """Получить все страницы через CQL с пагинацией."""
+    def _fetch_pages_metadata(self) -> list[dict]:
+        """Получить метаданные страниц через CQL без тела (быстрый запрос)."""
         cql = self._build_cql()
         logger.info('Confluence CQL: %s', cql)
 
@@ -85,7 +101,7 @@ class ConfluenceSource(Source):
                 cql,
                 start=start,
                 limit=_CQL_PAGE_SIZE,
-                expand='content.body.view,content.history.lastUpdated,content.history.createdBy,content.history.createdDate,content.space',
+                expand='content.history.lastUpdated,content.space',
             )
             batch = result.get('results', [])
             pages.extend(batch)
@@ -93,9 +109,37 @@ class ConfluenceSource(Source):
             if len(batch) < _CQL_PAGE_SIZE:
                 break
             start += _CQL_PAGE_SIZE
-            logger.debug('Fetched %d pages so far, continuing...', len(pages))
+            logger.debug('Fetched metadata for %d pages so far, continuing...', len(pages))
 
         return pages
+
+    def _page_to_stub(self, page: dict) -> Document | None:
+        """Создать стаб Document из метаданных страницы (без тела)."""
+        page_id = page['content']['id'] if 'content' in page else page['id']
+        title = page['content']['title'] if 'content' in page else page['title']
+        space_key = (
+            page['content'].get('space', {}).get('key', 'UNKNOWN')
+            if 'content' in page
+            else page.get('space', {}).get('key', 'UNKNOWN')
+        )
+
+        if 'content' in page:
+            history = page['content'].get('history', {})
+        else:
+            history = page.get('history', {})
+
+        last_updated = history.get('lastUpdated', {}).get('when', '')
+        updated_at = _parse_confluence_date(last_updated)
+        path = f'{space_key}/{title}'
+
+        return Document(
+            id=page_id,
+            path=path,
+            text='',
+            updated_at=updated_at,
+            source_type='confluence',
+            size=0,
+        )
 
     def _build_cql(self) -> str:
         """Построить CQL-запрос с учётом фильтров."""
@@ -185,7 +229,7 @@ class ConfluenceSource(Source):
 
         logger.debug('Page %s: processing %d image(s) with vision LLM', page_id, len(imgs))
 
-        tasks = [self._describe_image(img.get('src', ''), img.get('alt', '')) for img in imgs]
+        tasks = [self._describe_image(img.get('src', ''), img.get('alt', ''), page_id) for img in imgs]
         descriptions = await asyncio.gather(*tasks, return_exceptions=True)
 
         for img, description in zip(imgs, descriptions):
@@ -196,29 +240,40 @@ class ConfluenceSource(Source):
                 p.string = f'[Изображение: {description}]'
                 img.replace_with(p)
 
-    async def _describe_image(self, src: str, alt: str) -> str | None:
+    async def _describe_image(self, src: str, alt: str, page_id: str) -> str | None:
         """Скачать изображение по URL и получить описание от vision LLM."""
         if not src:
             return alt or None
 
-        image_bytes = await asyncio.to_thread(self._download_image, src)
+        media_type = _guess_media_type(src)
+        if media_type == 'image/svg+xml':
+            logger.debug('Page %s: skipping SVG image: %s', page_id, src)
+            return alt or None
+
+        image_bytes = await asyncio.to_thread(self._download_image, src, page_id)
         if not image_bytes:
             return alt or None
 
-        media_type = _guess_media_type(src)
+        if self._min_image_size_bytes is not None and len(image_bytes) < self._min_image_size_bytes:
+            logger.debug(
+                'Page %s: skipping small image (%d bytes < %d): %s',
+                page_id, len(image_bytes), self._min_image_size_bytes, src,
+            )
+            return alt or None
+
         image_b64 = base64.b64encode(image_bytes).decode('ascii')
 
         try:
             description = await self._vision_client.complete_vision(
                 _IMAGE_PROMPT, image_b64, media_type,
             )
-            logger.debug('Image described: %s -> %s...', src[:60], description[:80])
+            logger.debug('Page %s: image described: %s -> %s...', page_id, src[:80], description[:80])
             return description.strip() or None
         except Exception:
-            logger.warning('Vision LLM failed for image: %s', src[:60])
+            logger.warning('Page %s: vision LLM failed for image %s', page_id, src, exc_info=True)
             return alt or None
 
-    def _download_image(self, src: str) -> bytes | None:
+    def _download_image(self, src: str, page_id: str) -> bytes | None:
         """Синхронно скачать изображение, используя сессию Confluence (с авторизацией)."""
         try:
             url = src if src.startswith('http') else urljoin(self._base_url, src)
@@ -227,7 +282,7 @@ class ConfluenceSource(Source):
             response.raise_for_status()
             return response.content
         except Exception:
-            logger.warning('Failed to download image: %s', src[:60])
+            logger.warning('Page %s: failed to download image: %s', page_id, src, exc_info=True)
             return None
 
 

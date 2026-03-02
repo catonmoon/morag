@@ -17,16 +17,35 @@ class MarkdownSource(Source):
     def __init__(self, root: Path | str) -> None:
         self._root = Path(root).resolve()
 
-    async def load(self) -> list[Document]:
-        """Загрузить все MD-файлы из корневой директории."""
-        docs: list[Document] = []
-
+    async def get_metadata(self) -> list[Document]:
+        """Вернуть стабы MD-файлов: только stat, без чтения содержимого."""
+        stubs: list[Document] = []
         for path in sorted(self._root.rglob('*.md')):
-            doc = self._load_file(path)
-            if doc is not None:
-                docs.append(doc)
+            stub = self._get_file_metadata(path)
+            if stub is not None:
+                stubs.append(stub)
+        return stubs
 
-        return docs
+    async def load_one(self, doc_id: str) -> Document | None:
+        """Загрузить один MD-файл по его doc_id (относительный путь)."""
+        return self._load_file(self._root / doc_id)
+
+    def _get_file_metadata(self, path: Path) -> Document | None:
+        """Получить метаданные файла без чтения содержимого."""
+        try:
+            stat = path.stat()
+            updated_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+            doc_id = str(path.relative_to(self._root))
+            return Document(
+                id=doc_id,
+                path=doc_id,
+                text='',
+                updated_at=updated_at,
+                source_type='markdown',
+                size=stat.st_size,
+            )
+        except OSError:
+            return None
 
     def _load_file(self, path: Path) -> Document | None:
         """Загрузить один MD-файл и создать Document."""

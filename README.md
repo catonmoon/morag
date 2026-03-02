@@ -72,7 +72,11 @@ indexing:
 ### 4. Индексация
 
 ```bash
+# Обычная индексация (идемпотентная: пропускает неизменённые документы)
 poetry run python -m cli.main index --config config.yml
+
+# Полная переиндексация: сначала удалить все коллекции, затем проиндексировать заново
+poetry run python -m cli.main index --reset --config config.yml
 ```
 
 ## Архитектура

@@ -19,13 +19,14 @@ class LLMClient:
         self._client = AsyncOpenAI(base_url=base_url, api_key=api_key)
         self._model = model
 
-    async def complete(self, messages: list[dict], temperature: float = 0.0) -> str:
+    async def complete(
+        self, messages: list[dict], temperature: float = 0.0, max_tokens: int | None = None
+    ) -> str:
         """Send a chat completion request and return the response text."""
-        response = await self._client.chat.completions.create(
-            model=self._model,
-            messages=messages,
-            temperature=temperature,
-        )
+        kwargs: dict = dict(model=self._model, messages=messages, temperature=temperature)
+        if max_tokens is not None:
+            kwargs['max_tokens'] = max_tokens
+        response = await self._client.chat.completions.create(**kwargs)
         return response.choices[0].message.content or ''
 
     async def complete_vision(self, prompt: str, image_base64: str, media_type: str = 'image/png') -> str:
@@ -53,16 +54,19 @@ class LLMClient:
         )
         return response.choices[0].message.content or ''
 
-    async def complete_json(self, messages: list[dict]) -> dict:
-        """Send a chat completion request expecting a JSON response.
+    async def complete_json(self, messages: list[dict], schema: dict, schema_name: str = 'response') -> dict:
+        """Send a chat completion request expecting a JSON response matching the given schema.
 
-        Passes response_format={"type": "json_object"} to instruct the model
-        to return valid JSON. Raises ValueError if the response cannot be parsed.
+        Passes response_format={"type": "json_schema", ...} to enforce structured output.
+        Raises ValueError if the response cannot be parsed.
         """
         response = await self._client.chat.completions.create(
             model=self._model,
             messages=messages,
-            response_format={'type': 'json_object'},
+            response_format={
+                'type': 'json_schema',
+                'json_schema': {'name': schema_name, 'schema': schema},
+            },
         )
         content = response.choices[0].message.content or '{}'
         logger.debug('LLM raw response: %s', content)

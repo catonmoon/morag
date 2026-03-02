@@ -42,6 +42,21 @@ class Source(ABC):
     """Абстрактный источник документов."""
 
     @abstractmethod
-    async def load(self) -> list[Document]:
-        """Загрузить все документы из источника."""
+    async def get_metadata(self) -> list[Document]:
+        """Вернуть стабы документов: только id, updated_at, source_type, size. text=''."""
         ...
+
+    @abstractmethod
+    async def load_one(self, doc_id: str) -> Document | None:
+        """Загрузить один документ целиком по id."""
+        ...
+
+    async def load(self) -> list[Document]:
+        """Загрузить все документы (дефолт: get_metadata → load_one для каждого)."""
+        stubs = await self.get_metadata()
+        docs: list[Document] = []
+        for stub in stubs:
+            doc = await self.load_one(stub.id)
+            if doc is not None:
+                docs.append(doc)
+        return docs

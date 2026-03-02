@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 
+from morag.indexing.token_counter import TokenCounter, TiktokenCounter
+
 logger = logging.getLogger(__name__)
 
 _PROMPT_TEMPLATE = """\
@@ -47,17 +49,53 @@ class NoopContextGenerator(ContextGenerator):
 class LLMContextGenerator(ContextGenerator):
     """Генерирует суммари чанка через вызов LLM.
 
-    При любой ошибке возвращает пустую строку — индексация продолжается без контекста.
+    Перед вызовом обрезает doc_text так, чтобы prompt + chunk + doc влезали
+    в контекстное окно модели. При любой ошибке возвращает пустую строку.
     """
 
-    def __init__(self, client) -> None:
+    def __init__(
+        self,
+        client,
+        token_counter: TokenCounter | None = None,
+        context_window: int = 32768,
+        max_output_tokens: int | None = None,
+    ) -> None:
         self._client = client
+        self._token_counter = token_counter or TiktokenCounter()
+        self._context_window = context_window
+        self._max_output_tokens = max_output_tokens
+        self._prompt_overhead = self._token_counter.count(
+            _PROMPT_TEMPLATE.format(doc_text='', chunk_text='')
+        )
 
     async def generate(self, doc_text: str, chunk_text: str) -> str:
+        output_reserve = self._max_output_tokens if self._max_output_tokens is not None else 0
+        chunk_tokens = self._token_counter.count(chunk_text)
+        available_for_doc = self._context_window - self._prompt_overhead - chunk_tokens - output_reserve
+
+        if available_for_doc <= 0:
+            logger.warning(
+                'LLMContextGenerator: chunk (%d tokens) + prompt overhead (%d) + output reserve (%d) '
+                'exceeds context window (%d), skipping context',
+                chunk_tokens, self._prompt_overhead, output_reserve, self._context_window,
+            )
+            return ''
+
+        doc_token_count = self._token_counter.count(doc_text)
+        if doc_token_count > available_for_doc:
+            logger.info(
+                'LLMContextGenerator: doc_text truncated from %d to %d tokens',
+                doc_token_count, available_for_doc,
+            )
+            doc_text = self._token_counter.truncate(doc_text, available_for_doc)
+
         prompt = _PROMPT_TEMPLATE.format(doc_text=doc_text, chunk_text=chunk_text)
         messages = [{'role': 'user', 'content': prompt}]
         try:
-            return await self._client.complete(messages, temperature=0.3)
+            kwargs: dict = {'temperature': 0.3}
+            if self._max_output_tokens is not None:
+                kwargs['max_tokens'] = self._max_output_tokens
+            return await self._client.complete(messages, **kwargs)
         except Exception:
             logger.warning('LLMContextGenerator: failed to generate context, returning empty string')
             return ''

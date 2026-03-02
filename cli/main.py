@@ -16,6 +16,7 @@ from morag.indexing.context import LLMContextGenerator, NoopContextGenerator
 from morag.indexing.embedder import FridaEmbedder, GteSparseEmbedder
 from morag.indexing.pipeline import IndexingPipeline
 from morag.indexing.processors import DenseEmbeddingProcessor, MetadataProcessor, SparseEmbeddingProcessor
+from morag.indexing.token_counter import TiktokenCounter
 from morag.llm.client import LLMClient
 from morag.sources.confluence import ConfluenceSource
 from morag.sources.markdown import MarkdownSource
@@ -35,12 +36,19 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def cmd_index(config_path: str) -> None:
+async def cmd_index(config_path: str, reset: bool = False) -> None:
     """Индексировать документы из источника в Qdrant."""
     config = load_config(config_path)
 
     logger.info('Connecting to Qdrant %s:%d', config.qdrant.host, config.qdrant.port)
     client = AsyncQdrantClient(host=config.qdrant.host, port=config.qdrant.port)
+
+    if reset:
+        existing = {c.name for c in (await client.get_collections()).collections}
+        for name in (config.qdrant.collection_docs, config.qdrant.collection_chunks):
+            if name in existing:
+                logger.warning('Dropping collection: %s', name)
+                await client.delete_collection(name)
 
     embedder = FridaEmbedder(config.indexing.dense_model)
 
@@ -81,9 +89,15 @@ async def cmd_index(config_path: str) -> None:
         logger.error('No sources configured in config.yml')
         return
 
+    token_counter = TiktokenCounter()
     chunker = LLMChunker(llm_client) if config.indexing.chunker == 'llm' else PassthroughChunker()
     context_generator = (
-        LLMContextGenerator(llm_client) if config.indexing.context == 'llm' else NoopContextGenerator()
+        LLMContextGenerator(
+            llm_client,
+            token_counter=token_counter,
+            context_window=config.indexing.llm_context_window,
+            max_output_tokens=config.indexing.context_max_output_tokens,
+        ) if config.indexing.context == 'llm' else NoopContextGenerator()
     )
     sparse_embedder = GteSparseEmbedder(config.indexing.sparse_model, device=config.indexing.sparse_device)
     chunk_processors = [
@@ -113,6 +127,7 @@ async def cmd_index(config_path: str) -> None:
         context_generator=context_generator,
         chunk_processors=chunk_processors,
         block_limit=block_limit,
+        token_counter=token_counter,
     )
 
     logger.info('Chunker: %s, context: %s, block_limit: %d', config.indexing.chunker, config.indexing.context, block_limit)
@@ -168,25 +183,42 @@ async def cmd_query(config_path: str, question: str, top_k: int) -> None:
     await client.close()
 
 
+LOGO = """
+  ░▒▓█████
+ ░▒▓███████         Catonmoon
+▒▓██(=^.^=)██       Morag v0.1
+ ▓█████████
+  ▓███████
+"""
+
+
 def main() -> None:
+    print(LOGO)
     parser = argparse.ArgumentParser(
         description='morag — RAG для локальных MD-файлов',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        '--config', default='config.yml', metavar='PATH',
-        help='Путь к конфигу (по умолчанию: config.yml)',
-    )
-
     parser.add_argument(
         '-v', '--debug', action='store_true',
         help='Включить DEBUG-логирование (показывает сырые ответы LLM)',
     )
 
     subparsers = parser.add_subparsers(dest='command', required=True)
-    subparsers.add_parser('index', help='Индексировать документы из источника')
+    index_parser = subparsers.add_parser('index', help='Индексировать документы из источника')
+    index_parser.add_argument(
+        '--config', default='config.yml', metavar='PATH',
+        help='Путь к конфигу (по умолчанию: config.yml)',
+    )
+    index_parser.add_argument(
+        '--reset', action='store_true',
+        help='Удалить все коллекции Qdrant перед индексацией (полная переиндексация)',
+    )
 
     query_parser = subparsers.add_parser('query', help='Гибридный поиск без LLM-ответа (для отладки)')
+    query_parser.add_argument(
+        '--config', default='config.yml', metavar='PATH',
+        help='Путь к конфигу (по умолчанию: config.yml)',
+    )
     query_parser.add_argument('question', help='Поисковый вопрос')
     query_parser.add_argument('--top-k', type=int, default=10, help='Количество результатов (по умолчанию: 10)')
 
@@ -196,7 +228,7 @@ def main() -> None:
         logging.getLogger('morag').setLevel(logging.DEBUG)
 
     if args.command == 'index':
-        asyncio.run(cmd_index(args.config))
+        asyncio.run(cmd_index(args.config, reset=args.reset))
     elif args.command == 'query':
         asyncio.run(cmd_query(args.config, args.question, args.top_k))
     else:
