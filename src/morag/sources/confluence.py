@@ -81,7 +81,7 @@ class ConfluenceSource(Source):
             page = await asyncio.to_thread(
                 self._client.get_page_by_id,
                 doc_id,
-                expand='body.view,history.lastUpdated,history.createdBy,history.createdDate,space',
+                expand='body.view,history.lastUpdated,history.createdBy,history.createdDate,space,ancestors',
             )
             return await self._page_to_document(page)
         except Exception:
@@ -101,7 +101,7 @@ class ConfluenceSource(Source):
                 cql,
                 start=start,
                 limit=_CQL_PAGE_SIZE,
-                expand='content.history.lastUpdated,content.space',
+                expand='content.history.lastUpdated,content.space,content.ancestors',
             )
             batch = result.get('results', [])
             pages.extend(batch)
@@ -115,22 +115,17 @@ class ConfluenceSource(Source):
 
     def _page_to_stub(self, page: dict) -> Document | None:
         """Создать стаб Document из метаданных страницы (без тела)."""
-        page_id = page['content']['id'] if 'content' in page else page['id']
-        title = page['content']['title'] if 'content' in page else page['title']
-        space_key = (
-            page['content'].get('space', {}).get('key', 'UNKNOWN')
-            if 'content' in page
-            else page.get('space', {}).get('key', 'UNKNOWN')
-        )
-
-        if 'content' in page:
-            history = page['content'].get('history', {})
-        else:
-            history = page.get('history', {})
+        content = page.get('content', page)
+        page_id = content['id']
+        title = content['title']
+        space = content.get('space', {})
+        space_name = space.get('name') or space.get('key', 'UNKNOWN')
+        ancestors = [a['title'] for a in content.get('ancestors', [])]
+        history = content.get('history', {})
 
         last_updated = history.get('lastUpdated', {}).get('when', '')
         updated_at = _parse_confluence_date(last_updated)
-        path = f'{space_key}/{title}'
+        path = _build_page_path(space_name, ancestors, title)
 
         return Document(
             id=page_id,
@@ -164,22 +159,15 @@ class ConfluenceSource(Source):
     async def _page_to_document(self, page: dict) -> Document | None:
         """Конвертировать страницу Confluence в Document."""
         try:
-            page_id = page['content']['id'] if 'content' in page else page['id']
-            title = page['content']['title'] if 'content' in page else page['title']
-            space_key = (
-                page['content'].get('space', {}).get('key', 'UNKNOWN')
-                if 'content' in page
-                else page.get('space', {}).get('key', 'UNKNOWN')
-            )
-
-            if 'content' in page:
-                history = page['content'].get('history', {})
-                html = page['content'].get('body', {}).get('view', {}).get('value', '')
-                last_updated = history.get('lastUpdated', {}).get('when', '')
-            else:
-                history = page.get('history', {})
-                html = page.get('body', {}).get('view', {}).get('value', '')
-                last_updated = history.get('lastUpdated', {}).get('when', '')
+            content = page.get('content', page)
+            page_id = content['id']
+            title = content['title']
+            space = content.get('space', {})
+            space_name = space.get('name') or space.get('key', 'UNKNOWN')
+            ancestors = [a['title'] for a in content.get('ancestors', [])]
+            history = content.get('history', {})
+            html = content.get('body', {}).get('view', {}).get('value', '')
+            last_updated = history.get('lastUpdated', {}).get('when', '')
 
             creator = history.get('createdBy', {}).get('displayName') or None
             created_date_raw = history.get('createdDate') or history.get('createdAt')
@@ -189,7 +177,7 @@ class ConfluenceSource(Source):
             text = f'# {title}\n\n{markdown}'.strip()
 
             updated_at = _parse_confluence_date(last_updated)
-            path = f'{space_key}/{title}'
+            path = _build_page_path(space_name, ancestors, title)
 
             return Document(
                 id=page_id,
@@ -216,6 +204,9 @@ class ConfluenceSource(Source):
         for tag in soup.find_all(['script', 'style']):
             tag.decompose()
 
+        logger.debug('Page %s HTML (before cleanup):\n%s', page_id, soup)
+
+        _clean_jira_macros(soup)
         _remove_vendor_ui_blocks(soup)
 
         if self._vision_client:
@@ -296,6 +287,29 @@ _BLOCK_STOP_TAGS = frozenset({'body', 'html', 'table', 'tr', 'td', 'th'})
 _BLOCK_CONTAINER_TAGS = frozenset({'div', 'section', 'aside', 'nav', 'header', 'footer', 'ul', 'ol'})
 
 
+def _clean_jira_macros(soup: BeautifulSoup) -> None:
+    """Очистить Jira-макросы Confluence: оставить только ссылку на задачу.
+
+    Confluence рендерит Jira-макрос как:
+      <span data-macro-name="jira">
+        <a class="jira-issue-key" href="..."><span class="aui-icon"> </span>MODP-12345</a>
+        - <span class="summary">Getting issue details...</span>
+        <span class="aui-lozenge ...">STATUS</span>
+      </span>
+
+    Заменяем весь span на чистый <a href="...">MODP-12345</a>.
+    """
+    for macro in soup.find_all('span', attrs={'data-macro-name': 'jira'}):
+        link = macro.find('a', class_='jira-issue-key')
+        if link:
+            # убираем иконку-placeholder внутри ссылки
+            for icon in link.find_all('span', class_='aui-icon'):
+                icon.decompose()
+            macro.replace_with(link)
+        else:
+            macro.decompose()
+
+
 def _remove_vendor_ui_blocks(soup: BeautifulSoup) -> None:
     """Удалить блоки UI-артефактов плагинов по ссылкам на домены вендоров.
 
@@ -334,6 +348,16 @@ def _guess_media_type(src: str) -> str:
     path = urlparse(src).path
     mime, _ = mimetypes.guess_type(path)
     return mime or 'image/png'
+
+
+def _build_page_path(space_name: str, ancestors: list[str], title: str) -> str:
+    """Построить путь страницы в виде RootPage/Ancestor/Title.
+
+    Имя пространства в путь не включается — путь всегда начинается с корневой страницы.
+    Если предков нет, путь содержит только заголовок страницы.
+    """
+    parts = ancestors + [title]
+    return '/'.join(parts)
 
 
 def _parse_confluence_date(date_str: str) -> datetime:

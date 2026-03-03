@@ -9,6 +9,7 @@ from morag.config import ConfluenceConfig
 from morag.sources.base import Document, Source
 from morag.sources.confluence import (
     ConfluenceSource,
+    _build_page_path,
     _html_to_markdown,
     _parse_confluence_date,
 )
@@ -25,13 +26,16 @@ def _make_config(**kwargs) -> ConfluenceConfig:
 
 
 def _make_cql_page(page_id: str, title: str, space_key: str,
-                   when: str = '2024-06-01T10:00:00.000+00:00') -> dict:
+                   when: str = '2024-06-01T10:00:00.000+00:00',
+                   space_name: str | None = None,
+                   ancestors: list[dict] | None = None) -> dict:
     """Сформировать страницу в формате Confluence CQL-результата (только метаданные)."""
     return {
         'content': {
             'id': page_id,
             'title': title,
-            'space': {'key': space_key},
+            'space': {'key': space_key, 'name': space_name or space_key},
+            'ancestors': ancestors or [],
             'history': {'lastUpdated': {'when': when}},
         }
     }
@@ -39,12 +43,15 @@ def _make_cql_page(page_id: str, title: str, space_key: str,
 
 def _make_full_page(page_id: str, title: str, space_key: str,
                     html: str = '<p>text</p>',
-                    when: str = '2024-06-01T10:00:00.000+00:00') -> dict:
+                    when: str = '2024-06-01T10:00:00.000+00:00',
+                    space_name: str | None = None,
+                    ancestors: list[dict] | None = None) -> dict:
     """Сформировать страницу в формате get_page_by_id (без обёртки content)."""
     return {
         'id': page_id,
         'title': title,
-        'space': {'key': space_key},
+        'space': {'key': space_key, 'name': space_name or space_key},
+        'ancestors': ancestors or [],
         'body': {'view': {'value': html}},
         'history': {'lastUpdated': {'when': when}},
     }
@@ -73,6 +80,21 @@ def _src_with_pages(pages_cql: list[dict], pages_full: list[dict] | None = None,
         src = ConfluenceSource(_make_config(**cfg_kwargs))
         src._client = mock_client
         return src
+
+
+# ---------------------------------------------------------------------------
+# _build_page_path
+# ---------------------------------------------------------------------------
+
+class TestBuildPagePath:
+    def test_no_ancestors(self):
+        assert _build_page_path('My Space', [], 'Page') == 'Page'
+
+    def test_ancestors_included(self):
+        assert _build_page_path('Space', ['Root', 'Parent'], 'Child') == 'Root/Parent/Child'
+
+    def test_space_name_not_in_path(self):
+        assert _build_page_path('My Space', ['My Space', 'Parent'], 'Child') == 'My Space/Parent/Child'
 
 
 # ---------------------------------------------------------------------------
@@ -243,11 +265,18 @@ class TestConfluenceSourceGetMetadata:
         stubs = await src.get_metadata()
         assert stubs[0].id == '42'
 
-    async def test_stub_path_is_space_slash_title(self):
-        pages = [_make_cql_page('1', 'My Page', 'ML')]
+    async def test_stub_path_no_ancestors(self):
+        pages = [_make_cql_page('1', 'My Page', 'ML', space_name='Machine Learning')]
         src = _src_with_pages(pages)
         stubs = await src.get_metadata()
-        assert stubs[0].path == 'ML/My Page'
+        assert stubs[0].path == 'My Page'
+
+    async def test_stub_path_with_ancestors(self):
+        ancestors = [{'id': '10', 'title': 'Root'}, {'id': '11', 'title': 'Parent'}]
+        pages = [_make_cql_page('1', 'Child', 'ML', space_name='ML Space', ancestors=ancestors)]
+        src = _src_with_pages(pages)
+        stubs = await src.get_metadata()
+        assert stubs[0].path == 'Root/Parent/Child'
 
     async def test_stub_source_type_is_confluence(self):
         pages = [_make_cql_page('1', 'Page', 'ML')]
@@ -349,11 +378,20 @@ class TestConfluenceSourceLoad:
         docs = await src.load()
         assert docs[0].id == '42'
 
-    async def test_document_path_is_space_slash_title(self):
+    async def test_document_path_no_ancestors(self):
         pages = [_make_cql_page('1', 'My Page', 'ML')]
-        src = _src_with_pages(pages, [_make_full_page('1', 'My Page', 'ML')])
+        full = [_make_full_page('1', 'My Page', 'ML', space_name='Machine Learning')]
+        src = _src_with_pages(pages, full)
         docs = await src.load()
-        assert docs[0].path == 'ML/My Page'
+        assert docs[0].path == 'My Page'
+
+    async def test_document_path_with_ancestors(self):
+        ancestors = [{'id': '10', 'title': 'Root'}, {'id': '11', 'title': 'Parent'}]
+        pages = [_make_cql_page('1', 'Child', 'ML')]
+        full = [_make_full_page('1', 'Child', 'ML', space_name='ML Space', ancestors=ancestors)]
+        src = _src_with_pages(pages, full)
+        docs = await src.load()
+        assert docs[0].path == 'Root/Parent/Child'
 
     async def test_document_source_type(self):
         pages = [_make_cql_page('1', 'Page', 'ML')]
