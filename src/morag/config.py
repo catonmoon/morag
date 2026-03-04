@@ -50,6 +50,7 @@ class IndexingConfig(BaseModel):
     dense_model: str = 'ai-forever/FRIDA'  # модель для dense-эмбеддингов
     sparse_model: str = 'Alibaba-NLP/gte-multilingual-base'  # модель для sparse-эмбеддингов
     sparse_device: str | None = None  # устройство для sparse-модели: 'cpu' | 'mps' | 'cuda' | None (авто)
+    concurrency: int = 1  # количество документов, обрабатываемых параллельно
 
 
 class Config(BaseModel):

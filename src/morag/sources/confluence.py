@@ -123,12 +123,16 @@ class ConfluenceSource(Source):
         title = content['title']
         space = content.get('space', {})
         space_name = space.get('name') or space.get('key', 'UNKNOWN')
-        ancestors = [a['title'] for a in content.get('ancestors', [])]
+        ancestors = [a['title'] for a in content.get('ancestors', []) if a.get('title')]
         history = content.get('history', {})
 
         last_updated = history.get('lastUpdated', {}).get('when', '')
         updated_at = _parse_confluence_date(last_updated)
         path = _build_page_path(space_name, ancestors, title)
+
+        links = content.get('_links', {})
+        webui = links.get('webui', '')
+        url = f'{links.get("base", self._base_url)}{webui}' if webui else None
 
         return Document(
             id=page_id,
@@ -137,6 +141,7 @@ class ConfluenceSource(Source):
             updated_at=updated_at,
             source_type='confluence',
             size=0,
+            url=url,
         )
 
     def _build_cql(self) -> str:
@@ -167,7 +172,7 @@ class ConfluenceSource(Source):
             title = content['title']
             space = content.get('space', {})
             space_name = space.get('name') or space.get('key', 'UNKNOWN')
-            ancestors = [a['title'] for a in content.get('ancestors', [])]
+            ancestors = [a['title'] for a in content.get('ancestors', []) if a.get('title')]
             history = content.get('history', {})
             html = content.get('body', {}).get('view', {}).get('value', '')
             last_updated = history.get('lastUpdated', {}).get('when', '')
@@ -182,6 +187,10 @@ class ConfluenceSource(Source):
             updated_at = _parse_confluence_date(last_updated)
             path = _build_page_path(space_name, ancestors, title)
 
+            links = content.get('_links', {})
+            webui = links.get('webui', '')
+            url = f'{links.get("base", self._base_url)}{webui}' if webui else None
+
             return Document(
                 id=page_id,
                 path=path,
@@ -189,6 +198,7 @@ class ConfluenceSource(Source):
                 updated_at=updated_at,
                 source_type='confluence',
                 size=len(text.encode('utf-8')),
+                url=url,
                 creator=creator,
                 created_at=created_at,
             )

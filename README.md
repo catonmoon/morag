@@ -9,6 +9,8 @@ RAG-система для локальных Markdown-файлов (и Confluenc
 - **Умное чанкование** — цепочка сплиттеров по заголовкам, таблицам, семантике; опциональный LLM-чанкер
 - **Контекстуализация** — LLM генерирует суммари роли каждого чанка в документе
 - **Идемпотентность** — повторная индексация пропускает неизменённые документы
+- **Параллельная индексация** — configurable concurrency для одновременной загрузки документов
+- **Ссылки на источники** — URL Confluence-страниц сохраняются при индексации и отображаются в ретривале
 - **Поддержка русского языка** — модели FRIDA и GTE-multilingual
 
 ## Стек
@@ -67,6 +69,7 @@ indexing:
   block_limit: 32000
   dense_model: ai-forever/FRIDA
   sparse_model: Alibaba-NLP/gte-multilingual-base
+  concurrency: 1          # параллельных воркеров (3-5 для Confluence с vision LLM)
 ```
 
 ### 4. Индексация
@@ -83,17 +86,22 @@ poetry run python -m cli.main index --reset --config config.yml
 
 ### Пайплайн индексации
 
+Сначала загружаются метаданные всех документов и выполняется idempotency-проверка.
+Затем документы, требующие переиндексации, обрабатываются конкурентно (до `concurrency`
+одновременно). Каждый документ проходит полный цикл без накопления в памяти:
+
 ```
-Source.load()
-  → Idempotency check          # updated_at + size + счётчик чанков
-  → DocumentProcessor chain    # обогащение метаданных
-  → docs.upsert()              # сохранить документ до чанкования
-  → RecursiveSplitter          # разбивка на блоки (заголовки → таблицы → семантика → fixed)
-  → pack_blocks                # жадная упаковка блоков до block_limit токенов
-  → Chunker                    # LLM или Passthrough
-  → ContextGenerator           # LLM-суммари или Noop
-  → ChunkProcessor chain       # dense + sparse векторы, payload
-  → chunks.upsert()
+Source.get_metadata()              # метаданные всех документов (без контента)
+  → Idempotency check              # updated_at + size + счётчик чанков; load_one не вызывается
+  ┌─ [W1] Source.load_one() ──────────────────────────────────────────────────┐
+  │    → DocumentProcessor chain   # обогащение метаданных                   │
+  │    → docs.upsert()             # сохранить документ до чанкования         │
+  │    → RecursiveSplitter         # разбивка на блоки                        │  ← concurrency
+  │    → Chunker                   # LLM или Passthrough                      │    параллельных
+  │    → ContextGenerator          # LLM-суммари или Noop                     │    воркеров
+  │    → ChunkProcessor chain      # dense + sparse векторы, payload          │
+  │    → chunks.upsert()           #                                          │
+  └────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Режимы чанкинга
@@ -109,8 +117,10 @@ Source.load()
 
 | Коллекция | Содержимое |
 |---|---|
-| `docs` | Полный текст + метаданные документов |
-| `chunks` | Чанки: текст, контекст, dense-вектор `full`, sparse-вектор `keywords` |
+| `docs` | Полный текст + метаданные документов (`id`, `path`, `url`, `updated_at`, `creator`, ...) |
+| `chunks` | Чанки: текст, контекст, dense-вектор `full`, sparse-вектор `keywords`, payload (`url`, `creator`, ...) |
+
+Поле `url` содержит абсолютную ссылку на источник. Для Confluence берётся из `_links` ответа API в момент индексации. Для Markdown — не заполняется. В ретривале используется для отображения кликабельных ссылок на источники.
 
 ### Пайплайн ретривала
 

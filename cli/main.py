@@ -130,6 +130,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         chunk_processors=chunk_processors,
         block_limit=block_limit,
         token_counter=token_counter,
+        concurrency=config.indexing.concurrency,
     )
 
     logger.info('Chunker: %s, context: %s, block_limit: %d', config.indexing.chunker, config.indexing.context, block_limit)

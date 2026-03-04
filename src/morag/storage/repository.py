@@ -26,7 +26,7 @@ def _doc_id_to_point_id(doc_id: str) -> str:
 
 def _payload_to_document(payload: dict) -> Document:
     """Восстановить Document из Qdrant payload."""
-    core_keys = {'id', 'path', 'text', 'updated_at', 'source_type', 'size', 'indexed_at', 'creator', 'created_at'}
+    core_keys = {'id', 'path', 'text', 'updated_at', 'source_type', 'size', 'url', 'indexed_at', 'creator', 'created_at'}
     indexed_at_raw = payload.get('indexed_at')
     created_at_raw = payload.get('created_at')
     return Document(
@@ -36,6 +36,7 @@ def _payload_to_document(payload: dict) -> Document:
         updated_at=datetime.fromisoformat(payload['updated_at']),
         source_type=payload['source_type'],
         size=payload.get('size', 0),
+        url=payload.get('url'),
         indexed_at=datetime.fromisoformat(indexed_at_raw) if indexed_at_raw else None,
         creator=payload.get('creator'),
         created_at=datetime.fromisoformat(created_at_raw) if created_at_raw else None,
@@ -76,6 +77,8 @@ class DocRepository:
             'indexed_at': datetime.now(timezone.utc).isoformat(),
             **document.payload,
         }
+        if document.url is not None:
+            payload['url'] = document.url
         if document.creator is not None:
             payload['creator'] = document.creator
         if document.created_at is not None:

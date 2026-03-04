@@ -135,7 +135,7 @@ class Pipeline:
 
         # Emit citations
         for chunk in result_chunks:
-            yield self._emit_source(chunk['path'], chunk['text'])
+            yield self._emit_source(chunk['path'], chunk['text'], chunk.get('url'))
 
         # 5. Стриминг финального ответа
         context = self._build_context(result_chunks)
@@ -418,14 +418,19 @@ class Pipeline:
         return {'event': {'type': 'status', 'data': {'description': f'{emoji} {text}', 'done': done}}}
 
     @staticmethod
-    def _emit_source(name: str, content: str) -> dict[str, Any]:
+    def _emit_source(name: str, content: str, url: str | None = None) -> dict[str, Any]:
+        metadata: dict[str, Any] = {'source': name}
+        source: dict[str, Any] = {'name': name}
+        if url:
+            metadata['url'] = url
+            source['url'] = url
         return {
             'event': {
                 'type': 'citation',
                 'data': {
                     'document': [content],
-                    'metadata': [{'source': name}],
-                    'source': {'name': name},
+                    'metadata': [metadata],
+                    'source': source,
                 },
             }
         }
@@ -465,5 +470,6 @@ def _point_to_chunk(p: dict) -> dict:
         'context': payload.get('context', ''),
         'updated_at': payload.get('updated_at', ''),
         'creator': payload.get('creator', ''),
+        'url': payload.get('url'),
         'score': p.get('score', 0.0),
     }

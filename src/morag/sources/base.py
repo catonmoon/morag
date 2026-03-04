@@ -16,6 +16,7 @@ class Document:
     updated_at: datetime                       # дата последнего изменения файла (mtime)
     source_type: str                           # "markdown" | "confluence"
     size: int = 0                              # размер файла в байтах
+    url: str | None = None                    # ссылка на источник (для Confluence — URL страницы, для Markdown — None)
     indexed_at: datetime | None = None        # дата индексации (выставляется репозиторием при upsert)
     creator: str | None = None                # автор документа (из frontmatter / git / Confluence history)
     created_at: datetime | None = None        # дата создания документа

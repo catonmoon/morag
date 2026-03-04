@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from morag.indexing.chunker import Chunker, PassthroughChunker
@@ -46,6 +47,7 @@ class IndexingPipeline:
         context_generator: ContextGenerator | None = None,
         token_counter: TokenCounter | None = None,
         block_limit: int = _DEFAULT_BLOCK_LIMIT,
+        concurrency: int = 1,
     ) -> None:
         self._doc_repo = doc_repo
         self._chunk_repo = chunk_repo
@@ -55,6 +57,7 @@ class IndexingPipeline:
         self._context_generator = context_generator or NoopContextGenerator()
         self._token_counter = token_counter or TiktokenCounter()
         self._block_limit = block_limit
+        self._concurrency = max(1, concurrency)
         self._splitter = RecursiveSplitter(
             self._token_counter,
             self._block_limit,
@@ -64,36 +67,6 @@ class IndexingPipeline:
                 FixedSizeSplitter(self._token_counter, self._block_limit),
             ],
         )
-
-    async def index_source(self, source: Source) -> list[Document]:
-        """Загрузить документы из source и подготовить к чанкованию.
-
-        Сначала запрашивает только метаданные (get_metadata), затем загружает полный
-        контент (load_one) только для документов, которые требуют (пере)индексации.
-        Возвращает только те документы, которые прошли подготовку.
-        """
-        stubs = await source.get_metadata()
-        total = len(stubs)
-        logger.info('Loaded metadata for %d document(s) from source', total)
-
-        to_index: list[Document] = []
-        for i, stub in enumerate(stubs):
-            logger.info('[%d/%d] Checking: %s', i + 1, total, stub.id)
-            if await self._is_up_to_date(stub):
-                logger.info('Document up to date, skipping: %s', stub.id)
-                continue
-
-            document = await source.load_one(stub.id)
-            if document is None:
-                logger.warning('Failed to load document: %s', stub.id)
-                continue
-
-            result = await self._prepare_document(document)
-            if result is not None:
-                to_index.append(result)
-
-        logger.info('Documents to index: %d, skipped: %d', len(to_index), total - len(to_index))
-        return to_index
 
     async def _is_up_to_date(self, stub: Document) -> bool:
         """Проверить актуальность документа по стабу метаданных без загрузки контента."""
@@ -113,12 +86,12 @@ class IndexingPipeline:
         count, total = status
         return count == total
 
-    async def _prepare_document(self, document: Document) -> Document | None:
+    async def _prepare_document(self, document: Document, w: str = '') -> Document | None:
         """Проверить idempotency, удалить устаревшее, сохранить документ.
 
         Возвращает обработанный документ или None если документ актуален.
         """
-        logger.info('Preparing document: %s (size=%d)', document.id, document.size)
+        logger.info('%sPreparing document: %s (size=%d)', w, document.id, document.size)
         existing = await self._doc_repo.get_by_id(document.id)
 
         if existing is not None:
@@ -132,11 +105,11 @@ class IndexingPipeline:
                 if status is not None:
                     count, total = status
                     if count == total:
-                        logger.info('Document up to date, skipping: %s', document.id)
+                        logger.info('%sDocument up to date, skipping: %s', w, document.id)
                         return None
 
             # Документ изменился или индексация была прервана — удаляем каскадно
-            logger.info('Re-indexing document: %s', document.id)
+            logger.info('%sRe-indexing document: %s', w, document.id)
             await self._chunk_repo.delete_by_doc_id(document.id)
             await self._doc_repo.delete(document.id)
 
@@ -146,43 +119,73 @@ class IndexingPipeline:
 
         # Сохраняем документ до начала чанкования
         await self._doc_repo.upsert(document)
-        logger.info('Document saved: %s', document.id)
+        logger.info('%sDocument saved: %s', w, document.id)
 
         return document
 
     async def run(self, source: Source) -> None:
-        """Полный цикл индексации: загрузка → чанкование → сохранение в Qdrant."""
-        documents = await self.index_source(source)
-        total = len(documents)
-        for i, document in enumerate(documents):
-            await self._chunk_document(document, pos=i + 1, total=total)
-        logger.info('Indexing complete: %d document(s) indexed', total)
+        """Полный цикл индексации с параллельной обработкой документов.
 
-    async def _chunk_document(self, document: Document, pos: int = 1, total: int = 1) -> None:
+        Сначала загружаются метаданные всех документов и выполняется idempotency-проверка.
+        Затем документы, требующие переиндексации, обрабатываются конкурентно — не более
+        `concurrency` одновременно. Каждый документ: load_one → prepare → chunk → upsert.
+        """
+        stubs = await source.get_metadata()
+        total = len(stubs)
+        logger.info('Loaded metadata for %d document(s) from source (concurrency=%d)', total, self._concurrency)
+
+        sem = asyncio.Semaphore(self._concurrency)
+
+        async def process_one(i: int, stub: Document) -> bool:
+            """Обработать один документ. Возвращает True если был проиндексирован."""
+            w = f'[W{i}] ' if self._concurrency > 1 else ''
+            async with sem:
+                logger.info('%sChecking [%d/%d]: %s', w, i, total, stub.id)
+                if await self._is_up_to_date(stub):
+                    logger.info('%sDocument up to date, skipping: %s', w, stub.id)
+                    return False
+
+                document = await source.load_one(stub.id)
+                if document is None:
+                    logger.warning('%sFailed to load document: %s', w, stub.id)
+                    return False
+
+                prepared = await self._prepare_document(document, w=w)
+                if prepared is None:
+                    return False
+
+                await self._chunk_document(prepared, w=w)
+                return True
+
+        results = await asyncio.gather(*[process_one(i + 1, stub) for i, stub in enumerate(stubs)])
+        indexed = sum(results)
+        logger.info('Indexing complete: %d indexed, %d skipped', indexed, total - indexed)
+
+    async def _chunk_document(self, document: Document, w: str = '') -> None:
         """Разбить документ на чанки и сохранить в Qdrant."""
-        logger.info('[%d/%d] Chunking: %s', pos, total, document.id)
+        logger.info('%sChunking: %s', w, document.id)
 
         # Pre-split на блоки + жадная упаковка
         blocks = self._splitter.split(document.text)
         packs = pack_blocks(blocks, self._token_counter, self._block_limit)
-        logger.info('  Pre-split: %d block(s) -> %d pack(s)', len(blocks), len(packs))
+        logger.info('%s  Pre-split: %d block(s) -> %d pack(s)', w, len(blocks), len(packs))
 
         # Chunker: каждая пачка → список текстов чанков
         chunk_texts: list[str] = []
         for i, pack in enumerate(packs):
             block_text = '\n\n'.join(pack)
-            logger.info('  Chunking pack %d/%d (%d chars)...', i + 1, len(packs), len(block_text))
+            logger.info('%s  Chunking pack %d/%d (%d chars)...', w, i + 1, len(packs), len(block_text))
             new_chunks = await self._chunker.chunk(block_text)
-            logger.info('    -> %d chunk(s)', len(new_chunks))
+            logger.info('%s    -> %d chunk(s)', w, len(new_chunks))
             chunk_texts.extend(new_chunks)
 
         total = len(chunk_texts)
-        logger.info('  Total chunks: %d', total)
+        logger.info('%s  Total chunks: %d', w, total)
 
         # Собираем Chunk-объекты с order/total, генерируем context, применяем процессоры
         chunks: list[Chunk] = []
         for order, text in enumerate(chunk_texts):
-            logger.info('  Processing chunk %d/%d: %s...', order + 1, total, repr(text[:60]))
+            logger.info('%s  Processing chunk %d/%d: %s...', w, order + 1, total, repr(text[:60]))
             context = await self._context_generator.generate(document.text, text)
 
             chunk = Chunk(
@@ -203,8 +206,8 @@ class IndexingPipeline:
                 else f"{k}:sparse({len(v['indices'])})"
                 for k, v in chunk.vectors.items()
             )
-            logger.info('    vectors: [%s]', vec_summary)
+            logger.info('%s    vectors: [%s]', w, vec_summary)
             chunks.append(chunk)
 
         await self._chunk_repo.upsert_batch(chunks)
-        logger.info('Chunks saved: %s (%d)', document.id, total)
+        logger.info('%sChunks saved: %s (%d)', w, document.id, total)

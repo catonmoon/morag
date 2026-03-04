@@ -79,4 +79,6 @@ class MetadataProcessor(ChunkProcessor):
             chunk.payload['creator'] = document.creator
         if document.created_at is not None:
             chunk.payload['created_at'] = document.created_at.isoformat()
+        if document.url is not None:
+            chunk.payload['url'] = document.url
         return chunk

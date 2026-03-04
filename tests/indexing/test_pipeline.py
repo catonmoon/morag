@@ -58,14 +58,19 @@ def chunk_repo() -> AsyncMock:
 
 @pytest.fixture
 def pipeline(doc_repo, chunk_repo) -> IndexingPipeline:
-    return IndexingPipeline(doc_repo, chunk_repo)
+    return IndexingPipeline(
+        doc_repo, chunk_repo,
+        chunker=PassthroughChunker(),
+        context_generator=NoopContextGenerator(),
+    )
 
 
 # ---------------------------------------------------------------------------
-# IndexingPipeline
+# IndexingPipeline.run() — полный цикл
 # ---------------------------------------------------------------------------
 
-class TestIndexingPipeline:
+class TestIndexingPipelineRun:
+
     async def test_indexes_new_document(self, pipeline, doc_repo, chunk_repo):
         """Новый документ (не найден в Qdrant) должен быть сохранён."""
         doc_repo.get_by_id.return_value = None
@@ -73,9 +78,8 @@ class TestIndexingPipeline:
         source = MagicMock(spec=Source)
         setup_source(source, [make_document()])
 
-        result = await pipeline.index_source(source)
+        await pipeline.run(source)
 
-        assert len(result) == 1
         doc_repo.upsert.assert_called_once()
 
     async def test_skips_up_to_date_document(self, pipeline, doc_repo, chunk_repo):
@@ -87,9 +91,8 @@ class TestIndexingPipeline:
         source = MagicMock(spec=Source)
         source.get_metadata.return_value = [make_stub(updated_at=ts, size=1024)]
 
-        result = await pipeline.index_source(source)
+        await pipeline.run(source)
 
-        assert result == []
         doc_repo.upsert.assert_not_called()
         chunk_repo.delete_by_doc_id.assert_not_called()
         source.load_one.assert_not_called()
@@ -104,9 +107,8 @@ class TestIndexingPipeline:
         source = MagicMock(spec=Source)
         setup_source(source, [make_document(updated_at=new_ts)])
 
-        result = await pipeline.index_source(source)
+        await pipeline.run(source)
 
-        assert len(result) == 1
         chunk_repo.delete_by_doc_id.assert_called_once_with('test.md')
         doc_repo.delete.assert_called_once_with('test.md')
         doc_repo.upsert.assert_called_once()
@@ -119,9 +121,8 @@ class TestIndexingPipeline:
         source = MagicMock(spec=Source)
         setup_source(source, [make_document(updated_at=ts, size=2048)])
 
-        result = await pipeline.index_source(source)
+        await pipeline.run(source)
 
-        assert len(result) == 1
         chunk_repo.delete_by_doc_id.assert_called_once_with('test.md')
         doc_repo.delete.assert_called_once_with('test.md')
         doc_repo.upsert.assert_called_once()
@@ -130,14 +131,13 @@ class TestIndexingPipeline:
         """Если индексация была прервана (count < total), переиндексируем."""
         ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
         doc_repo.get_by_id.return_value = make_document(updated_at=ts)
-        chunk_repo.get_index_status.return_value = (2, 5)  # неполная индексация
+        chunk_repo.get_index_status.return_value = (2, 5)
 
         source = MagicMock(spec=Source)
         setup_source(source, [make_document(updated_at=ts)])
 
-        result = await pipeline.index_source(source)
+        await pipeline.run(source)
 
-        assert len(result) == 1
         doc_repo.upsert.assert_called_once()
 
     async def test_reindexes_when_no_chunks_but_doc_exists(self, pipeline, doc_repo, chunk_repo):
@@ -149,12 +149,11 @@ class TestIndexingPipeline:
         source = MagicMock(spec=Source)
         setup_source(source, [make_document(updated_at=ts)])
 
-        result = await pipeline.index_source(source)
+        await pipeline.run(source)
 
-        assert len(result) == 1
         doc_repo.upsert.assert_called_once()
 
-    async def test_applies_document_processors(self, pipeline, doc_repo, chunk_repo):
+    async def test_applies_document_processors(self, doc_repo, chunk_repo):
         """Процессор должен быть вызван и его результат сохранён."""
         doc_repo.get_by_id.return_value = None
 
@@ -162,17 +161,23 @@ class TestIndexingPipeline:
         enriched = make_document(payload={'author': 'Алиса'})
         processor.process.return_value = enriched
 
-        pipeline_with_proc = IndexingPipeline(doc_repo, chunk_repo, doc_processors=[processor])
+        pipeline = IndexingPipeline(
+            doc_repo, chunk_repo,
+            chunker=PassthroughChunker(),
+            context_generator=NoopContextGenerator(),
+            doc_processors=[processor],
+        )
 
         source = MagicMock(spec=Source)
         setup_source(source, [make_document()])
 
-        result = await pipeline_with_proc.index_source(source)
+        await pipeline.run(source)
 
         processor.process.assert_called_once()
-        assert result[0].payload.get('author') == 'Алиса'
+        saved_doc = doc_repo.upsert.call_args[0][0]
+        assert saved_doc.payload.get('author') == 'Алиса'
 
-    async def test_multiple_processors_applied_in_order(self, pipeline, doc_repo, chunk_repo):
+    async def test_multiple_processors_applied_in_order(self, doc_repo, chunk_repo):
         """Цепочка процессоров применяется последовательно."""
         doc_repo.get_by_id.return_value = None
 
@@ -187,12 +192,17 @@ class TestIndexingPipeline:
                 return document
 
         chain = [OrderTracker('first'), OrderTracker('second'), OrderTracker('third')]
-        p = IndexingPipeline(doc_repo, chunk_repo, doc_processors=chain)
+        pipeline = IndexingPipeline(
+            doc_repo, chunk_repo,
+            chunker=PassthroughChunker(),
+            context_generator=NoopContextGenerator(),
+            doc_processors=chain,
+        )
 
         source = MagicMock(spec=Source)
         setup_source(source, [make_document()])
 
-        await p.index_source(source)
+        await pipeline.run(source)
 
         assert calls == ['first', 'second', 'third']
 
@@ -207,27 +217,31 @@ class TestIndexingPipeline:
             make_document('c.md'),
         ])
 
-        result = await pipeline.index_source(source)
+        await pipeline.run(source)
 
-        assert len(result) == 3
         assert doc_repo.upsert.call_count == 3
+        assert chunk_repo.upsert_batch.call_count == 3
 
-    async def test_document_saved_before_returned(self, pipeline, doc_repo, chunk_repo):
-        """Документ сохраняется в Qdrant до того как возвращается для чанкования."""
+    async def test_document_saved_before_chunks(self, pipeline, doc_repo, chunk_repo):
+        """Документ сохраняется в Qdrant до сохранения чанков."""
         doc_repo.get_by_id.return_value = None
-        upsert_called_before_return = []
+        call_order = []
 
-        async def track_upsert(doc):
-            upsert_called_before_return.append(doc.id)
+        async def track_doc_upsert(doc):
+            call_order.append('doc_upsert')
 
-        doc_repo.upsert.side_effect = track_upsert
+        async def track_chunk_upsert(chunks):
+            call_order.append('chunk_upsert')
+
+        doc_repo.upsert.side_effect = track_doc_upsert
+        chunk_repo.upsert_batch.side_effect = track_chunk_upsert
 
         source = MagicMock(spec=Source)
         setup_source(source, [make_document()])
 
-        result = await pipeline.index_source(source)
+        await pipeline.run(source)
 
-        assert result[0].id in upsert_called_before_return
+        assert call_order == ['doc_upsert', 'chunk_upsert']
 
     async def test_load_one_not_called_for_up_to_date(self, pipeline, doc_repo, chunk_repo):
         """load_one не вызывается для актуальных документов."""
@@ -238,7 +252,7 @@ class TestIndexingPipeline:
         source = MagicMock(spec=Source)
         source.get_metadata.return_value = [make_stub(updated_at=ts, size=1024)]
 
-        await pipeline.index_source(source)
+        await pipeline.run(source)
 
         source.load_one.assert_not_called()
 
@@ -251,28 +265,13 @@ class TestIndexingPipeline:
         source.get_metadata.return_value = [make_stub()]
         source.load_one.return_value = doc
 
-        await pipeline.index_source(source)
+        await pipeline.run(source)
 
         source.load_one.assert_called_once_with('test.md')
 
-
-# ---------------------------------------------------------------------------
-# IndexingPipeline.run() — полный цикл
-# ---------------------------------------------------------------------------
-
-class TestIndexingPipelineRun:
-    def _make_pipeline(self, doc_repo, chunk_repo, **kwargs) -> IndexingPipeline:
-        return IndexingPipeline(
-            doc_repo, chunk_repo,
-            chunker=PassthroughChunker(),
-            context_generator=NoopContextGenerator(),
-            **kwargs,
-        )
-
-    async def test_run_saves_chunks(self, doc_repo, chunk_repo):
-        """run() должен сохранить чанки для каждого нового документа."""
+    async def test_run_saves_chunks(self, pipeline, doc_repo, chunk_repo):
+        """run() сохраняет чанки для каждого нового документа."""
         doc_repo.get_by_id.return_value = None
-        pipeline = self._make_pipeline(doc_repo, chunk_repo)
 
         source = MagicMock(spec=Source)
         setup_source(source, [make_document(text='# Заголовок\n\nТекст.')])
@@ -283,24 +282,9 @@ class TestIndexingPipelineRun:
         chunks = chunk_repo.upsert_batch.call_args[0][0]
         assert len(chunks) == 1
 
-    async def test_run_skips_up_to_date_document(self, doc_repo, chunk_repo):
-        """run() не трогает чанки если документ актуален."""
-        ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
-        doc_repo.get_by_id.return_value = make_document(updated_at=ts, size=1024)
-        chunk_repo.get_index_status.return_value = (1, 1)
-        pipeline = self._make_pipeline(doc_repo, chunk_repo)
-
-        source = MagicMock(spec=Source)
-        source.get_metadata.return_value = [make_stub(updated_at=ts, size=1024)]
-
-        await pipeline.run(source)
-
-        chunk_repo.upsert_batch.assert_not_called()
-
-    async def test_chunk_has_correct_doc_id(self, doc_repo, chunk_repo):
+    async def test_chunk_has_correct_doc_id(self, pipeline, doc_repo, chunk_repo):
         """Чанки ссылаются на id документа."""
         doc_repo.get_by_id.return_value = None
-        pipeline = self._make_pipeline(doc_repo, chunk_repo)
 
         source = MagicMock(spec=Source)
         setup_source(source, [make_document('guide.md')])
@@ -313,15 +297,18 @@ class TestIndexingPipelineRun:
     async def test_chunk_order_and_total(self, doc_repo, chunk_repo):
         """order и total выставлены корректно."""
         doc_repo.get_by_id.return_value = None
-        pipeline = self._make_pipeline(doc_repo, chunk_repo)
 
-        # Три блока которые PassthroughChunker вернёт как три чанка
         from morag.indexing.chunker import Chunker
+
         class TripleChunker(Chunker):
             async def chunk(self, block):
                 return ['A', 'B', 'C']
 
-        pipeline._chunker = TripleChunker()
+        pipeline = IndexingPipeline(
+            doc_repo, chunk_repo,
+            chunker=TripleChunker(),
+            context_generator=NoopContextGenerator(),
+        )
 
         source = MagicMock(spec=Source)
         setup_source(source, [make_document()])
@@ -333,10 +320,9 @@ class TestIndexingPipelineRun:
         assert [c.order for c in chunks] == [0, 1, 2]
         assert all(c.total == 3 for c in chunks)
 
-    async def test_noop_context_sets_empty_string(self, doc_repo, chunk_repo):
+    async def test_noop_context_sets_empty_string(self, pipeline, doc_repo, chunk_repo):
         """NoopContextGenerator оставляет context пустым."""
         doc_repo.get_by_id.return_value = None
-        pipeline = self._make_pipeline(doc_repo, chunk_repo)
 
         source = MagicMock(spec=Source)
         setup_source(source, [make_document()])
@@ -355,7 +341,12 @@ class TestIndexingPipelineRun:
                 chunk.payload['tagged'] = True
                 return chunk
 
-        pipeline = self._make_pipeline(doc_repo, chunk_repo, chunk_processors=[TagProcessor()])
+        pipeline = IndexingPipeline(
+            doc_repo, chunk_repo,
+            chunker=PassthroughChunker(),
+            context_generator=NoopContextGenerator(),
+            chunk_processors=[TagProcessor()],
+        )
 
         source = MagicMock(spec=Source)
         setup_source(source, [make_document()])
@@ -365,26 +356,10 @@ class TestIndexingPipelineRun:
         chunks = chunk_repo.upsert_batch.call_args[0][0]
         assert all(c.payload.get('tagged') is True for c in chunks)
 
-    async def test_run_multiple_documents(self, doc_repo, chunk_repo):
-        """Несколько документов — несколько вызовов upsert_batch."""
-        doc_repo.get_by_id.return_value = None
-        pipeline = self._make_pipeline(doc_repo, chunk_repo)
-
-        source = MagicMock(spec=Source)
-        setup_source(source, [
-            make_document('a.md'),
-            make_document('b.md'),
-        ])
-
-        await pipeline.run(source)
-
-        assert chunk_repo.upsert_batch.call_count == 2
-
-    async def test_chunks_inherit_updated_at(self, doc_repo, chunk_repo):
+    async def test_chunks_inherit_updated_at(self, pipeline, doc_repo, chunk_repo):
         """updated_at чанков совпадает с updated_at документа."""
         doc_repo.get_by_id.return_value = None
         ts = datetime(2024, 6, 1, tzinfo=timezone.utc)
-        pipeline = self._make_pipeline(doc_repo, chunk_repo)
 
         source = MagicMock(spec=Source)
         setup_source(source, [make_document(updated_at=ts)])
