@@ -10,7 +10,8 @@ import hashlib
 import json
 import os
 import requests
-from itertools import groupby
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from typing import Any, Dict, Generator, Iterator, List, Union
 
 import numpy as np
@@ -47,6 +48,8 @@ class Pipeline:
         INTENT_MODEL: str
         INTENT_API_KEY: str
 
+        HTTP_TIMEOUT: int = 180  # таймаут HTTP-запросов (секунды)
+
     def __init__(self):
         self.valves = self.Valves(
             QDRANT_URL=os.getenv('QDRANT_URL', 'http://qdrant:6333'),
@@ -66,11 +69,12 @@ class Pipeline:
             FILTER_MODEL=os.getenv('FILTER_MODEL', os.getenv('LLM_MODEL', 'qwen2.5:7b')),
             FILTER_API_KEY=os.getenv('FILTER_API_KEY', os.getenv('LLM_API_KEY', 'ollama')),
             FILTER_MAX_TOKENS=int(os.getenv('FILTER_MAX_TOKENS', '50')),
-            FILTER_TEMPERATURE=float(os.getenv('FILTER_TEMPERATURE', '0.1')),
+            FILTER_TEMPERATURE=float(os.getenv('FILTER_TEMPERATURE', '0.0')),
 
             INTENT_MODEL_URL=os.getenv('INTENT_MODEL_URL', os.getenv('LLM_URL', 'http://localhost:11434/v1')),
             INTENT_MODEL=os.getenv('INTENT_MODEL', os.getenv('LLM_MODEL', 'qwen2.5:7b')),
             INTENT_API_KEY=os.getenv('INTENT_API_KEY', os.getenv('LLM_API_KEY', 'ollama')),
+            HTTP_TIMEOUT=int(os.getenv('HTTP_TIMEOUT', '180')),
         )
 
     def pipe(
@@ -80,32 +84,47 @@ class Pipeline:
         messages: List[Dict],
         body: Dict,
     ) -> Union[str, Generator, Iterator]:
-        # 1. Извлечь intent
-        intent = self._extract_intent(messages)
-        yield self._emit_status('🔎', intent, False)
+        # 1. Извлечь intent (список поисковых запросов)
+        intents = self._extract_intent(messages)
+        yield self._emit_status('🔎', ' | '.join(intents), False)
 
-        # 2. Гибридный поиск
-        chunks = self._search(intent, self.valves.QDRANT_NUM_RESULTS)
+        # 2. Гибридный поиск по всем запросам параллельно
+        with ThreadPoolExecutor() as executor:
+            results = list(executor.map(
+                lambda q: self._search(q, self.valves.QDRANT_NUM_RESULTS), intents,
+            ))
+        # Дедупликация по chunk_id, оставляем максимальный score
+        seen: dict[str, dict] = {}
+        for batch in results:
+            for chunk in batch:
+                cid = chunk['chunk_id']
+                if cid not in seen or chunk['score'] > seen[cid]['score']:
+                    seen[cid] = chunk
+        chunks = sorted(seen.values(), key=lambda x: x['score'], reverse=True)
+        chunks = chunks[:self.valves.QDRANT_NUM_RESULTS]
 
         # 3. Расширить соседними чанками
         if self.valves.NEIGHBOR_WINDOW > 0 and chunks:
             chunks = self._expand_neighbors(chunks, self.valves.NEIGHBOR_WINDOW)
 
+        # 4. Слить контигуальные группы соседей в один чанк для реранкинга
+        chunks = self._merge_into_groups(chunks)
+
         yield self._emit_status('🔍', f'Фильтрую {len(chunks)} чанков...', False)
 
-        # 4. Reranker: параллельный бинарный фильтр (по документу)
+        # 5. Reranker: бинарный фильтр по merged-чанкам
         yield '<think>'
         result_chunks: list[dict] = []
-        chunks_by_doc = sorted(chunks, key=lambda x: x['doc_id'])
-        for _, group_iter in groupby(chunks_by_doc, key=lambda x: x['doc_id']):
-            for chunk in group_iter:
-                answer = self._filter_chunk(intent, chunk)
-                if not answer.startswith('0'):
-                    result_chunks.append(chunk)
-                    comment = answer.split('|', 1)[1].strip() if '|' in answer else answer.strip()
-                    doc_name = chunk['path'].split('/')[-1]
-                    yield f'[{doc_name}]: ✔ {comment}\n'
+        for chunk in chunks:
+            answer = self._filter_chunk(' | '.join(intents), chunk)
+            if not answer.startswith('0'):
+                result_chunks.append(chunk)
+                comment = answer.split('|', 1)[1].strip() if '|' in answer else answer.strip()
+                doc_name = chunk['path'].split('/')[-1]
+                yield f'[{doc_name}]: ✔ {comment}\n'
         yield '</think>'
+
+        result_chunks.sort(key=lambda x: (-_parse_ts(x['updated_at']), x['doc_id'], x['order']))
 
         if not result_chunks:
             yield self._emit_status('❌', 'Релевантных чанков не найдено', True)
@@ -124,27 +143,44 @@ class Pipeline:
 
     # ── Intent extraction ─────────────────────────────────────────────────────
 
-    def _extract_intent(self, messages: List[dict]) -> str:
-        """Если один вопрос — вернуть как есть. Иначе — сформулировать поисковый запрос через LLM."""
-        if len(messages) == 1:
-            return messages[0].get('content', '').strip()
+    _INTENTS_SCHEMA = {
+        'type': 'object',
+        'properties': {
+            'queries': {
+                'type': 'array',
+                'items': {'type': 'string'},
+                'minItems': 1,
+                'maxItems': 3,
+            },
+        },
+        'required': ['queries'],
+        'additionalProperties': False,
+    }
 
+    def _extract_intent(self, messages: List[dict]) -> list[str]:
+        """Сформулировать 1-3 поисковых запроса по истории диалога."""
         dialog = '\n'.join(
             f"{'User' if m['role'] == 'user' else 'Assistant'}: {m.get('content', '').strip()}"
             for m in messages if m['role'] in ('user', 'assistant')
         )
         prompt = (
-            'Ты помощник, который преобразует диалог в точный поисковый запрос.\n'
-            'Прочитай историю диалога и сформулируй суть того, что сейчас хочет узнать пользователь.\n'
-            'Сформулируй кратко, как поисковый запрос. Не используй фразы "пользователь спрашивает".\n\n'
-            f'Диалог:\n{dialog}\n\n'
-            'Поисковый запрос:'
+            'Ты агент с базой знаний документации.\n'
+            'Прочитай диалог и определи: какие конкретные факты, термины или инструкции тебе не хватает,\n'
+            'чтобы дать исчерпывающий ответ пользователю.\n'
+            'Сформулируй 1-3 коротких поисковых запроса — каждый покрывает отдельный аспект вопроса.\n'
+            'Только ключевые термины, без лишних слов.\n\n'
+            f'Диалог:\n{dialog}'
         )
-        return self._llm_complete(
+        result = self._llm_complete_json(
             self.valves.INTENT_MODEL_URL, self.valves.INTENT_MODEL, self.valves.INTENT_API_KEY,
             [{'role': 'user', 'content': prompt}],
-            temperature=0.1,
-        ).strip()
+            schema=self._INTENTS_SCHEMA,
+            temperature=0.0,
+            seed=42,
+            max_tokens=150,
+        )
+        queries = [q.strip() for q in result.get('queries', []) if q.strip()]
+        return queries or [messages[-1].get('content', '').strip()]
 
     # ── Reranker ──────────────────────────────────────────────────────────────
 
@@ -165,22 +201,53 @@ class Pipeline:
             [{'role': 'user', 'content': prompt}],
             temperature=self.valves.FILTER_TEMPERATURE,
             max_tokens=self.valves.FILTER_MAX_TOKENS,
+            seed=42,
         )
 
     # ── LLM helpers ───────────────────────────────────────────────────────────
 
-    def _llm_complete(
+    def _llm_complete_json(
         self, url: str, model: str, api_key: str,
-        messages: list, temperature: float = 0.1, max_tokens: int | None = None,
-    ) -> str:
-        payload: dict = {'model': model, 'messages': messages, 'temperature': temperature}
-        if max_tokens:
+        messages: list, schema: dict,
+        temperature: float = 0.0, seed: int | None = None, max_tokens: int | None = None,
+    ) -> dict:
+        payload: dict = {
+            'model': model,
+            'messages': messages,
+            'temperature': temperature,
+            'response_format': {
+                'type': 'json_schema',
+                'json_schema': {'name': 'result', 'schema': schema, 'strict': True},
+            },
+        }
+        if seed is not None:
+            payload['seed'] = seed
+        if max_tokens is not None:
             payload['max_tokens'] = max_tokens
         resp = requests.post(
             f'{url.rstrip("/")}/chat/completions',
             headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
             json=payload,
-            timeout=60,
+            timeout=self.valves.HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return json.loads(resp.json()['choices'][0]['message']['content'])
+
+    def _llm_complete(
+        self, url: str, model: str, api_key: str,
+        messages: list, temperature: float = 0.1, max_tokens: int | None = None,
+        seed: int | None = None,
+    ) -> str:
+        payload: dict = {'model': model, 'messages': messages, 'temperature': temperature}
+        if max_tokens:
+            payload['max_tokens'] = max_tokens
+        if seed is not None:
+            payload['seed'] = seed
+        resp = requests.post(
+            f'{url.rstrip("/")}/chat/completions',
+            headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'},
+            json=payload,
+            timeout=self.valves.HTTP_TIMEOUT,
         )
         resp.raise_for_status()
         return resp.json()['choices'][0]['message']['content']
@@ -201,7 +268,7 @@ class Pipeline:
             },
             json=payload,
             stream=True,
-            timeout=120,
+            timeout=self.valves.HTTP_TIMEOUT,
         )
         resp.raise_for_status()
         for line in resp.iter_lines(decode_unicode=True):
@@ -235,13 +302,13 @@ class Pipeline:
 
     def _embed_dense(self, text: str) -> list:
         payload = {'input': f'search_query: {text}', 'encoding_format': 'base64'}
-        resp = requests.post(f'{self.valves.DENSE_EMBED_URL}/v1/embeddings', json=payload, timeout=30)
+        resp = requests.post(f'{self.valves.DENSE_EMBED_URL}/v1/embeddings', json=payload, timeout=self.valves.HTTP_TIMEOUT)
         resp.raise_for_status()
         b64 = resp.json()['data'][0]['embedding']
         return np.frombuffer(base64.b64decode(b64), dtype=np.float32).tolist()
 
     def _embed_sparse(self, text: str) -> tuple[list, list]:
-        resp = requests.post(f'{self.valves.SPARSE_EMBED_URL}/encode', json={'text': text}, timeout=30)
+        resp = requests.post(f'{self.valves.SPARSE_EMBED_URL}/encode', json={'text': text}, timeout=self.valves.HTTP_TIMEOUT)
         resp.raise_for_status()
         token_weights = resp.json()['token_weights'][0]
         return _sparse_dict_to_indices_values(token_weights)
@@ -262,7 +329,7 @@ class Pipeline:
             'with_payload': True,
         }
         url = f'{self.valves.QDRANT_URL}/collections/{self.valves.QDRANT_COLLECTION}/points/query'
-        resp = requests.post(url, json=payload, timeout=30)
+        resp = requests.post(url, json=payload, timeout=self.valves.HTTP_TIMEOUT)
         resp.raise_for_status()
         points = resp.json().get('result', {}).get('points', [])
         return [_point_to_chunk(p) for p in points]
@@ -292,6 +359,36 @@ class Pipeline:
         all_chunks = chunks + extra
         return sorted(all_chunks, key=lambda x: (x['doc_id'], x['order']))
 
+    @staticmethod
+    def _merge_into_groups(chunks: list[dict]) -> list[dict]:
+        """Слить контигуальные последовательности чанков одного документа в один merged-чанк.
+
+        Чанки уже отсортированы по (doc_id, order) после _expand_neighbors.
+        Центральный чанк группы — тот у кого наибольший score (оригинал из RRF);
+        соседи имеют score=0.0. Текст объединяется через двойной перенос строки.
+        """
+        if not chunks:
+            return []
+
+        groups: list[list[dict]] = []
+        current: list[dict] = [chunks[0]]
+        for chunk in chunks[1:]:
+            prev = current[-1]
+            if chunk['doc_id'] == prev['doc_id'] and chunk['order'] == prev['order'] + 1:
+                current.append(chunk)
+            else:
+                groups.append(current)
+                current = [chunk]
+        groups.append(current)
+
+        merged: list[dict] = []
+        for group in groups:
+            central = max(group, key=lambda x: x['score'])
+            result = dict(central)
+            result['text'] = '\n\n'.join(c['text'] for c in group)
+            merged.append(result)
+        return merged
+
     def _fetch_chunk_by_order(self, doc_id: str, order: int) -> dict | None:
         payload = {
             'filter': {
@@ -304,7 +401,7 @@ class Pipeline:
             'with_payload': True,
         }
         url = f'{self.valves.QDRANT_URL}/collections/{self.valves.QDRANT_COLLECTION}/points/scroll'
-        resp = requests.post(url, json=payload, timeout=10)
+        resp = requests.post(url, json=payload, timeout=self.valves.HTTP_TIMEOUT)
         resp.raise_for_status()
         points = resp.json().get('result', {}).get('points', [])
         if not points:
@@ -335,6 +432,14 @@ class Pipeline:
 
 
 # ── Module-level helpers ───────────────────────────────────────────────────────
+
+def _parse_ts(s: str) -> float:
+    """ISO-строку → unix timestamp для сортировки. При ошибке возвращает 0.0."""
+    try:
+        return datetime.fromisoformat(s).replace(tzinfo=timezone.utc).timestamp()
+    except Exception:
+        return 0.0
+
 
 def _sparse_dict_to_indices_values(sparse_dict: dict) -> tuple[list, list]:
     """MD5(word) % 4_294_967_295 → индекс. НЕ МЕНЯТЬ — ломает индекс."""

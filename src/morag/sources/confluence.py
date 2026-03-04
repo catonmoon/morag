@@ -20,12 +20,13 @@ logger = logging.getLogger(__name__)
 _CQL_PAGE_SIZE = 200
 
 _IMAGE_PROMPT = (
-    'Опиши это изображение кратко и точно на русском языке. '
-    'Если это диаграмма, схема или таблица — опиши её структуру и содержание. '
-    'Если это скриншот интерфейса — опиши что на нём показано. '
-    'Ответь одним абзацем без вступительных фраз.'
+    "Твоя задача проанализировать и представить в текстовом markdown виде переданное изображение которое встретилось в пользовательской документации.\n"
+    "Если изображение это скриншот текстового терминала, то необходимо выдать заголовок «скриншот терминала» и вывести его текстовое содержимое.\n"
+    "Если изображение это диаграмма или векторная фигура, представимая в виде plantuml, то это должен быть plantuml код и ничего больше.\n"
+    "Если изображение это скриншот программной формы, то необходимо выдать заголовок «скриншот формы» и далее сжатое текстовое описание этой формы, ее назначение и важные поля.\n"
+    "Если изображение это скриншот HTML, то необходимо выдать заголовок «скриншот HTML» и далее сжатое текстовое описание, назначение и важные элементы.\n"
+    "Во всех остальных случаях нужно вывести заголовок «изображение» и краткое описание изображения."
 )
-
 
 class ConfluenceSource(Source):
     """Источник страниц из Confluence.
@@ -51,6 +52,7 @@ class ConfluenceSource(Source):
             username=config.username,
             password=credential,
             cloud=config.api_token is not None,
+            timeout=config.timeout,
         )
         self._base_url = config.url.rstrip('/')
         self._spaces = config.spaces
@@ -58,6 +60,7 @@ class ConfluenceSource(Source):
         self._skip_ancestor_ids = config.skip_ancestor_ids
         self._vision_client = vision_client
         self._min_image_size_bytes = config.min_image_size_bytes
+        self._timeout = config.timeout
 
     async def get_metadata(self) -> list[Document]:
         """Вернуть стабы страниц Confluence: только метаданные, без тела и изображений."""
@@ -271,7 +274,7 @@ class ConfluenceSource(Source):
         try:
             url = src if src.startswith('http') else urljoin(self._base_url, src)
             # Используем сессию atlassian клиента — она уже содержит авторизацию
-            response = self._client._session.get(url, timeout=10)
+            response = self._client._session.get(url, timeout=self._timeout)
             response.raise_for_status()
             return response.content
         except Exception:

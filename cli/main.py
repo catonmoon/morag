@@ -67,6 +67,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         base_url=config.llm.base_url,
         model=config.llm.model,
         api_key=config.llm.api_key,
+        timeout=config.llm.timeout,
     )
 
     vision_client = None
@@ -75,6 +76,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             base_url=config.llm_vision.base_url,
             model=config.llm_vision.model,
             api_key=config.llm_vision.api_key,
+            timeout=config.llm_vision.timeout,
         )
         logger.info('Vision LLM: %s @ %s', config.llm_vision.model, config.llm_vision.base_url)
 

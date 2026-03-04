@@ -112,6 +112,41 @@ Source.load()
 | `docs` | Полный текст + метаданные документов |
 | `chunks` | Чанки: текст, контекст, dense-вектор `full`, sparse-вектор `keywords` |
 
+### Пайплайн ретривала
+
+Ретривал реализован как Open WebUI Pipeline (`services/pipeline/morag.py`):
+
+```
+extract_intent (LLM)
+  → hybrid_search (Qdrant RRF: sparse + dense) → N чанков
+  → expand_neighbors (±NEIGHBOR_WINDOW соседних чанков по doc_id + order)
+  → merge_into_groups (контигуальные соседи объединяются в один merged-чанк)
+  → reranker (LLM бинарный фильтр, один вызов на merged-чанк)
+  → sort by (updated_at desc, doc_id, order) — свежие документы первыми
+  → stream_answer (LLM, SSE)
+```
+
+**Слияние соседей перед реранкингом.** После расширения соседями, контигуальные
+последовательности чанков одного документа объединяются в один merged-чанк. Метаданные
+(path, context, updated_at и др.) берутся из центрального чанка — того у кого наибольший
+RRF-score (оригинал из поиска). Соседи имеют score=0.0. Это сокращает число LLM-вызовов
+реранкера с ~3×N до ≤N (не более чем исходное число результатов поиска).
+
+**Сортировка по свежести.** После реранкинга результаты сортируются по `updated_at desc`,
+сохраняя последовательный порядок чанков внутри каждого документа (`order asc`). LLM
+получает наиболее актуальные источники первыми.
+
+**Ключевые параметры** (env vars в `docker-compose.yml`):
+
+| Параметр | По умолчанию | Описание |
+|---|---|---|
+| `QDRANT_NUM_RESULTS` | `30` | Число чанков из RRF-поиска |
+| `NEIGHBOR_WINDOW` | `1` | Окно соседей (±N по order) |
+| `FILTER_MAX_TOKENS` | `50` | Лимит токенов для LLM-реранкера |
+
+> **После изменения `services/pipeline/morag.py`** нужно пересобрать образ:
+> `docker compose build pipelines && docker compose up -d pipelines`
+
 ## Разработка
 
 ```bash
@@ -150,6 +185,5 @@ morag/
     │   ├── processors.py          # ChunkProcessor / DocumentProcessor
     │   └── pipeline.py            # Оркестратор
     ├── storage/                   # Qdrant: коллекции и репозитории
-    ├── retrieval/                 # Гибридный поиск + reranker (в разработке)
     └── llm/client.py              # OpenAI-совместимый клиент
 ```

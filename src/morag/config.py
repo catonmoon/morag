@@ -19,6 +19,7 @@ class ConfluenceConfig(BaseModel):
     ancestor_ids: list[str] = []       # фильтр по ancestor page id; пусто — без фильтра
     skip_ancestor_ids: list[str] = []  # исключить страницы и всех их потомков
     min_image_size_bytes: int | None = None  # пропускать изображения меньше этого размера (байт); None — без фильтрации
+    timeout: int = 180  # таймаут HTTP-запросов к Confluence API и скачивания изображений (секунды)
 
 
 class SourcesConfig(BaseModel):
@@ -37,6 +38,7 @@ class LLMConfig(BaseModel):
     base_url: str = 'http://localhost:11434/v1'
     model: str = 'qwen2.5-coder:7b'
     api_key: str = 'ollama'
+    timeout: int = 180  # таймаут HTTP-запросов к LLM (секунды)
 
 
 class IndexingConfig(BaseModel):

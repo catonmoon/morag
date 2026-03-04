@@ -28,8 +28,8 @@ class LLMClient:
     via the base_url parameter.
     """
 
-    def __init__(self, base_url: str, model: str, api_key: str = 'ollama') -> None:
-        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+    def __init__(self, base_url: str, model: str, api_key: str = 'ollama', timeout: int = 180) -> None:
+        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         self._model = model
 
     async def complete(

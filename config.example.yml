@@ -10,6 +10,7 @@ sources:
     # ancestor_ids: ["123456", "789012"]       # индексировать только потомков этих страниц (приоритет над spaces)
     # skip_ancestor_ids: ["333444"]            # исключить эти страницы и всех их потомков
     # min_image_size_bytes: 3072              # пропускать изображения меньше N байт (SVG всегда пропускаются); не задано — без фильтрации
+    # timeout: 180                            # таймаут HTTP-запросов к Confluence API (секунды; по умолчанию 180)
 
 qdrant:
   host: localhost
@@ -21,6 +22,7 @@ llm:
   base_url: http://localhost:11434/v1
   model: qwen2.5-coder:7b
   api_key: ollama
+  # timeout: 180                  # таймаут HTTP-запросов к LLM (секунды; по умолчанию 180)
 
 # llm_vision — multimodal LLM для описания изображений со страниц Confluence (опционально)
 # Если не задан, изображения пропускаются при индексации
