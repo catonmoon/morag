@@ -43,6 +43,7 @@ class MarkdownSource(Source):
                 updated_at=updated_at,
                 source_type='markdown',
                 size=stat.st_size,
+                url=path.as_uri(),
             )
         except OSError:
             return None
@@ -62,6 +63,7 @@ class MarkdownSource(Source):
                 updated_at=updated_at,
                 source_type='markdown',
                 size=stat.st_size,
+                url=path.as_uri(),
             )
         except OSError:
             return None

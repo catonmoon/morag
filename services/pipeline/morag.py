@@ -35,6 +35,8 @@ class Pipeline:
         LLM_MODEL: str
         LLM_API_KEY: str
         LLM_TEMPERATURE: float
+        LLM_MAX_TOKENS: int
+        LLM_REPETITION_PENALTY: float
 
         # LLM для reranker (бинарный фильтр)
         FILTER_MODEL_URL: str
@@ -64,6 +66,8 @@ class Pipeline:
             LLM_MODEL=os.getenv('LLM_MODEL', 'qwen2.5:7b'),
             LLM_API_KEY=os.getenv('LLM_API_KEY', 'ollama'),
             LLM_TEMPERATURE=float(os.getenv('LLM_TEMPERATURE', '0.1')),
+            LLM_MAX_TOKENS=int(os.getenv('LLM_MAX_TOKENS', '2048')),
+            LLM_REPETITION_PENALTY=float(os.getenv('LLM_REPETITION_PENALTY', '1.1')),
 
             FILTER_MODEL_URL=os.getenv('FILTER_MODEL_URL', os.getenv('LLM_URL', 'http://localhost:11434/v1')),
             FILTER_MODEL=os.getenv('FILTER_MODEL', os.getenv('LLM_MODEL', 'qwen2.5:7b')),
@@ -133,9 +137,12 @@ class Pipeline:
 
         yield self._emit_status('✅', f'Найдено {len(result_chunks)} релевантных чанков', True)
 
-        # Emit citations
+        # Emit citations (один на чанк, source_id=chunk_id чтобы избежать дедупликации по имени файла)
         for chunk in result_chunks:
-            yield self._emit_source(chunk['path'], chunk['text'], chunk.get('url'))
+            yield self._emit_source(
+                chunk['path'].split('/')[-1], chunk['text'], chunk.get('url'),
+                source_id=chunk['chunk_id'],
+            )
 
         # 5. Стриминг финального ответа
         context = self._build_context(result_chunks)
@@ -258,6 +265,8 @@ class Pipeline:
             'model': self.valves.LLM_MODEL,
             'messages': augmented,
             'temperature': self.valves.LLM_TEMPERATURE,
+            'max_tokens': self.valves.LLM_MAX_TOKENS,
+            'repetition_penalty': self.valves.LLM_REPETITION_PENALTY,
             'stream': True,
         }
         resp = requests.post(
@@ -286,17 +295,29 @@ class Pipeline:
                 continue
 
     @staticmethod
-    def _build_context(chunks: list) -> str:
-        parts = [
-            f'Начало чанка №{i}\n'
-            f'Путь: {c["path"]}\n'
-            f'Контекст: {c["context"]}\n'
-            f'Текст: {c["text"]}\n'
-            f'Дата актуальности: {c["updated_at"]}\n'
-            f'Конец чанка №{i}'
-            for i, c in enumerate(chunks)
-        ]
-        return 'Информация из базы знаний:\n\n' + '\n\n'.join(parts)
+    def _build_context(chunks: list[dict]) -> str:
+        parts = []
+        for n, c in enumerate(chunks, start=1):
+            lines = [
+                f'Начало чанка [{n}]',
+                f'Путь: {c["path"]}',
+            ]
+            if c.get('url'):
+                lines.append(f'URL: {c["url"]}')
+            lines += [
+                f'Контекст: {c["context"]}',
+                f'Текст: {c["text"]}',
+                f'Дата актуальности: {c["updated_at"]}',
+                f'Конец чанка [{n}]',
+            ]
+            parts.append('\n'.join(lines))
+        instruction = (
+            'При использовании информации из чанков вставляй маркер [N] '
+            'прямо в текст ответа сразу после утверждения, где N — номер чанка-источника. '
+            'Например: "Функция X делает Y [1]." '
+            'Если утверждение основано на нескольких чанках — перечисляй: [1][2].'
+        )
+        return 'Информация из базы знаний:\n\n' + '\n\n'.join(parts) + '\n\n' + instruction
 
     # ── Embeddings ────────────────────────────────────────────────────────────
 
@@ -418,8 +439,8 @@ class Pipeline:
         return {'event': {'type': 'status', 'data': {'description': f'{emoji} {text}', 'done': done}}}
 
     @staticmethod
-    def _emit_source(name: str, content: str, url: str | None = None) -> dict[str, Any]:
-        metadata: dict[str, Any] = {'source': name}
+    def _emit_source(name: str, content: str, url: str | None = None, source_id: str | None = None) -> dict[str, Any]:
+        metadata: dict[str, Any] = {'source': source_id or name, 'name': name, 'html': False}
         source: dict[str, Any] = {'name': name}
         if url:
             metadata['url'] = url
