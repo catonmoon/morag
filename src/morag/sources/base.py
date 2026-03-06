@@ -43,6 +43,12 @@ class Chunk:
 class Source(ABC):
     """Абстрактный источник документов."""
 
+    @property
+    @abstractmethod
+    def source_type(self) -> str:
+        """Тип источника: 'markdown' | 'confluence' | 'jira'."""
+        ...
+
     @abstractmethod
     async def get_metadata(self) -> list[Document]:
         """Вернуть стабы документов: только id, updated_at, source_type, size. text=''."""

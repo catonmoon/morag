@@ -14,6 +14,10 @@ class MarkdownSource(Source):
     В будущем обработка других форматов (PDF, DOCX) добавляется через DocumentProcessor.
     """
 
+    @property
+    def source_type(self) -> str:
+        return 'markdown'
+
     def __init__(self, root: Path | str) -> None:
         self._root = Path(root).resolve()
 
