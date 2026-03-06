@@ -42,7 +42,7 @@ class TestMarkdownSource:
         docs = await source.load()
         for doc in docs:
             assert not Path(doc.id).is_absolute()
-            assert doc.id == doc.path
+            assert doc.path == [doc.id]
 
     async def test_source_type_is_markdown(self, source):
         docs = await source.load()

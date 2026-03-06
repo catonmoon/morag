@@ -124,7 +124,7 @@ class Pipeline:
             if not answer.startswith('0'):
                 result_chunks.append(chunk)
                 comment = answer.split('|', 1)[1].strip() if '|' in answer else answer.strip()
-                doc_name = chunk['path'].split('/')[-1]
+                doc_name = chunk['path'][0].split('/')[-1] if chunk['path'] else chunk['doc_id']
                 yield f'[{doc_name}]: ✔ {comment}\n'
         yield '</think>'
 
@@ -139,8 +139,9 @@ class Pipeline:
 
         # Emit citations (один на чанк, source_id=chunk_id чтобы избежать дедупликации по имени файла)
         for chunk in result_chunks:
+            doc_name = chunk['path'][0].split('/')[-1] if chunk['path'] else chunk['doc_id']
             yield self._emit_source(
-                chunk['path'].split('/')[-1], chunk['text'], chunk.get('url'),
+                doc_name, chunk['text'], chunk.get('url'),
                 source_id=chunk['chunk_id'],
             )
 
@@ -192,11 +193,12 @@ class Pipeline:
     # ── Reranker ──────────────────────────────────────────────────────────────
 
     def _filter_chunk(self, query: str, chunk: dict) -> str:
+        path_display = ' | '.join(chunk['path']) if chunk['path'] else chunk['doc_id']
         prompt = (
             f'Ты фильтр чанков для ответа на вопрос: "{query}"\n\n'
             f'Основной текст чанка:\n{chunk["text"]}\n\n'
             f'Контекст чанка:\n{chunk["context"]}\n\n'
-            f'Путь документа: {chunk["path"]}\n\n'
+            f'Путь документа: {path_display}\n\n'
             'Если чанк содержит информацию, относящуюся к вопросу, верни:\n'
             '1 | <2-4 слова: краткое пояснение>\n\n'
             'Если чанк НЕ содержит релевантной информации, верни только:\n'
@@ -298,9 +300,10 @@ class Pipeline:
     def _build_context(chunks: list[dict]) -> str:
         parts = []
         for n, c in enumerate(chunks, start=1):
+            path_display = ' | '.join(c['path']) if c['path'] else c['doc_id']
             lines = [
                 f'Начало чанка [{n}]',
-                f'Путь: {c["path"]}',
+                f'Путь: {path_display}',
             ]
             if c.get('url'):
                 lines.append(f'URL: {c["url"]}')
@@ -481,10 +484,13 @@ def _sparse_dict_to_indices_values(sparse_dict: dict) -> tuple[list, list]:
 
 def _point_to_chunk(p: dict) -> dict:
     payload = p.get('payload', {})
+    # path может быть списком (новый формат) или строкой (старые данные)
+    path_raw = payload.get('path', '')
+    paths: list[str] = path_raw if isinstance(path_raw, list) else ([path_raw] if path_raw else [])
     return {
         'chunk_id': str(p['id']),
         'doc_id': payload.get('doc_id', ''),
-        'path': payload.get('path', ''),
+        'path': paths,
         'order': payload.get('order', 0),
         'total': payload.get('total', 0),
         'text': payload.get('text', ''),
@@ -492,5 +498,6 @@ def _point_to_chunk(p: dict) -> dict:
         'updated_at': payload.get('updated_at', ''),
         'creator': payload.get('creator', ''),
         'url': payload.get('url'),
+        'source_type': payload.get('source_type', ''),
         'score': p.get('score', 0.0),
     }

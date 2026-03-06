@@ -45,7 +45,7 @@ class DenseEmbeddingProcessor(ChunkProcessor):
         self._embedder = embedder
 
     def process(self, chunk: Chunk, document: Document) -> Chunk:
-        full_text = f'{chunk.path}\n{chunk.text}\n{chunk.context}'
+        full_text = f'{"\n".join(chunk.path)}\n{chunk.text}\n{chunk.context}'
         chunk.vectors['full'] = self._embedder.embed(full_text)
         return chunk
 
@@ -75,6 +75,7 @@ class MetadataProcessor(ChunkProcessor):
     """
 
     def process(self, chunk: Chunk, document: Document) -> Chunk:
+        chunk.payload['source_type'] = document.source_type
         if document.creator is not None:
             chunk.payload['creator'] = document.creator
         if document.created_at is not None:

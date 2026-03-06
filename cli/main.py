@@ -19,6 +19,8 @@ from morag.indexing.processors import DenseEmbeddingProcessor, MetadataProcessor
 from morag.indexing.token_counter import TiktokenCounter
 from morag.llm.client import LLMClient
 from morag.sources.confluence import ConfluenceSource
+from morag.sources.jira import JiraSource
+from morag.sources.jira_extractor import JiraLinkExtractor
 from morag.sources.markdown import MarkdownSource
 from morag.storage.collections import (
     ensure_chunks_collection,
@@ -136,6 +138,19 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
     logger.info('Chunker: %s, context: %s, block_limit: %d', config.indexing.chunker, config.indexing.context, block_limit)
     for source in sources:
         await pipeline.run(source)
+
+    # Jira: сканируем проиндексированные документы на ссылки, затем индексируем задачи
+    if config.sources.jira:
+        logger.info('Source: jira url=%s', config.sources.jira.url)
+        all_docs = await doc_repo.scroll_all(exclude_source_types=['jira'])
+        logger.info('Scanning %d indexed document(s) for Jira links...', len(all_docs))
+        extractor = JiraLinkExtractor(config.sources.jira.url)
+        issue_map = extractor.extract_from_docs(all_docs)
+        if issue_map:
+            jira_source = JiraSource(config.sources.jira, issue_map)
+            await pipeline.run(jira_source)
+        else:
+            logger.info('No Jira issues found in indexed documents, skipping Jira indexing')
 
     await client.close()
 

@@ -22,9 +22,18 @@ class ConfluenceConfig(BaseModel):
     timeout: int = 180  # таймаут HTTP-запросов к Confluence API и скачивания изображений (секунды)
 
 
+class JiraConfig(BaseModel):
+    url: str
+    username: str
+    password: str | None = None        # on-premise
+    api_token: str | None = None       # Atlassian Cloud
+    timeout: int = 180                 # таймаут HTTP-запросов к Jira API (секунды)
+
+
 class SourcesConfig(BaseModel):
     local_documents: LocalDocumentsConfig | None = None
     confluence: ConfluenceConfig | None = None
+    jira: JiraConfig | None = None
 
 
 class QdrantConfig(BaseModel):

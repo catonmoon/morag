@@ -40,7 +40,7 @@ class FakeEmbedder(Embedder):
 def make_document() -> Document:
     return Document(
         id='test.md',
-        path='test.md',
+        path=['test.md'],
         text='# Тест',
         updated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
         source_type='markdown',
@@ -50,7 +50,7 @@ def make_document() -> Document:
 def make_chunk() -> Chunk:
     return Chunk(
         doc_id='test.md',
-        path='test.md',
+        path=['test.md'],
         order=0,
         total=1,
         text='Текст чанка.',
@@ -178,9 +178,9 @@ class TestDenseEmbeddingProcessor:
         processor = DenseEmbeddingProcessor(embedder)
 
         chunk_a = make_chunk()
-        chunk_a.path = 'docs/guide.md'
+        chunk_a.path = ['docs/guide.md']
         chunk_b = make_chunk()
-        chunk_b.path = 'docs/faq.md'
+        chunk_b.path = ['docs/faq.md']
 
         result_a = processor.process(chunk_a, make_document())
         result_b = processor.process(chunk_b, make_document())

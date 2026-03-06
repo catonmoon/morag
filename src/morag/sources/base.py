@@ -11,10 +11,10 @@ class Document:
     """Документ из внешнего источника данных."""
 
     id: str                                    # стабильный идентификатор: относительный путь или confluence page id
-    path: str                                  # путь для отображения (совпадает с id)
+    path: list[str]                            # пути для отображения; список — один документ может встречаться в нескольких местах
     text: str                                  # полный текст в Markdown
     updated_at: datetime                       # дата последнего изменения файла (mtime)
-    source_type: str                           # "markdown" | "confluence"
+    source_type: str                           # "markdown" | "confluence" | "jira"
     size: int = 0                              # размер файла в байтах
     url: str | None = None                    # ссылка на источник (для Confluence — URL страницы, для Markdown — None)
     indexed_at: datetime | None = None        # дата индексации (выставляется репозиторием при upsert)
@@ -28,11 +28,12 @@ class Chunk:
     """Чанк документа, готовый к сохранению в Qdrant."""
 
     doc_id: str                                       # ссылка на Document.id
-    path: str                                         # путь документа (для фильтрации)
+    path: list[str]                                   # пути документа (список, как у Document)
     order: int                                        # порядковый номер в документе (0-based)
     total: int                                        # общее количество чанков документа
     text: str                                         # основной текст чанка
     updated_at: datetime                              # наследуется от Document
+    source_type: str = ''                             # тип источника (копируется с Document)
     context: str = ''                                 # LLM-суммари (пусто если NoopContextGenerator)
     payload: dict = field(default_factory=dict)       # метаданные от ChunkProcessor-ов
     vectors: dict[str, list[float] | dict] = field(default_factory=dict)  # именованные векторы от embedding-процессоров

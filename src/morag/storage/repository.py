@@ -8,6 +8,7 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     FilterSelector,
+    MatchAny,
     MatchValue,
     PointIdsList,
     PointStruct,
@@ -29,9 +30,12 @@ def _payload_to_document(payload: dict) -> Document:
     core_keys = {'id', 'path', 'text', 'updated_at', 'source_type', 'size', 'url', 'indexed_at', 'creator', 'created_at'}
     indexed_at_raw = payload.get('indexed_at')
     created_at_raw = payload.get('created_at')
+    # backwards compat: path мог быть строкой в старых данных
+    path_raw = payload['path']
+    path = path_raw if isinstance(path_raw, list) else [path_raw]
     return Document(
         id=payload['id'],
-        path=payload['path'],
+        path=path,
         text=payload['text'],
         updated_at=datetime.fromisoformat(payload['updated_at']),
         source_type=payload['source_type'],
@@ -95,6 +99,34 @@ class DocRepository:
             collection_name=self._collection,
             points_selector=PointIdsList(points=[point_id]),
         )
+
+    async def scroll_all(self, exclude_source_types: list[str] | None = None) -> list[Document]:
+        """Вернуть все документы. Опционально исключить по source_type."""
+        scroll_filter = None
+        if exclude_source_types:
+            scroll_filter = Filter(
+                must_not=[FieldCondition(key='source_type', match=MatchAny(any=exclude_source_types))]
+            )
+
+        docs: list[Document] = []
+        offset = None
+
+        while True:
+            points, offset = await self._client.scroll(
+                collection_name=self._collection,
+                scroll_filter=scroll_filter,
+                limit=100,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in points:
+                if point.payload:
+                    docs.append(_payload_to_document(point.payload))
+            if offset is None:
+                break
+
+        return docs
 
 
 class ChunkRepository:
@@ -161,6 +193,7 @@ class ChunkRepository:
             payload = {
                 'doc_id': chunk.doc_id,
                 'path': chunk.path,
+                'source_type': chunk.source_type,
                 'order': chunk.order,
                 'total': chunk.total,
                 'text': chunk.text,

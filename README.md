@@ -1,6 +1,6 @@
 # morag
 
-RAG-система для локальных Markdown-файлов (и Confluence) с поддержкой локальных LLM.
+RAG-система для локальных Markdown-файлов, Confluence и Jira с поддержкой локальных LLM.
 
 ## Возможности
 
@@ -10,7 +10,8 @@ RAG-система для локальных Markdown-файлов (и Confluenc
 - **Контекстуализация** — LLM генерирует суммари роли каждого чанка в документе
 - **Идемпотентность** — повторная индексация пропускает неизменённые документы
 - **Параллельная индексация** — configurable concurrency для одновременной загрузки документов
-- **Ссылки на источники** — URL Confluence-страниц сохраняются при индексации и отображаются в ретривале
+- **Ссылки на источники** — URL Confluence-страниц и Jira-задач сохраняются при индексации и отображаются в ретривале
+- **Jira-интеграция** — автоматическое обнаружение ссылок на задачи в документах и их индексация в контексте страницы
 - **Поддержка русского языка** — модели FRIDA и GTE-multilingual
 
 ## Стек
@@ -18,7 +19,7 @@ RAG-система для локальных Markdown-файлов (и Confluenc
 | Компонент | Технология |
 |---|---|
 | Векторная БД | [Qdrant](https://qdrant.tech) |
-| Dense embeddings | [ai-forever/FRIDA](https://huggingface.co/ai-forever/FRIDA) (1024-dim, Cosine) |
+| Dense embeddings | [ai-forever/FRIDA](https://huggingface.co/ai-forever/FRIDA) (1536-dim, Cosine) |
 | Sparse embeddings | [Alibaba-NLP/gte-multilingual-base](https://huggingface.co/Alibaba-NLP/gte-multilingual-base) |
 | LLM | Любой OpenAI-совместимый (Ollama, LM Studio, OpenAI, Anthropic через прокси) |
 
@@ -113,14 +114,29 @@ Source.get_metadata()              # метаданные всех докуме�
 | `llm` | `noop` | LLM делит блок на семантические чанки, без суммари. |
 | `llm` | `llm` | Максимальное качество: LLM-чанкинг + LLM-контекст. |
 
+### Источники данных
+
+| Источник | `source_type` | Описание |
+|---|---|---|
+| Markdown-файлы | `markdown` | Рекурсивный скан директории `*.md` |
+| Confluence | `confluence` | Страницы через REST API, HTML → Markdown; опциональное описание изображений через vision LLM |
+| Jira | `jira` | Задачи, обнаруженные по ссылкам в других документах; описание, комментарии, подзадачи |
+
+**Jira-интеграция** работает в два шага. Сначала индексируются Markdown и Confluence. Затем в уже
+проиндексированных текстах ищутся ссылки вида `{jira_url}/browse/PROJ-123` — и найденные задачи
+индексируются автоматически. Путь задачи строится относительно страницы, где она упоминалась:
+`Team/Sprint/PROJ-123`. Если задача встречается на нескольких страницах — у документа несколько путей.
+
 ### Коллекции Qdrant
 
 | Коллекция | Содержимое |
 |---|---|
-| `docs` | Полный текст + метаданные документов (`id`, `path`, `url`, `updated_at`, `creator`, ...) |
-| `chunks` | Чанки: текст, контекст, dense-вектор `full`, sparse-вектор `keywords`, payload (`url`, `creator`, ...) |
+| `docs` | Полный текст + метаданные документов (`id`, `path`, `source_type`, `url`, `updated_at`, `creator`, ...) |
+| `chunks` | Чанки: текст, контекст, dense-вектор `full`, sparse-вектор `keywords`, payload (`source_type`, `url`, `creator`, ...) |
 
-Поле `url` содержит абсолютную ссылку на источник. Для Confluence берётся из `_links` ответа API в момент индексации. Для Markdown — не заполняется. В ретривале используется для отображения кликабельных ссылок на источники.
+Поле `path` — список строк: один документ может иметь несколько путей (например, Jira-задача,
+упомянутая на нескольких страницах). Поле `url` содержит абсолютную ссылку на источник.
+В ретривале используется для отображения кликабельных ссылок.
 
 ### Пайплайн ретривала
 
@@ -184,9 +200,15 @@ docker compose logs | grep -i -E '(warning|error|exception)'
 morag/
 ├── config.example.yml
 ├── cli/main.py                    # CLI: команда index
+├── scripts/
+│   └── jira_preview.py            # Превью Jira-задачи в консоль (для отладки)
 └── src/morag/
     ├── config.py                  # Pydantic-модели конфига
-    ├── sources/                   # Источники данных (Markdown, Confluence)
+    ├── sources/
+    │   ├── markdown.py            # MarkdownSource
+    │   ├── confluence.py          # ConfluenceSource
+    │   ├── jira.py                # JiraSource
+    │   └── jira_extractor.py      # JiraLinkExtractor — поиск ссылок в документах
     ├── indexing/                  # Пайплайн индексации
     │   ├── splitter.py            # Цепочка сплиттеров
     │   ├── chunker.py             # LLMChunker / PassthroughChunker
@@ -196,4 +218,13 @@ morag/
     │   └── pipeline.py            # Оркестратор
     ├── storage/                   # Qdrant: коллекции и репозитории
     └── llm/client.py              # OpenAI-совместимый клиент
+```
+
+## Отладка Jira
+
+Перед полной индексацией можно проверить, как выглядит задача в моделью markdown:
+
+```bash
+python scripts/jira_preview.py PROJ-123
+python scripts/jira_preview.py https://jira.example.com/browse/PROJ-123
 ```

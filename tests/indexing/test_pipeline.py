@@ -14,7 +14,7 @@ from morag.storage.repository import ChunkRepository, DocRepository
 def make_document(doc_id: str = 'test.md', updated_at: datetime | None = None, **kwargs) -> Document:
     defaults = dict(
         id=doc_id,
-        path=doc_id,
+        path=[doc_id],
         text='# Документ',
         updated_at=updated_at or datetime(2024, 1, 1, tzinfo=timezone.utc),
         source_type='markdown',
@@ -28,7 +28,7 @@ def make_stub(doc_id: str = 'test.md', updated_at: datetime | None = None, **kwa
     """Стаб метаданных документа (text='')."""
     defaults = dict(
         id=doc_id,
-        path=doc_id,
+        path=[doc_id],
         text='',
         updated_at=updated_at or datetime(2024, 1, 1, tzinfo=timezone.utc),
         source_type='markdown',
