@@ -34,6 +34,10 @@ class JiraSource(Source):
     Поддерживает on-premise (username + password) и Cloud (username + api_token).
     """
 
+    @property
+    def source_type(self) -> str:
+        return 'jira'
+
     def __init__(self, config: JiraConfig, issue_map: dict[str, list[str]]) -> None:
         credential = config.api_token or config.password
         if not credential:

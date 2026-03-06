@@ -159,20 +159,59 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
     for source in sources:
         await pipeline.run(source)
 
-    # Jira: сканируем проиндексированные документы на ссылки, затем индексируем задачи
+    # Jira: сканируем проиндексированные документы на ссылки, затем индексируем задачи.
+    # pipeline.run() вызывается даже при пустом issue_map — для удаления устаревших Jira-задач из базы.
     if config.sources.jira:
         logger.info('Source: jira url=%s', config.sources.jira.url)
         all_docs = await doc_repo.scroll_all(exclude_source_types=['jira'])
         logger.info('Scanning %d indexed document(s) for Jira links...', len(all_docs))
         extractor = JiraLinkExtractor(config.sources.jira.url)
         issue_map = extractor.extract_from_docs(all_docs)
-        if issue_map:
-            jira_source = JiraSource(config.sources.jira, issue_map)
-            await pipeline.run(jira_source)
-        else:
-            logger.info('No Jira issues found in indexed documents, skipping Jira indexing')
+        logger.info('Found %d Jira issue(s) in indexed documents', len(issue_map))
+        jira_source = JiraSource(config.sources.jira, issue_map)
+        await pipeline.run(jira_source)
 
     await client.close()
+
+
+async def cmd_serve(config_path: str) -> None:
+    """Запустить daemon-режим: индексация по cron-расписанию из конфига."""
+    config = load_config(config_path)
+    if not config.indexing.schedule:
+        logger.error('indexing.schedule is not set in config.yml — cannot start serve mode')
+        sys.exit(1)
+
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+    from apscheduler.triggers.cron import CronTrigger
+
+    async def run_index() -> None:
+        logger.info('Starting scheduled indexing...')
+        try:
+            await cmd_index(config_path)
+            logger.info('Scheduled indexing complete')
+        except Exception:
+            logger.exception('Scheduled indexing failed')
+
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(
+        run_index,
+        CronTrigger.from_crontab(config.indexing.schedule),
+        max_instances=1,
+        coalesce=True,
+        misfire_grace_time=None,
+    )
+    scheduler.start()
+    logger.info('Serve mode started. Schedule: %s', config.indexing.schedule)
+
+    logger.info('Running initial indexing...')
+    await run_index()
+
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except (KeyboardInterrupt, SystemExit):
+        scheduler.shutdown()
+        logger.info('Scheduler stopped')
 
 
 async def cmd_query(config_path: str, question: str, top_k: int) -> None:
@@ -252,6 +291,12 @@ def main() -> None:
         help='Удалить все коллекции Qdrant перед индексацией (полная переиндексация)',
     )
 
+    serve_parser = subparsers.add_parser('serve', help='Daemon-режим: индексация по расписанию из конфига')
+    serve_parser.add_argument(
+        '--config', default='config.yml', metavar='PATH',
+        help='Путь к конфигу (по умолчанию: config.yml)',
+    )
+
     query_parser = subparsers.add_parser('query', help='Гибридный поиск без LLM-ответа (для отладки)')
     query_parser.add_argument(
         '--config', default='config.yml', metavar='PATH',
@@ -267,6 +312,8 @@ def main() -> None:
 
     if args.command == 'index':
         asyncio.run(cmd_index(args.config, reset=args.reset))
+    elif args.command == 'serve':
+        asyncio.run(cmd_serve(args.config))
     elif args.command == 'query':
         asyncio.run(cmd_query(args.config, args.question, args.top_k))
     else:
