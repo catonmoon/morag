@@ -13,7 +13,15 @@ from qdrant_client import AsyncQdrantClient
 from morag.config import load_config
 from morag.indexing.chunker import LLMChunker, PassthroughChunker
 from morag.indexing.context import LLMContextGenerator, NoopContextGenerator
-from morag.indexing.embedder import FridaEmbedder, GteSparseEmbedder
+from morag.config import DenseEmbedderConfig, SparseEmbedderConfig
+from morag.indexing.embedder import (
+    Embedder,
+    FridaEmbedder,
+    GteSparseEmbedder,
+    HttpFridaEmbedder,
+    HttpGteSparseEmbedder,
+    SparseEmbedder,
+)
 from morag.indexing.pipeline import IndexingPipeline
 from morag.indexing.processors import DenseEmbeddingProcessor, MetadataProcessor, SparseEmbeddingProcessor
 from morag.indexing.token_counter import TiktokenCounter
@@ -29,6 +37,18 @@ from morag.storage.collections import (
     gte_sparse_vectors_config,
 )
 from morag.storage.repository import ChunkRepository, DocRepository
+
+def _make_dense_embedder(cfg: DenseEmbedderConfig) -> Embedder:
+    if cfg.base_url is not None:
+        return HttpFridaEmbedder(cfg.base_url, cfg.dim, cfg.timeout)
+    return FridaEmbedder(cfg.model)
+
+
+def _make_sparse_embedder(cfg: SparseEmbedderConfig) -> SparseEmbedder:
+    if cfg.base_url is not None:
+        return HttpGteSparseEmbedder(cfg.base_url, cfg.timeout)
+    return GteSparseEmbedder(cfg.model, device=cfg.device)
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -52,7 +72,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
                 logger.warning('Dropping collection: %s', name)
                 await client.delete_collection(name)
 
-    embedder = FridaEmbedder(config.indexing.dense_model)
+    embedder = _make_dense_embedder(config.indexing.dense_embedder)
 
     logger.info('Ensuring collections...')
     await ensure_docs_collection(client, config.qdrant.collection_docs)
@@ -103,7 +123,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             max_output_tokens=config.indexing.context_max_output_tokens,
         ) if config.indexing.context == 'llm' else NoopContextGenerator()
     )
-    sparse_embedder = GteSparseEmbedder(config.indexing.sparse_model, device=config.indexing.sparse_device)
+    sparse_embedder = _make_sparse_embedder(config.indexing.sparse_embedder)
     chunk_processors = [
         MetadataProcessor(),
         DenseEmbeddingProcessor(embedder),
@@ -162,8 +182,8 @@ async def cmd_query(config_path: str, question: str, top_k: int) -> None:
     logger.info('Connecting to Qdrant %s:%d', config.qdrant.host, config.qdrant.port)
     client = AsyncQdrantClient(host=config.qdrant.host, port=config.qdrant.port)
 
-    embedder = FridaEmbedder(config.indexing.dense_model)
-    sparse_embedder = GteSparseEmbedder(config.indexing.sparse_model, device=config.indexing.sparse_device)
+    embedder = _make_dense_embedder(config.indexing.dense_embedder)
+    sparse_embedder = _make_sparse_embedder(config.indexing.sparse_embedder)
 
     dense_vec = embedder.embed_query(question)
     sparse_indices, sparse_values = sparse_embedder.embed_query(question)

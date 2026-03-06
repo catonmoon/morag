@@ -1,4 +1,4 @@
-# morag
+# Morag
 
 RAG-система для локальных Markdown-файлов, Confluence и Jira с поддержкой локальных LLM.
 
@@ -10,8 +10,9 @@ RAG-система для локальных Markdown-файлов, Confluence �
 - **Контекстуализация** — LLM генерирует суммари роли каждого чанка в документе
 - **Идемпотентность** — повторная индексация пропускает неизменённые документы
 - **Параллельная индексация** — configurable concurrency для одновременной загрузки документов
-- **Ссылки на источники** — URL Confluence-страниц и Jira-задач сохраняются при индексации и отображаются в ретривале
+- **Цитаты и ссылки на источники** — URL Confluence-страниц и Jira-задач сохраняются при индексации; ответ содержит кликабельные ссылки на исходные документы с указанием пути и даты обновления
 - **Jira-интеграция** — автоматическое обнаружение ссылок на задачи в документах и их индексация в контексте страницы
+- **Пайплайн ретривала на базе Open WebUI** — реализован как Open WebUI Pipeline, но не зависит от него напрямую: совместим с любым OpenAI-compatible клиентом через стандартный `/v1/chat/completions`
 - **Поддержка русского языка** — модели FRIDA и GTE-multilingual
 
 ## Стек
@@ -68,8 +69,13 @@ indexing:
   chunker: passthrough    # passthrough | llm
   context: noop           # noop | llm
   block_limit: 32000
-  dense_model: ai-forever/FRIDA
-  sparse_model: Alibaba-NLP/gte-multilingual-base
+  dense_embedder:
+    model: ai-forever/FRIDA
+    # base_url: http://localhost:8082   # HTTP-режим (embedder-frida из docker-compose)
+    # dim: 1536                         # обязателен в HTTP-режиме
+  sparse_embedder:
+    model: Alibaba-NLP/gte-multilingual-base
+    # base_url: http://localhost:8081   # HTTP-режим (embedder-gte из docker-compose)
   concurrency: 1          # параллельных воркеров (3-5 для Confluence с vision LLM)
 ```
 
@@ -140,7 +146,10 @@ Source.get_metadata()              # метаданные всех докуме�
 
 ### Пайплайн ретривала
 
-Ретривал реализован как Open WebUI Pipeline (`services/pipeline/morag.py`):
+Ретривал реализован как Open WebUI Pipeline (`services/pipeline/morag.py`), но **не зависит
+от Open WebUI напрямую**: файл подключается как стандартный pipeline и совместим с любым
+клиентом через OpenAI-compatible API (`/v1/chat/completions`). Open WebUI — удобный
+front-end по умолчанию, но не обязательная зависимость.
 
 ```
 extract_intent (LLM)
@@ -149,8 +158,14 @@ extract_intent (LLM)
   → merge_into_groups (контигуальные соседи объединяются в один merged-чанк)
   → reranker (LLM бинарный фильтр, один вызов на merged-чанк)
   → sort by (updated_at desc, doc_id, order) — свежие документы первыми
-  → stream_answer (LLM, SSE)
+  → stream_answer (LLM, SSE) с цитатами и ссылками на источники
 ```
+
+**Цитаты и ссылки на источники.** Каждый релевантный чанк содержит метаданные из момента
+индексации: `path` (иерархический путь документа), `url` (прямая ссылка на Confluence-страницу
+или Jira-задачу), `updated_at`. В финальном ответе LLM получает эти данные и формирует
+раздел со ссылками на источники. Пользователь видит, из каких документов взят ответ, и
+может перейти к первоисточнику одним кликом.
 
 **Слияние соседей перед реранкингом.** После расширения соседями, контигуальные
 последовательности чанков одного документа объединяются в один merged-чанк. Метаданные
@@ -213,7 +228,7 @@ morag/
     │   ├── splitter.py            # Цепочка сплиттеров
     │   ├── chunker.py             # LLMChunker / PassthroughChunker
     │   ├── context.py             # LLMContextGenerator / NoopContextGenerator
-    │   ├── embedder.py            # FridaEmbedder + GteSparseEmbedder
+    │   ├── embedder.py            # FridaEmbedder, GteSparseEmbedder, HttpFridaEmbedder, HttpGteSparseEmbedder
     │   ├── processors.py          # ChunkProcessor / DocumentProcessor
     │   └── pipeline.py            # Оркестратор
     ├── storage/                   # Qdrant: коллекции и репозитории
