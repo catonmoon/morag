@@ -45,7 +45,23 @@ indexing:
   context: noop                 # noop | llm
   block_limit: 4000            # в llm-режиме автоматически ограничивается: min(block_limit, (llm_context_window - 512) / 2)
   llm_context_window: 32768     # контекстное окно LLM в токенах (qwen2.5: 32768, llama3: 8192, ...)
-  dense_model: ai-forever/FRIDA
-  sparse_model: Alibaba-NLP/gte-multilingual-base
-  # sparse_device: mps            # cpu | mps | cuda | (not set = auto-detect)
+
+  # Dense-эмбеддер (FRIDA)
+  # По умолчанию: локальная модель (загружается напрямую через sentence-transformers)
+  # HTTP-режим: раскомментировать base_url и dim (например, embedder-frida из docker-compose)
+  dense_embedder:
+    model: ai-forever/FRIDA
+    # base_url: http://localhost:8082   # если задан → HTTP-режим
+    # dim: 1536                         # обязателен в HTTP-режиме
+    # timeout: 30                       # таймаут HTTP-запросов (секунды; по умолчанию 30)
+
+  # Sparse-эмбеддер (GTE)
+  # По умолчанию: локальная модель (загружается напрямую через transformers)
+  # HTTP-режим: раскомментировать base_url (например, embedder-gte из docker-compose)
+  sparse_embedder:
+    model: Alibaba-NLP/gte-multilingual-base
+    # device: cpu                       # cpu | cuda | (не задано = авто; только в local-режиме)
+    # base_url: http://localhost:8081   # если задан → HTTP-режим
+    # timeout: 30                       # таймаут HTTP-запросов (секунды; по умолчанию 30)
+
   # concurrency: 1                # количество документов, обрабатываемых параллельно (по умолчанию 1)

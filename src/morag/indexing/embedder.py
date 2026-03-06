@@ -59,6 +59,35 @@ class FridaEmbedder(Embedder):
         return self._dim
 
 
+class HttpFridaEmbedder(Embedder):
+    """Dense-эмбеддинги через HTTP-эндпоинт (OpenAI-compatible /v1/embeddings).
+
+    Добавляет префиксы search_document: / search_query: перед отправкой — так же, как
+    локальный FridaEmbedder. Размерность вектора задаётся явно через параметр dim.
+    """
+
+    def __init__(self, base_url: str, dim: int, timeout: int = 30) -> None:
+        import httpx
+        self._client = httpx.Client(base_url=base_url, timeout=timeout)
+        self._dim = dim
+        logger.info('HttpFridaEmbedder → %s (dim=%d)', base_url, dim)
+
+    def _call(self, text: str) -> list[float]:
+        resp = self._client.post('/v1/embeddings', json={'input': text})
+        resp.raise_for_status()
+        return resp.json()['data'][0]['embedding']
+
+    def embed(self, text: str) -> list[float]:
+        return self._call(_DOCUMENT_PREFIX + text)
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._call(_QUERY_PREFIX + text)
+
+    @property
+    def dim(self) -> int:
+        return self._dim
+
+
 class SparseEmbedder(ABC):
     """Интерфейс вычисления sparse-эмбеддингов."""
 
@@ -191,3 +220,35 @@ class GteSparseEmbedder(SparseEmbedder):
 
     def embed_query(self, text: str) -> tuple[list[int], list[float]]:
         return self._encode_text(text)
+
+
+class HttpGteSparseEmbedder(SparseEmbedder):
+    """Sparse-эмбеддинги через HTTP-эндпоинт (POST /encode → {token_weights: [{word: weight}]}).
+
+    Хэширование токенов в индексы выполняется на стороне клиента через _word_to_index —
+    так же, как в GteSparseEmbedder. Это необходимо для консистентности индекса в Qdrant.
+    """
+
+    def __init__(self, base_url: str, timeout: int = 30) -> None:
+        import httpx
+        self._client = httpx.Client(base_url=base_url, timeout=timeout)
+        logger.info('HttpGteSparseEmbedder → %s', base_url)
+
+    def _call(self, text: str) -> tuple[list[int], list[float]]:
+        resp = self._client.post('/encode', json={'text': text})
+        resp.raise_for_status()
+        token_weights: dict[str, float] = resp.json()['token_weights'][0]
+        index_weight: dict[int, float] = {}
+        for word, weight in token_weights.items():
+            i = _word_to_index(word)
+            if i in index_weight:
+                index_weight[i] = max(index_weight[i], weight)
+            else:
+                index_weight[i] = weight
+        return list(index_weight.keys()), list(index_weight.values())
+
+    def embed(self, text: str) -> tuple[list[int], list[float]]:
+        return self._call(text)
+
+    def embed_query(self, text: str) -> tuple[list[int], list[float]]:
+        return self._call(text)
