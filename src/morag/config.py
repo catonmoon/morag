@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class LocalDocumentsConfig(BaseModel):
@@ -50,15 +50,34 @@ class LLMConfig(BaseModel):
     timeout: int = 180  # таймаут HTTP-запросов к LLM (секунды)
 
 
+class DenseEmbedderConfig(BaseModel):
+    model: str = 'ai-forever/FRIDA'
+    base_url: str | None = None   # если задан → HTTP-режим; иначе — локальная модель
+    dim: int | None = None        # обязателен в HTTP-режиме; в local-режиме определяется автоматически
+    timeout: int = 30             # таймаут HTTP-запросов (секунды; только в HTTP-режиме)
+
+    @model_validator(mode='after')
+    def _validate_http_dim(self) -> 'DenseEmbedderConfig':
+        if self.base_url is not None and self.dim is None:
+            raise ValueError('dense_embedder.dim is required when base_url is set (HTTP mode)')
+        return self
+
+
+class SparseEmbedderConfig(BaseModel):
+    model: str = 'Alibaba-NLP/gte-multilingual-base'
+    device: str | None = None     # устройство для local-режима: 'cpu' | 'mps' | 'cuda' | None (авто)
+    base_url: str | None = None   # если задан → HTTP-режим; иначе — локальная модель
+    timeout: int = 30             # таймаут HTTP-запросов (секунды; только в HTTP-режиме)
+
+
 class IndexingConfig(BaseModel):
     chunker: str = 'passthrough'         # 'passthrough' | 'llm'
     context: str = 'noop'               # 'noop' | 'llm'
     block_limit: int = 32000
     llm_context_window: int = 32768     # контекстное окно LLM (токенов); используется для расчёта безопасного лимита блока
     context_max_output_tokens: int | None = None  # лимит токенов в ответе LLMContextGenerator; None — без ограничения
-    dense_model: str = 'ai-forever/FRIDA'  # модель для dense-эмбеддингов
-    sparse_model: str = 'Alibaba-NLP/gte-multilingual-base'  # модель для sparse-эмбеддингов
-    sparse_device: str | None = None  # устройство для sparse-модели: 'cpu' | 'mps' | 'cuda' | None (авто)
+    dense_embedder: DenseEmbedderConfig = DenseEmbedderConfig()
+    sparse_embedder: SparseEmbedderConfig = SparseEmbedderConfig()
     concurrency: int = 1  # количество документов, обрабатываемых параллельно
 
 
