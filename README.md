@@ -36,7 +36,7 @@ RAG-система для локальных Markdown-файлов, Confluence �
 ### 2. Установка
 
 ```bash
-git clone https://github.com/your-org/morag.git
+git clone https://github.com/catonmoon/morag.git
 cd morag
 poetry install
 ```
