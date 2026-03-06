@@ -7,22 +7,23 @@ RAG-система для локальных Markdown-файлов, Confluence �
 - **Гибридный поиск** — sparse + dense векторы с RRF-fusion
 - **Локальные LLM** — любой OpenAI-совместимый эндпойнт (Ollama, LM Studio, облако)
 - **Умное чанкование** — цепочка сплиттеров по заголовкам, таблицам, семантике; опциональный LLM-чанкер
-- **Контекстуализация** — LLM генерирует суммари роли каждого чанка в документе
+- **Контекстуализация** — LLM генерирует summary роли каждого чанка в документе
 - **Идемпотентность** — повторная индексация пропускает неизменённые документы
-- **Параллельная индексация** — configurable concurrency для одновременной загрузки документов
+- **Параллельная индексация** — настраиваемый параллелизм для одновременной загрузки документов
 - **Цитаты и ссылки на источники** — URL Confluence-страниц и Jira-задач сохраняются при индексации; ответ содержит кликабельные ссылки на исходные документы с указанием пути и даты обновления
 - **Jira-интеграция** — автоматическое обнаружение ссылок на задачи в документах и их индексация в контексте страницы
 - **Пайплайн ретривала на базе Open WebUI** — реализован как Open WebUI Pipeline, но не зависит от него напрямую: совместим с любым OpenAI-compatible клиентом через стандартный `/v1/chat/completions`
+- **Vision LLM для изображений** — опциональная multimodal модель для описания схем, скриншотов и изображений со страниц Confluence; описания индексируются наравне с текстом
 - **Поддержка русского языка** — модели FRIDA и GTE-multilingual
 
 ## Стек
 
-| Компонент | Технология |
-|---|---|
-| Векторная БД | [Qdrant](https://qdrant.tech) |
-| Dense embeddings | [ai-forever/FRIDA](https://huggingface.co/ai-forever/FRIDA) (1536-dim, Cosine) |
+| Компонент | Технология                                                                                    |
+|---|-----------------------------------------------------------------------------------------------|
+| Векторная БД | [Qdrant](https://qdrant.tech)                                                                 |
+| Dense embeddings | [ai-forever/FRIDA](https://huggingface.co/ai-forever/FRIDA) (1536-dim, Cosine)                |
 | Sparse embeddings | [Alibaba-NLP/gte-multilingual-base](https://huggingface.co/Alibaba-NLP/gte-multilingual-base) |
-| LLM | Любой OpenAI-совместимый (Ollama, LM Studio, OpenAI, Anthropic через прокси) |
+| LLM | Любой OpenAI-совместимый (Ollama, LM Studio, OpenAI и пр.)                                    |
 
 ## Быстрый старт
 
@@ -31,7 +32,7 @@ RAG-система для локальных Markdown-файлов, Confluence �
 - Python 3.12+
 - [Poetry](https://python-poetry.org)
 - Запущенный [Qdrant](https://qdrant.tech/documentation/quick-start/) (локально или удалённо)
-- LLM-сервер (опционально, нужен только для LLM-чанкинга и контекстуализации)
+- LLM-сервер – для индексации опционален (для LLM-чанкинга и контекстуализации), для ретривала обязателен.
 
 ### 2. Установка
 
@@ -68,7 +69,7 @@ llm:
 indexing:
   chunker: passthrough    # passthrough | llm
   context: noop           # noop | llm
-  block_limit: 32000
+  block_limit: 4000
   dense_embedder:
     model: ai-forever/FRIDA
     # base_url: http://localhost:8082   # HTTP-режим (embedder-frida из docker-compose)
@@ -94,20 +95,19 @@ poetry run python -m cli.main index --reset --config config.yml
 ### Пайплайн индексации
 
 Сначала загружаются метаданные всех документов и выполняется idempotency-проверка.
-Затем документы, требующие переиндексации, обрабатываются конкурентно (до `concurrency`
-одновременно). Каждый документ проходит полный цикл без накопления в памяти:
+Затем документы, требующие переиндексации, обрабатываются конкурентно (до `concurrency` одновременно).
 
 ```
 Source.get_metadata()              # метаданные всех документов (без контента)
   → Idempotency check              # updated_at + size + счётчик чанков; load_one не вызывается
-  ┌─ [W1] Source.load_one() ──────────────────────────────────────────────────┐
-  │    → DocumentProcessor chain   # обогащение метаданных                   │
-  │    → docs.upsert()             # сохранить документ до чанкования         │
-  │    → RecursiveSplitter         # разбивка на блоки                        │  ← concurrency
-  │    → Chunker                   # LLM или Passthrough                      │    параллельных
-  │    → ContextGenerator          # LLM-суммари или Noop                     │    воркеров
-  │    → ChunkProcessor chain      # dense + sparse векторы, payload          │
-  │    → chunks.upsert()           #                                          │
+  ┌─ [W1] Source.load_one() ───────────────────────────────────────────────────┐
+  │    → DocumentProcessor chain   # обогащение метаданных                     │
+  │    → docs.upsert()             # сохранить документ до чанкования          │
+  │    → RecursiveSplitter         # разбивка на блоки                         │  ← concurrency
+  │    → Chunker                   # LLM или Passthrough                       │    параллельных
+  │    → ContextGenerator          # LLM-summary или Noop                      │    воркеров
+  │    → ChunkProcessor chain      # dense + sparse векторы, payload           │
+  │    → chunks.upsert()           #                                           │
   └────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -115,9 +115,9 @@ Source.get_metadata()              # метаданные всех докуме�
 
 | `chunker` | `context` | Описание |
 |---|---|---|
-| `passthrough` | `noop` | Быстро, без LLM. Один блок = один чанк, без суммари. |
+| `passthrough` | `noop` | Быстро, без LLM. Один блок = один чанк, без summary. |
 | `passthrough` | `llm` | Чанки по блокам, но с LLM-контекстом каждого. |
-| `llm` | `noop` | LLM делит блок на семантические чанки, без суммари. |
+| `llm` | `noop` | LLM делит блок на семантические чанки, без summary. |
 | `llm` | `llm` | Максимальное качество: LLM-чанкинг + LLM-контекст. |
 
 ### Источники данных
@@ -130,8 +130,7 @@ Source.get_metadata()              # метаданные всех докуме�
 
 **Jira-интеграция** работает в два шага. Сначала индексируются Markdown и Confluence. Затем в уже
 проиндексированных текстах ищутся ссылки вида `{jira_url}/browse/PROJ-123` — и найденные задачи
-индексируются автоматически. Путь задачи строится относительно страницы, где она упоминалась:
-`Team/Sprint/PROJ-123`. Если задача встречается на нескольких страницах — у документа несколько путей.
+индексируются автоматически.
 
 ### Коллекции Qdrant
 
@@ -233,13 +232,4 @@ morag/
     │   └── pipeline.py            # Оркестратор
     ├── storage/                   # Qdrant: коллекции и репозитории
     └── llm/client.py              # OpenAI-совместимый клиент
-```
-
-## Отладка Jira
-
-Перед полной индексацией можно проверить, как выглядит задача в моделью markdown:
-
-```bash
-python scripts/jira_preview.py PROJ-123
-python scripts/jira_preview.py https://jira.example.com/browse/PROJ-123
 ```
