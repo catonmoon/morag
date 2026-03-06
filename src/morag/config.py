@@ -79,6 +79,7 @@ class IndexingConfig(BaseModel):
     dense_embedder: DenseEmbedderConfig = DenseEmbedderConfig()
     sparse_embedder: SparseEmbedderConfig = SparseEmbedderConfig()
     concurrency: int = 1  # количество документов, обрабатываемых параллельно
+    schedule: str | None = None  # cron-выражение для serve-режима (например '0 */6 * * *')
 
 
 class Config(BaseModel):

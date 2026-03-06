@@ -100,6 +100,29 @@ class DocRepository:
             points_selector=PointIdsList(points=[point_id]),
         )
 
+    async def get_ids_by_source_type(self, source_type: str) -> set[str]:
+        """Вернуть множество doc_id всех документов с указанным source_type."""
+        scroll_filter = Filter(
+            must=[FieldCondition(key='source_type', match=MatchValue(value=source_type))]
+        )
+        ids: set[str] = set()
+        offset = None
+        while True:
+            points, offset = await self._client.scroll(
+                collection_name=self._collection,
+                scroll_filter=scroll_filter,
+                limit=100,
+                offset=offset,
+                with_payload=['id'],
+                with_vectors=False,
+            )
+            for point in points:
+                if point.payload and 'id' in point.payload:
+                    ids.add(point.payload['id'])
+            if offset is None:
+                break
+        return ids
+
     async def scroll_all(self, exclude_source_types: list[str] | None = None) -> list[Document]:
         """Вернуть все документы. Опционально исключить по source_type."""
         scroll_filter = None

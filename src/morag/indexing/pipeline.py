@@ -133,6 +133,17 @@ class IndexingPipeline:
         total = len(stubs)
         logger.info('Loaded metadata for %d document(s) from source (concurrency=%d)', total, self._concurrency)
 
+        # Full sync: удалить документы, которых больше нет в источнике
+        current_ids = {stub.id for stub in stubs}
+        stored_ids = await self._doc_repo.get_ids_by_source_type(source.source_type)
+        orphaned = stored_ids - current_ids
+        if orphaned:
+            logger.info('Deleting %d orphaned document(s) for source_type=%s', len(orphaned), source.source_type)
+            for doc_id in orphaned:
+                await self._chunk_repo.delete_by_doc_id(doc_id)
+                await self._doc_repo.delete(doc_id)
+                logger.info('Deleted orphaned document: %s', doc_id)
+
         sem = asyncio.Semaphore(self._concurrency)
 
         async def process_one(i: int, stub: Document) -> bool:
