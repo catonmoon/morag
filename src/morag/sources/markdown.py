@@ -38,7 +38,7 @@ class MarkdownSource(Source):
             doc_id = str(path.relative_to(self._root))
             return Document(
                 id=doc_id,
-                path=doc_id,
+                path=[doc_id],
                 text='',
                 updated_at=updated_at,
                 source_type='markdown',
@@ -58,7 +58,7 @@ class MarkdownSource(Source):
 
             return Document(
                 id=doc_id,
-                path=doc_id,
+                path=[doc_id],
                 text=text,
                 updated_at=updated_at,
                 source_type='markdown',

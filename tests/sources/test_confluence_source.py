@@ -269,14 +269,14 @@ class TestConfluenceSourceGetMetadata:
         pages = [_make_cql_page('1', 'My Page', 'ML', space_name='Machine Learning')]
         src = _src_with_pages(pages)
         stubs = await src.get_metadata()
-        assert stubs[0].path == 'My Page'
+        assert stubs[0].path == ['My Page']
 
     async def test_stub_path_with_ancestors(self):
         ancestors = [{'id': '10', 'title': 'Root'}, {'id': '11', 'title': 'Parent'}]
         pages = [_make_cql_page('1', 'Child', 'ML', space_name='ML Space', ancestors=ancestors)]
         src = _src_with_pages(pages)
         stubs = await src.get_metadata()
-        assert stubs[0].path == 'Root/Parent/Child'
+        assert stubs[0].path == ['Root/Parent/Child']
 
     async def test_stub_source_type_is_confluence(self):
         pages = [_make_cql_page('1', 'Page', 'ML')]
@@ -383,7 +383,7 @@ class TestConfluenceSourceLoad:
         full = [_make_full_page('1', 'My Page', 'ML', space_name='Machine Learning')]
         src = _src_with_pages(pages, full)
         docs = await src.load()
-        assert docs[0].path == 'My Page'
+        assert docs[0].path == ['My Page']
 
     async def test_document_path_with_ancestors(self):
         ancestors = [{'id': '10', 'title': 'Root'}, {'id': '11', 'title': 'Parent'}]
@@ -391,7 +391,7 @@ class TestConfluenceSourceLoad:
         full = [_make_full_page('1', 'Child', 'ML', space_name='ML Space', ancestors=ancestors)]
         src = _src_with_pages(pages, full)
         docs = await src.load()
-        assert docs[0].path == 'Root/Parent/Child'
+        assert docs[0].path == ['Root/Parent/Child']
 
     async def test_document_source_type(self):
         pages = [_make_cql_page('1', 'Page', 'ML')]

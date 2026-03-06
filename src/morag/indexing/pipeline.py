@@ -75,7 +75,7 @@ class IndexingPipeline:
             return False
 
         same_content = existing.updated_at == stub.updated_at
-        if stub.source_type != 'confluence':
+        if stub.source_type not in ('confluence', 'jira'):
             same_content = same_content and existing.size == stub.size
         if not same_content:
             return False
@@ -95,10 +95,9 @@ class IndexingPipeline:
         existing = await self._doc_repo.get_by_id(document.id)
 
         if existing is not None:
-            # Для Confluence size нестабилен (зависит от конвертации HTML→MD),
-            # поэтому ориентируемся только на дату последнего изменения.
+            # Для Confluence и Jira size нестабилен, ориентируемся только на дату изменения.
             same_content = existing.updated_at == document.updated_at
-            if document.source_type != 'confluence':
+            if document.source_type not in ('confluence', 'jira'):
                 same_content = same_content and existing.size == document.size
             if same_content:
                 status = await self._chunk_repo.get_index_status(document.id)
@@ -140,22 +139,26 @@ class IndexingPipeline:
             """Обработать один документ. Возвращает True если был проиндексирован."""
             w = f'[W{i}] ' if self._concurrency > 1 else ''
             async with sem:
-                logger.info('%sChecking [%d/%d]: %s', w, i, total, stub.id)
-                if await self._is_up_to_date(stub):
-                    logger.info('%sDocument up to date, skipping: %s', w, stub.id)
-                    return False
+                try:
+                    logger.info('%sChecking [%d/%d]: %s', w, i, total, stub.id)
+                    if await self._is_up_to_date(stub):
+                        logger.info('%sDocument up to date, skipping: %s', w, stub.id)
+                        return False
 
-                document = await source.load_one(stub.id)
-                if document is None:
-                    logger.warning('%sFailed to load document: %s', w, stub.id)
-                    return False
+                    document = await source.load_one(stub.id)
+                    if document is None:
+                        logger.warning('%sFailed to load document: %s', w, stub.id)
+                        return False
 
-                prepared = await self._prepare_document(document, w=w)
-                if prepared is None:
-                    return False
+                    prepared = await self._prepare_document(document, w=w)
+                    if prepared is None:
+                        return False
 
-                await self._chunk_document(prepared, w=w)
-                return True
+                    await self._chunk_document(prepared, w=w)
+                    return True
+                except Exception:
+                    logger.exception('%sDocument failed, skipping: %s', w, stub.id)
+                    return False
 
         results = await asyncio.gather(*[process_one(i + 1, stub) for i, stub in enumerate(stubs)])
         indexed = sum(results)
@@ -191,6 +194,7 @@ class IndexingPipeline:
             chunk = Chunk(
                 doc_id=document.id,
                 path=document.path,
+                source_type=document.source_type,
                 order=order,
                 total=total,
                 text=text,
