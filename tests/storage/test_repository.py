@@ -8,7 +8,7 @@ from morag.sources.base import Chunk, Document
 def make_document(doc_id: str = 'test.md', **kwargs) -> Document:
     defaults = dict(
         id=doc_id,
-        path=doc_id,
+        path=[doc_id],
         text='# Тест\n\nСодержимое документа.',
         updated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
         source_type='markdown',
@@ -24,7 +24,7 @@ def make_chunks(doc_id: str, count: int, total: int | None = None) -> list[Chunk
     return [
         Chunk(
             doc_id=doc_id,
-            path=f'{doc_id}',
+            path=[doc_id],
             order=i,
             total=total,
             text=f'Текст чанка номер {i}.',
@@ -51,7 +51,7 @@ class TestDocRepository:
 
         assert result is not None
         assert result.id == doc.id
-        assert result.path == doc.path
+        assert result.path == ['overview.md']
         assert result.text == doc.text
         assert result.source_type == doc.source_type
 
@@ -192,7 +192,7 @@ class TestChunkRepository:
     async def test_chunk_payload_is_preserved(self, chunk_repo):
         chunk = Chunk(
             doc_id='doc.md',
-            path='doc.md',
+            path=['doc.md'],
             order=0,
             total=1,
             text='Текст',

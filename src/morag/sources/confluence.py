@@ -136,7 +136,7 @@ class ConfluenceSource(Source):
 
         return Document(
             id=page_id,
-            path=path,
+            path=[path],
             text='',
             updated_at=updated_at,
             source_type='confluence',
@@ -193,7 +193,7 @@ class ConfluenceSource(Source):
 
             return Document(
                 id=page_id,
-                path=path,
+                path=[path],
                 text=text,
                 updated_at=updated_at,
                 source_type='confluence',
@@ -233,7 +233,7 @@ class ConfluenceSource(Source):
         if not imgs:
             return
 
-        logger.debug('Page %s: processing %d image(s) with vision LLM', page_id, len(imgs))
+        logger.info('Page %s: processing %d image(s) with vision LLM', page_id, len(imgs))
 
         tasks = [self._describe_image(img.get('src', ''), img.get('alt', ''), page_id) for img in imgs]
         descriptions = await asyncio.gather(*tasks, return_exceptions=True)
@@ -253,7 +253,7 @@ class ConfluenceSource(Source):
 
         media_type = _guess_media_type(src)
         if media_type == 'image/svg+xml':
-            logger.debug('Page %s: skipping SVG image: %s', page_id, src)
+            logger.info('Page %s: skipping SVG image: %s', page_id, src)
             return alt or None
 
         image_bytes = await asyncio.to_thread(self._download_image, src, page_id)
@@ -261,7 +261,7 @@ class ConfluenceSource(Source):
             return alt or None
 
         if self._min_image_size_bytes is not None and len(image_bytes) < self._min_image_size_bytes:
-            logger.debug(
+            logger.info(
                 'Page %s: skipping small image (%d bytes < %d): %s',
                 page_id, len(image_bytes), self._min_image_size_bytes, src,
             )
@@ -273,7 +273,7 @@ class ConfluenceSource(Source):
             description = await self._vision_client.complete_vision(
                 _IMAGE_PROMPT, image_b64, media_type,
             )
-            logger.debug('Page %s: image described: %s -> %s...', page_id, src[:80], description[:80])
+            logger.info('Page %s: image described: %s -> %s...', page_id, src[:80], description[:80])
             return description.strip() or None
         except Exception:
             logger.warning('Page %s: vision LLM failed for image %s', page_id, src, exc_info=True)
