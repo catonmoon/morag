@@ -42,6 +42,10 @@ class ConfluenceSource(Source):
     - ancestor_ids: список page id — загружать только потомков указанных страниц
     """
 
+    @property
+    def source_type(self) -> str:
+        return 'confluence'
+
     def __init__(self, config: ConfluenceConfig, vision_client=None) -> None:
         credential = config.api_token or config.password
         if not credential:
