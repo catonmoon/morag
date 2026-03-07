@@ -5,6 +5,8 @@ import logging
 from abc import ABC, abstractmethod
 from collections import defaultdict
 
+from morag.llm.retry import RetryPolicy
+
 logger = logging.getLogger(__name__)
 
 _DOCUMENT_PREFIX = 'search_document: '
@@ -66,16 +68,21 @@ class HttpFridaEmbedder(Embedder):
     локальный FridaEmbedder. Размерность вектора задаётся явно через параметр dim.
     """
 
-    def __init__(self, base_url: str, dim: int, timeout: int = 30) -> None:
+    def __init__(self, base_url: str, dim: int, timeout: int = 30,
+                 retry_policy: RetryPolicy | None = None) -> None:
         import httpx
         self._client = httpx.Client(base_url=base_url, timeout=timeout)
         self._dim = dim
+        self._retry = retry_policy or RetryPolicy(max_retries=0)
         logger.info('HttpFridaEmbedder → %s (dim=%d)', base_url, dim)
 
-    def _call(self, text: str) -> list[float]:
+    def _do_call(self, text: str) -> list[float]:
         resp = self._client.post('/v1/embeddings', json={'input': text})
         resp.raise_for_status()
         return resp.json()['data'][0]['embedding']
+
+    def _call(self, text: str) -> list[float]:
+        return self._retry.call_sync(lambda: self._do_call(text))
 
     def embed(self, text: str) -> list[float]:
         return self._call(_DOCUMENT_PREFIX + text)
@@ -229,12 +236,14 @@ class HttpGteSparseEmbedder(SparseEmbedder):
     так же, как в GteSparseEmbedder. Это необходимо для консистентности индекса в Qdrant.
     """
 
-    def __init__(self, base_url: str, timeout: int = 30) -> None:
+    def __init__(self, base_url: str, timeout: int = 30,
+                 retry_policy: RetryPolicy | None = None) -> None:
         import httpx
         self._client = httpx.Client(base_url=base_url, timeout=timeout)
+        self._retry = retry_policy or RetryPolicy(max_retries=0)
         logger.info('HttpGteSparseEmbedder → %s', base_url)
 
-    def _call(self, text: str) -> tuple[list[int], list[float]]:
+    def _do_call(self, text: str) -> tuple[list[int], list[float]]:
         resp = self._client.post('/encode', json={'text': text})
         resp.raise_for_status()
         token_weights: dict[str, float] = resp.json()['token_weights'][0]
@@ -246,6 +255,9 @@ class HttpGteSparseEmbedder(SparseEmbedder):
             else:
                 index_weight[i] = weight
         return list(index_weight.keys()), list(index_weight.values())
+
+    def _call(self, text: str) -> tuple[list[int], list[float]]:
+        return self._retry.call_sync(lambda: self._do_call(text))
 
     def embed(self, text: str) -> tuple[list[int], list[float]]:
         return self._call(text)

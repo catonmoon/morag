@@ -127,7 +127,9 @@ class ConfluenceSource(Source):
         title = content['title']
         space = content.get('space', {})
         space_name = space.get('name') or space.get('key', 'UNKNOWN')
-        ancestors = [a['title'] for a in content.get('ancestors', []) if a.get('title')]
+        ancestor_objects = content.get('ancestors', [])
+        ancestors = [a['title'] for a in ancestor_objects if a.get('title')]
+        parent_doc_ids = [ancestor_objects[-1]['id']] if ancestor_objects else []
         history = content.get('history', {})
 
         last_updated = history.get('lastUpdated', {}).get('when', '')
@@ -146,6 +148,7 @@ class ConfluenceSource(Source):
             source_type='confluence',
             size=0,
             url=url,
+            parent_doc_ids=parent_doc_ids,
         )
 
     def _build_cql(self) -> str:
@@ -176,7 +179,9 @@ class ConfluenceSource(Source):
             title = content['title']
             space = content.get('space', {})
             space_name = space.get('name') or space.get('key', 'UNKNOWN')
-            ancestors = [a['title'] for a in content.get('ancestors', []) if a.get('title')]
+            ancestor_objects = content.get('ancestors', [])
+            ancestors = [a['title'] for a in ancestor_objects if a.get('title')]
+            parent_doc_ids = [ancestor_objects[-1]['id']] if ancestor_objects else []
             history = content.get('history', {})
             html = content.get('body', {}).get('view', {}).get('value', '')
             last_updated = history.get('lastUpdated', {}).get('when', '')
@@ -187,6 +192,7 @@ class ConfluenceSource(Source):
 
             markdown = await self._process_html(html, page_id)
             text = f'# {title}\n\n{markdown}'.strip()
+            structural = not html.strip()
 
             updated_at = _parse_confluence_date(last_updated)
             path = _build_page_path(space_name, ancestors, title)
@@ -205,6 +211,8 @@ class ConfluenceSource(Source):
                 url=url,
                 creator=creator,
                 created_at=created_at,
+                parent_doc_ids=parent_doc_ids,
+                structural=structural,
             )
         except Exception:
             page_id_for_log = (
@@ -277,7 +285,7 @@ class ConfluenceSource(Source):
             description = await self._vision_client.complete_vision(
                 _IMAGE_PROMPT, image_b64, media_type,
             )
-            logger.info('Page %s: image described: %s -> %s...', page_id, src[:80], description[:80])
+            logger.info('Page %s: image described: %s -> %s...', page_id, src[:80], description[:80].replace('\n', '\\n'))
             return description.strip() or None
         except Exception:
             logger.warning('Page %s: vision LLM failed for image %s', page_id, src, exc_info=True)

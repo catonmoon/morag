@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import defaultdict, deque
 
 from morag.indexing.chunker import Chunker, PassthroughChunker
 from morag.indexing.context import ContextGenerator, NoopContextGenerator
@@ -20,6 +21,39 @@ from morag.storage.repository import ChunkRepository, DocRepository
 logger = logging.getLogger(__name__)
 
 _DEFAULT_BLOCK_LIMIT = 2048  # токенов на один блок перед чанкованием
+
+
+def _topological_levels(stubs: list) -> list[list]:
+    """Разбить стабы по уровням BFS: родители всегда на уровень выше потомков.
+
+    Учитываются только рёбра внутри текущего батча (parent_doc_ids, входящие в id_set).
+    Документы с внешними или отсутствующими родителями попадают на уровень 0.
+    """
+    id_set = {s.id for s in stubs}
+    id_to_stub = {s.id: s for s in stubs}
+
+    in_degree: dict[str, int] = {
+        s.id: sum(1 for p in s.parent_doc_ids if p in id_set) for s in stubs
+    }
+    children: dict[str, list[str]] = defaultdict(list)
+    for s in stubs:
+        for p in s.parent_doc_ids:
+            if p in id_set:
+                children[p].append(s.id)
+
+    levels: list[list] = []
+    queue: deque[str] = deque(sid for sid, deg in in_degree.items() if deg == 0)
+    while queue:
+        level_ids = list(queue)
+        queue.clear()
+        levels.append([id_to_stub[i] for i in level_ids])
+        for sid in level_ids:
+            for child_id in children[sid]:
+                in_degree[child_id] -= 1
+                if in_degree[child_id] == 0:
+                    queue.append(child_id)
+
+    return levels
 
 
 class IndexingPipeline:
@@ -80,6 +114,10 @@ class IndexingPipeline:
         if not same_content:
             return False
 
+        # Структурные документы не имеют чанков — достаточно совпадения метаданных
+        if existing.structural:
+            return True
+
         status = await self._chunk_repo.get_index_status(stub.id)
         if status is None:
             return False
@@ -114,7 +152,7 @@ class IndexingPipeline:
 
         # Прогоняем через цепочку процессоров
         for processor in self._doc_processors:
-            document = processor.process(document)
+            document = await processor.process(document)
 
         # Сохраняем документ до начала чанкования
         await self._doc_repo.upsert(document)
@@ -140,9 +178,7 @@ class IndexingPipeline:
         if orphaned:
             logger.info('Deleting %d orphaned document(s) for source_type=%s', len(orphaned), source.source_type)
             for doc_id in orphaned:
-                await self._chunk_repo.delete_by_doc_id(doc_id)
-                await self._doc_repo.delete(doc_id)
-                logger.info('Deleted orphaned document: %s', doc_id)
+                await self._doc_repo.cascade_delete(doc_id, self._chunk_repo)
 
         sem = asyncio.Semaphore(self._concurrency)
 
@@ -165,13 +201,28 @@ class IndexingPipeline:
                     if prepared is None:
                         return False
 
-                    await self._chunk_document(prepared, w=w)
+                    if prepared.structural:
+                        logger.info('%sStructural document, skipping chunking: %s', w, prepared.id)
+                    else:
+                        await self._chunk_document(prepared, w=w)
                     return True
                 except Exception:
                     logger.exception('%sDocument failed, skipping: %s', w, stub.id)
                     return False
 
-        results = await asyncio.gather(*[process_one(i + 1, stub) for i, stub in enumerate(stubs)])
+        levels = _topological_levels(stubs)
+        logger.info('Processing order: %d level(s)', len(levels))
+
+        results: list[bool] = []
+        stub_idx = 0
+        for level_num, level in enumerate(levels):
+            logger.info('Level %d: %d document(s)', level_num, len(level))
+            level_results = await asyncio.gather(
+                *[process_one(stub_idx + i + 1, stub) for i, stub in enumerate(level)]
+            )
+            results.extend(level_results)
+            stub_idx += len(level)
+
         indexed = sum(results)
         logger.info('Indexing complete: %d indexed, %d skipped', indexed, total - indexed)
 

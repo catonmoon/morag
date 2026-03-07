@@ -24,6 +24,7 @@ class Pipeline:
     class Valves(BaseModel):
         QDRANT_URL: str
         QDRANT_COLLECTION: str
+        QDRANT_DOCS_COLLECTION: str
         QDRANT_NUM_RESULTS: int
         NEIGHBOR_WINDOW: int
 
@@ -56,6 +57,7 @@ class Pipeline:
         self.valves = self.Valves(
             QDRANT_URL=os.getenv('QDRANT_URL', 'http://qdrant:6333'),
             QDRANT_COLLECTION=os.getenv('QDRANT_COLLECTION', 'chunks'),
+            QDRANT_DOCS_COLLECTION=os.getenv('QDRANT_DOCS_COLLECTION', 'docs'),
             QDRANT_NUM_RESULTS=int(os.getenv('QDRANT_NUM_RESULTS', '50')),
             NEIGHBOR_WINDOW=int(os.getenv('NEIGHBOR_WINDOW', '1')),
 
@@ -145,8 +147,12 @@ class Pipeline:
                 source_id=chunk['chunk_id'],
             )
 
+        # Достать doc_summary для каждого уникального документа из результатов
+        unique_doc_ids = list({c['doc_id'] for c in result_chunks})
+        doc_summaries = self._fetch_doc_summaries(unique_doc_ids)
+
         # 5. Стриминг финального ответа
-        context = self._build_context(result_chunks)
+        context = self._build_context(result_chunks, doc_summaries)
         yield from self._stream_answer(messages, context)
 
     # ── Intent extraction ─────────────────────────────────────────────────────
@@ -297,7 +303,8 @@ class Pipeline:
                 continue
 
     @staticmethod
-    def _build_context(chunks: list[dict]) -> str:
+    def _build_context(chunks: list[dict], doc_summaries: dict[str, str] | None = None) -> str:
+        doc_summaries = doc_summaries or {}
         parts = []
         for n, c in enumerate(chunks, start=1):
             path_display = ' | '.join(c['path']) if c['path'] else c['doc_id']
@@ -307,6 +314,9 @@ class Pipeline:
             ]
             if c.get('url'):
                 lines.append(f'URL: {c["url"]}')
+            summary = doc_summaries.get(c['doc_id'])
+            if summary:
+                lines.append(f'Обзор документа: {summary}')
             lines += [
                 f'Контекст: {c["context"]}',
                 f'Текст: {c["text"]}',
@@ -412,6 +422,36 @@ class Pipeline:
             result['text'] = '\n\n'.join(c['text'] for c in group)
             merged.append(result)
         return merged
+
+    def _fetch_doc_summaries(self, doc_ids: list[str]) -> dict[str, str]:
+        """Получить doc_summary из коллекции docs для заданных doc_id.
+
+        Один батч-запрос по полю payload.id (MatchAny).
+        Возвращает {doc_id: summary} только для документов у которых есть doc_summary.
+        """
+        if not doc_ids:
+            return {}
+        payload = {
+            'filter': {'must': [{'key': 'id', 'match': {'any': doc_ids}}]},
+            'with_payload': ['id', 'doc_summary'],
+            'with_vectors': False,
+            'limit': len(doc_ids),
+        }
+        url = f'{self.valves.QDRANT_URL}/collections/{self.valves.QDRANT_DOCS_COLLECTION}/points/scroll'
+        try:
+            resp = requests.post(url, json=payload, timeout=self.valves.HTTP_TIMEOUT)
+            resp.raise_for_status()
+        except Exception as exc:
+            print(f'[morag] _fetch_doc_summaries failed, skipping doc summaries: {exc}')
+            return {}
+        summaries: dict[str, str] = {}
+        for point in resp.json().get('result', {}).get('points', []):
+            p = point.get('payload', {})
+            doc_id = p.get('id')
+            summary = p.get('doc_summary')
+            if doc_id and summary:
+                summaries[doc_id] = summary
+        return summaries
 
     def _fetch_chunk_by_order(self, doc_id: str, order: int) -> dict | None:
         payload = {
