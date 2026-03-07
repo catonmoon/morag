@@ -23,6 +23,11 @@ async def ensure_docs_collection(client: AsyncQdrantClient, name: str = 'docs') 
         field_name='id',
         field_schema=PayloadSchemaType.KEYWORD,
     )
+    await client.create_payload_index(
+        collection_name=name,
+        field_name='parent_doc_ids',
+        field_schema=PayloadSchemaType.KEYWORD,
+    )
 
 
 async def ensure_chunks_collection(

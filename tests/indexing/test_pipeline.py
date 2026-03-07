@@ -48,7 +48,9 @@ def setup_source(source: MagicMock, docs: list[Document]) -> None:
 
 @pytest.fixture
 def doc_repo() -> AsyncMock:
-    return AsyncMock(spec=DocRepository)
+    mock = AsyncMock(spec=DocRepository)
+    mock.get_ids_by_source_type.return_value = set()
+    return mock
 
 
 @pytest.fixture
@@ -159,7 +161,7 @@ class TestIndexingPipelineRun:
 
         processor = MagicMock(spec=DocumentProcessor)
         enriched = make_document(payload={'author': 'Алиса'})
-        processor.process.return_value = enriched
+        processor.process = AsyncMock(return_value=enriched)
 
         pipeline = IndexingPipeline(
             doc_repo, chunk_repo,
@@ -187,7 +189,7 @@ class TestIndexingPipelineRun:
             def __init__(self, name):
                 self.name = name
 
-            def process(self, document):
+            async def process(self, document):
                 calls.append(self.name)
                 return document
 
