@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import (
@@ -27,7 +30,7 @@ def _doc_id_to_point_id(doc_id: str) -> str:
 
 def _payload_to_document(payload: dict) -> Document:
     """Восстановить Document из Qdrant payload."""
-    core_keys = {'id', 'path', 'text', 'updated_at', 'source_type', 'size', 'url', 'indexed_at', 'creator', 'created_at'}
+    core_keys = {'id', 'path', 'text', 'updated_at', 'source_type', 'size', 'url', 'indexed_at', 'creator', 'created_at', 'parent_doc_ids', 'structural'}
     indexed_at_raw = payload.get('indexed_at')
     created_at_raw = payload.get('created_at')
     # backwards compat: path мог быть строкой в старых данных
@@ -44,6 +47,8 @@ def _payload_to_document(payload: dict) -> Document:
         indexed_at=datetime.fromisoformat(indexed_at_raw) if indexed_at_raw else None,
         creator=payload.get('creator'),
         created_at=datetime.fromisoformat(created_at_raw) if created_at_raw else None,
+        parent_doc_ids=payload.get('parent_doc_ids', []),
+        structural=payload.get('structural', False),
         payload={k: v for k, v in payload.items() if k not in core_keys},
     )
 
@@ -79,6 +84,8 @@ class DocRepository:
             'source_type': document.source_type,
             'size': document.size,
             'indexed_at': datetime.now(timezone.utc).isoformat(),
+            'parent_doc_ids': document.parent_doc_ids,
+            'structural': document.structural,
             **document.payload,
         }
         if document.url is not None:
@@ -99,6 +106,59 @@ class DocRepository:
             collection_name=self._collection,
             points_selector=PointIdsList(points=[point_id]),
         )
+
+    async def find_children(self, parent_doc_id: str) -> list[Document]:
+        """Найти все документы, у которых parent_doc_id есть в parent_doc_ids."""
+        scroll_filter = Filter(
+            must=[FieldCondition(key='parent_doc_ids', match=MatchValue(value=parent_doc_id))]
+        )
+        docs: list[Document] = []
+        offset = None
+        while True:
+            points, offset = await self._client.scroll(
+                collection_name=self._collection,
+                scroll_filter=scroll_filter,
+                limit=100,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for point in points:
+                if point.payload:
+                    docs.append(_payload_to_document(point.payload))
+            if offset is None:
+                break
+        return docs
+
+    async def update_parent_doc_ids(self, doc_id: str, parent_doc_ids: list[str]) -> None:
+        """Обновить список родительских документов."""
+        point_id = _doc_id_to_point_id(doc_id)
+        await self._client.set_payload(
+            collection_name=self._collection,
+            payload={'parent_doc_ids': parent_doc_ids},
+            points=[point_id],
+        )
+
+    async def cascade_delete(self, doc_id: str, chunk_repo: 'ChunkRepository') -> None:
+        """Каскадное удаление документа.
+
+        Сначала рекурсивно обрабатывает дочерние документы (по parent_doc_ids):
+        - если у ребёнка остаются другие родители — убирает только ссылку на удаляемый doc_id
+        - если parent_doc_ids ребёнка становится пустым — каскадно удаляет и ребёнка
+        Затем удаляет чанки и сам документ.
+        """
+        children = await self.find_children(doc_id)
+        for child in children:
+            new_parent_ids = [p for p in child.parent_doc_ids if p != doc_id]
+            if new_parent_ids:
+                await self.update_parent_doc_ids(child.id, new_parent_ids)
+                logger.info('Removed parent reference %s from child %s', doc_id, child.id)
+            else:
+                await self.cascade_delete(child.id, chunk_repo)
+
+        await chunk_repo.delete_by_doc_id(doc_id)
+        await self.delete(doc_id)
+        logger.info('Cascade deleted: %s', doc_id)
 
     async def get_ids_by_source_type(self, source_type: str) -> set[str]:
         """Вернуть множество doc_id всех документов с указанным source_type."""

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 from openai import AsyncOpenAI
 
+from morag.llm.retry import RetryPolicy
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,9 +30,17 @@ class LLMClient:
     via the base_url parameter.
     """
 
-    def __init__(self, base_url: str, model: str, api_key: str = 'ollama', timeout: int = 180) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        api_key: str = 'ollama',
+        timeout: int = 180,
+        retry_policy: RetryPolicy | None = None,
+    ) -> None:
         self._client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         self._model = model
+        self._retry = retry_policy or RetryPolicy(max_retries=0)
 
     async def complete(
         self,
@@ -39,6 +49,16 @@ class LLMClient:
         max_tokens: int | None = None,
     ) -> str:
         """Send a chat completion request and return the response text."""
+        return await self._retry.call(
+            lambda: self._do_complete(messages, params, max_tokens),
+        )
+
+    async def _do_complete(
+        self,
+        messages: list[dict],
+        params: GenerationParams | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
         if params is None:
             params = GenerationParams()
         kwargs: dict = dict(
@@ -64,6 +84,11 @@ class LLMClient:
         Принимает изображение в формате base64 и текстовый запрос.
         Возвращает текстовое описание изображения.
         """
+        return await self._retry.call(
+            lambda: self._do_complete_vision(prompt, image_base64, media_type),
+        )
+
+    async def _do_complete_vision(self, prompt: str, image_base64: str, media_type: str) -> str:
         messages = [
             {
                 'role': 'user',
@@ -95,6 +120,17 @@ class LLMClient:
         Passes response_format={"type": "json_schema", ...} to enforce structured output.
         Raises ValueError if the response cannot be parsed.
         """
+        return await self._retry.call(
+            lambda: self._do_complete_json(messages, schema, schema_name, params),
+        )
+
+    async def _do_complete_json(
+        self,
+        messages: list[dict],
+        schema: dict,
+        schema_name: str = 'response',
+        params: GenerationParams | None = None,
+    ) -> dict:
         if params is None:
             params = GenerationParams()
         kwargs: dict = dict(

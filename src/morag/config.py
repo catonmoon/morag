@@ -43,11 +43,22 @@ class QdrantConfig(BaseModel):
     collection_chunks: str = 'chunks'
 
 
+class RetryConfig(BaseModel):
+    max_retries: int = 3    # количество повторных попыток (0 = без retry)
+    delay: float = 1.0      # начальная задержка между попытками (секунды)
+    backoff: float = 2.0    # множитель: delay → delay*backoff → delay*backoff² → ...
+
+
+class DocSummaryConfig(BaseModel):
+    max_tokens: int | None = None  # лимит токенов ответа LLM; None — генерация саммари отключена
+
+
 class LLMConfig(BaseModel):
     base_url: str = 'http://localhost:11434/v1'
     model: str = 'qwen2.5-coder:7b'
     api_key: str = 'ollama'
     timeout: int = 180  # таймаут HTTP-запросов к LLM (секунды)
+    retry: RetryConfig = RetryConfig()
 
 
 class DenseEmbedderConfig(BaseModel):
@@ -55,6 +66,7 @@ class DenseEmbedderConfig(BaseModel):
     base_url: str | None = None   # если задан → HTTP-режим; иначе — локальная модель
     dim: int | None = None        # обязателен в HTTP-режиме; в local-режиме определяется автоматически
     timeout: int = 30             # таймаут HTTP-запросов (секунды; только в HTTP-режиме)
+    retry: RetryConfig = RetryConfig()  # политика повторных попыток (только в HTTP-режиме)
 
     @model_validator(mode='after')
     def _validate_http_dim(self) -> 'DenseEmbedderConfig':
@@ -68,6 +80,7 @@ class SparseEmbedderConfig(BaseModel):
     device: str | None = None     # устройство для local-режима: 'cpu' | 'mps' | 'cuda' | None (авто)
     base_url: str | None = None   # если задан → HTTP-режим; иначе — локальная модель
     timeout: int = 30             # таймаут HTTP-запросов (секунды; только в HTTP-режиме)
+    retry: RetryConfig = RetryConfig()  # политика повторных попыток (только в HTTP-режиме)
 
 
 class IndexingConfig(BaseModel):
@@ -80,6 +93,7 @@ class IndexingConfig(BaseModel):
     sparse_embedder: SparseEmbedderConfig = SparseEmbedderConfig()
     concurrency: int = 1  # количество документов, обрабатываемых параллельно
     schedule: str | None = None  # cron-выражение для serve-режима (например '0 */6 * * *')
+    doc_summary: DocSummaryConfig = DocSummaryConfig()  # генерация саммари документов; max_tokens=None — отключено
 
 
 class Config(BaseModel):

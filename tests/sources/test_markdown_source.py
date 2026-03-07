@@ -36,7 +36,8 @@ class TestMarkdownSource:
 
     async def test_total_count(self, source):
         docs = await source.load()
-        assert len(docs) == 4
+        # 4 MD-файла + 1 директория (api/)
+        assert len(docs) == 5
 
     async def test_id_is_relative_path(self, source):
         docs = await source.load()
@@ -51,7 +52,10 @@ class TestMarkdownSource:
 
     async def test_text_is_not_empty(self, source):
         docs = await source.load()
-        for doc in docs:
+        # Директории структурные (structural=True) — их текст = имя директории, может быть коротким,
+        # но непустым. Проверяем только файлы.
+        file_docs = [d for d in docs if not d.id.endswith('/')]
+        for doc in file_docs:
             assert len(doc.text) > 0
 
     async def test_updated_at_is_timezone_aware(self, source):
@@ -61,7 +65,9 @@ class TestMarkdownSource:
 
     async def test_size_is_populated(self, source):
         docs = await source.load()
-        for doc in docs:
+        # Директории — фиктивные документы с size=0; проверяем только файлы
+        file_docs = [d for d in docs if not d.id.endswith('/')]
+        for doc in file_docs:
             assert doc.size > 0
 
     async def test_size_matches_file_content(self, tmp_path):

@@ -38,7 +38,12 @@ class JiraSource(Source):
     def source_type(self) -> str:
         return 'jira'
 
-    def __init__(self, config: JiraConfig, issue_map: dict[str, list[str]]) -> None:
+    def __init__(
+        self,
+        config: JiraConfig,
+        issue_map: dict[str, list[str]],
+        parent_ids_map: dict[str, list[str]] | None = None,
+    ) -> None:
         credential = config.api_token or config.password
         if not credential:
             raise ValueError('Jira config requires either api_token or password')
@@ -51,7 +56,8 @@ class JiraSource(Source):
             timeout=config.timeout,
         )
         self._base_url = config.url.rstrip('/')
-        self._issue_map = issue_map  # {issue_key: [doc_path, ...]}
+        self._issue_map = issue_map         # {issue_key: [doc_path, ...]}
+        self._parent_ids_map = parent_ids_map or {}  # {issue_key: [doc_id, ...]}
         self._timeout = config.timeout
 
     async def get_metadata(self) -> list[Document]:
@@ -96,6 +102,7 @@ class JiraSource(Source):
             source_type='jira',
             size=0,
             url=f'{self._base_url}/browse/{issue_key}',
+            parent_doc_ids=self._parent_ids_map.get(issue_key, []),
         )
 
     async def _fetch_full(self, issue_key: str, doc_paths: list[str]) -> Document | None:
@@ -130,6 +137,7 @@ class JiraSource(Source):
             url=f'{self._base_url}/browse/{issue_key}',
             creator=reporter,
             created_at=created_at,
+            parent_doc_ids=self._parent_ids_map.get(issue_key, []),
             payload={'summary': summary, 'assignee': assignee},
         )
 
