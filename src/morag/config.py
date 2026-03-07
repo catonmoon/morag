@@ -45,8 +45,6 @@ class QdrantConfig(BaseModel):
 
 class RetryConfig(BaseModel):
     max_retries: int = 3    # количество повторных попыток (0 = без retry)
-    delay: float = 1.0      # начальная задержка между попытками (секунды)
-    backoff: float = 2.0    # множитель: delay → delay*backoff → delay*backoff² → ...
 
 
 class DocSummaryConfig(BaseModel):

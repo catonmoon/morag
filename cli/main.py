@@ -44,7 +44,7 @@ from morag.storage.collections import (
 from morag.storage.repository import ChunkRepository, DocRepository
 
 def _make_retry(cfg: RetryConfig) -> RetryPolicy:
-    return RetryPolicy(max_retries=cfg.max_retries, delay=cfg.delay, backoff=cfg.backoff)
+    return RetryPolicy(max_retries=cfg.max_retries)
 
 
 def _make_dense_embedder(cfg: DenseEmbedderConfig) -> Embedder:
@@ -99,7 +99,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         model=config.llm.model,
         api_key=config.llm.api_key,
         timeout=config.llm.timeout,
-        retry_policy=_make_retry(config.llm.retry),
+        max_retries=config.llm.retry.max_retries,
     )
 
     vision_client = None
@@ -109,7 +109,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             model=config.llm_vision.model,
             api_key=config.llm_vision.api_key,
             timeout=config.llm_vision.timeout,
-            retry_policy=_make_retry(config.llm_vision.retry),
+            max_retries=config.llm_vision.retry.max_retries,
         )
         logger.info('Vision LLM: %s @ %s', config.llm_vision.model, config.llm_vision.base_url)
 
