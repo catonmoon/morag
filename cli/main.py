@@ -10,10 +10,9 @@ import sys
 
 from qdrant_client import AsyncQdrantClient
 
-from morag.config import load_config
+from morag.config import DenseEmbedderConfig, RetryConfig, SparseEmbedderConfig, load_config
 from morag.indexing.chunker import LLMChunker, PassthroughChunker
 from morag.indexing.context import LLMContextGenerator, NoopContextGenerator
-from morag.config import DenseEmbedderConfig, SparseEmbedderConfig
 from morag.indexing.embedder import (
     Embedder,
     FridaEmbedder,
@@ -23,9 +22,15 @@ from morag.indexing.embedder import (
     SparseEmbedder,
 )
 from morag.indexing.pipeline import IndexingPipeline
-from morag.indexing.processors import DenseEmbeddingProcessor, MetadataProcessor, SparseEmbeddingProcessor
+from morag.indexing.processors import (
+    DenseEmbeddingProcessor,
+    DocSummaryProcessor,
+    MetadataProcessor,
+    SparseEmbeddingProcessor,
+)
 from morag.indexing.token_counter import TiktokenCounter
 from morag.llm.client import LLMClient
+from morag.llm.retry import RetryPolicy
 from morag.sources.confluence import ConfluenceSource
 from morag.sources.jira import JiraSource
 from morag.sources.jira_extractor import JiraLinkExtractor
@@ -38,15 +43,19 @@ from morag.storage.collections import (
 )
 from morag.storage.repository import ChunkRepository, DocRepository
 
+def _make_retry(cfg: RetryConfig) -> RetryPolicy:
+    return RetryPolicy(max_retries=cfg.max_retries, delay=cfg.delay, backoff=cfg.backoff)
+
+
 def _make_dense_embedder(cfg: DenseEmbedderConfig) -> Embedder:
     if cfg.base_url is not None:
-        return HttpFridaEmbedder(cfg.base_url, cfg.dim, cfg.timeout)
+        return HttpFridaEmbedder(cfg.base_url, cfg.dim, cfg.timeout, retry_policy=_make_retry(cfg.retry))
     return FridaEmbedder(cfg.model)
 
 
 def _make_sparse_embedder(cfg: SparseEmbedderConfig) -> SparseEmbedder:
     if cfg.base_url is not None:
-        return HttpGteSparseEmbedder(cfg.base_url, cfg.timeout)
+        return HttpGteSparseEmbedder(cfg.base_url, cfg.timeout, retry_policy=_make_retry(cfg.retry))
     return GteSparseEmbedder(cfg.model, device=cfg.device)
 
 
@@ -90,6 +99,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         model=config.llm.model,
         api_key=config.llm.api_key,
         timeout=config.llm.timeout,
+        retry_policy=_make_retry(config.llm.retry),
     )
 
     vision_client = None
@@ -99,6 +109,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             model=config.llm_vision.model,
             api_key=config.llm_vision.api_key,
             timeout=config.llm_vision.timeout,
+            retry_policy=_make_retry(config.llm_vision.retry),
         )
         logger.info('Vision LLM: %s @ %s', config.llm_vision.model, config.llm_vision.base_url)
 
@@ -124,6 +135,17 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         ) if config.indexing.context == 'llm' else NoopContextGenerator()
     )
     sparse_embedder = _make_sparse_embedder(config.indexing.sparse_embedder)
+
+    doc_processors = []
+    if config.indexing.doc_summary.max_tokens is not None:
+        doc_processors.append(DocSummaryProcessor(
+            llm_client=llm_client,
+            doc_repo=doc_repo,
+            max_tokens=config.indexing.doc_summary.max_tokens,
+            token_counter=token_counter,
+            context_window=config.indexing.llm_context_window,
+        ))
+
     chunk_processors = [
         MetadataProcessor(),
         DenseEmbeddingProcessor(embedder),
@@ -147,6 +169,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
 
     pipeline = IndexingPipeline(
         doc_repo, chunk_repo,
+        doc_processors=doc_processors,
         chunker=chunker,
         context_generator=context_generator,
         chunk_processors=chunk_processors,
@@ -160,16 +183,25 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         await pipeline.run(source)
 
     # Jira: сканируем проиндексированные документы на ссылки, затем индексируем задачи.
-    # pipeline.run() вызывается даже при пустом issue_map — для удаления устаревших Jira-задач из базы.
+    # Удаление устаревших задач происходит каскадно через parent_doc_ids при удалении родительских документов.
     if config.sources.jira:
         logger.info('Source: jira url=%s', config.sources.jira.url)
         all_docs = await doc_repo.scroll_all(exclude_source_types=['jira'])
         logger.info('Scanning %d indexed document(s) for Jira links...', len(all_docs))
         extractor = JiraLinkExtractor(config.sources.jira.url)
         issue_map = extractor.extract_from_docs(all_docs)
-        logger.info('Found %d Jira issue(s) in indexed documents', len(issue_map))
-        jira_source = JiraSource(config.sources.jira, issue_map)
-        await pipeline.run(jira_source)
+        if issue_map:
+            logger.info('Found %d Jira issue(s) in indexed documents', len(issue_map))
+            # Строим parent_ids_map: {issue_key: [doc_id, ...]} для хранения parent_doc_ids
+            path_to_doc_id = {doc.path[0]: doc.id for doc in all_docs if doc.path}
+            parent_ids_map: dict[str, list[str]] = {
+                key: [path_to_doc_id[p] for p in paths if p in path_to_doc_id]
+                for key, paths in issue_map.items()
+            }
+            jira_source = JiraSource(config.sources.jira, issue_map, parent_ids_map)
+            await pipeline.run(jira_source)
+        else:
+            logger.info('No Jira issues found in indexed documents, skipping Jira indexing')
 
     await client.close()
 
@@ -260,10 +292,16 @@ async def cmd_query(config_path: str, question: str, top_k: int) -> None:
     await client.close()
 
 
-LOGO = """
+try:
+    from importlib.metadata import version as _pkg_version
+    _VERSION = _pkg_version('morag')
+except Exception:
+    _VERSION = 'unknown'
+
+LOGO = f"""
   ░▒▓█████
  ░▒▓███████         Catonmoon
-▒▓██(=^.^=)██       Morag v0.1
+▒▓██(=^.^=)██       Morag v{_VERSION}
  ▓█████████
   ▓███████
 """
@@ -275,6 +313,7 @@ def main() -> None:
         description='morag — RAG для локальных MD-файлов',
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument('--version', action='version', version=f'morag {_VERSION}')
     parser.add_argument(
         '-v', '--debug', action='store_true',
         help='Включить DEBUG-логирование (показывает сырые ответы LLM)',

@@ -180,7 +180,7 @@ class LLMChunker(Chunker):
     async def _try_chunk(self, messages: list[dict], attempt: int) -> list[str] | None:
         """Одна попытка чанкинга. Возвращает список чанков или None при неудаче."""
         block = messages[-1]['content']
-        logger.debug('LLMChunker: attempt %d — input block (%d chars):\n%s', attempt, len(block), block)
+        logger.debug('LLMChunker: attempt %d — input block (%d chars): %s', attempt, len(block), block.replace('\n', '\\n'))
         try:
             data = await self._client.complete_json(messages, schema=_CHUNKS_SCHEMA, schema_name='chunks', params=_LLM_PARAMS)
         except ValueError:

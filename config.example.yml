@@ -29,15 +29,19 @@ qdrant:
 
 llm:
   base_url: http://localhost:11434/v1
-  model: qwen2.5-coder:7b
+  model: qwen3.5:9b              # рекомендуется: qwen3.5:9b; см. README → Ollama
   api_key: ollama
   # timeout: 180                  # таймаут HTTP-запросов к LLM (секунды; по умолчанию 180)
+  # retry:                        # политика повторных попыток при ошибках LLM
+  #   max_retries: 3              # количество повторов (0 = без retry; по умолчанию 3)
+  #   delay: 1.0                  # начальная задержка в секундах (по умолчанию 1.0)
+  #   backoff: 2.0                # множитель задержки (по умолчанию 2.0)
 
 # llm_vision — multimodal LLM для описания изображений со страниц Confluence (опционально)
 # Если не задан, изображения пропускаются при индексации
 # llm_vision:
 #   base_url: http://localhost:11434/v1
-#   model: llava:7b
+#   model: qwen3.5:9b            # та же модель поддерживает vision
 #   api_key: ollama
 
 indexing:
@@ -54,6 +58,10 @@ indexing:
     # base_url: http://localhost:8082   # если задан → HTTP-режим
     # dim: 1536                         # обязателен в HTTP-режиме
     # timeout: 30                       # таймаут HTTP-запросов (секунды; по умолчанию 30)
+    # retry:                            # политика retry (только в HTTP-режиме)
+    #   max_retries: 3
+    #   delay: 1.0
+    #   backoff: 2.0
 
   # Sparse-эмбеддер (GTE)
   # По умолчанию: локальная модель (загружается напрямую через transformers)
@@ -63,5 +71,16 @@ indexing:
     # device: cpu                       # cpu | cuda | (не задано = авто; только в local-режиме)
     # base_url: http://localhost:8081   # если задан → HTTP-режим
     # timeout: 30                       # таймаут HTTP-запросов (секунды; по умолчанию 30)
+    # retry:                            # политика retry (только в HTTP-режиме)
+    #   max_retries: 3
+    #   delay: 1.0
+    #   backoff: 2.0
 
   # concurrency: 1                # количество документов, обрабатываемых параллельно (по умолчанию 1)
+
+  # Саммари документов (опционально)
+  # Генерирует payload['doc_summary'] для каждого документа через LLM.
+  # Учитывает иерархию: если у документа есть родители, их саммари включается в промпт.
+  # Retry для LLM-вызовов наследуется из секции llm.retry.
+  # doc_summary:
+  #   max_tokens: 128             # лимит токенов ответа; не задано — генерация отключена

@@ -67,23 +67,23 @@ class TestDocumentProcessor:
         with pytest.raises(TypeError):
             DocumentProcessor()  # нельзя создать напрямую
 
-    def test_concrete_implementation_works(self):
+    async def test_concrete_implementation_works(self):
         class AddAuthorProcessor(DocumentProcessor):
-            def process(self, document: Document) -> Document:
+            async def process(self, document: Document) -> Document:
                 document.payload['author'] = 'Тест'
                 return document
 
         processor = AddAuthorProcessor()
         doc = make_document()
-        result = processor.process(doc)
+        result = await processor.process(doc)
         assert result.payload.get('author') == 'Тест'
 
-    def test_processor_chain_applies_sequentially(self):
+    async def test_processor_chain_applies_sequentially(self):
         class TagProcessor(DocumentProcessor):
             def __init__(self, tag: str):
                 self.tag = tag
 
-            def process(self, document: Document) -> Document:
+            async def process(self, document: Document) -> Document:
                 tags = document.payload.get('tags', [])
                 document.payload['tags'] = [*tags, self.tag]
                 return document
@@ -91,7 +91,7 @@ class TestDocumentProcessor:
         chain = [TagProcessor('rag'), TagProcessor('test')]
         doc = make_document()
         for p in chain:
-            doc = p.process(doc)
+            doc = await p.process(doc)
 
         assert doc.payload['tags'] == ['rag', 'test']
 

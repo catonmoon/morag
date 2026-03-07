@@ -20,6 +20,8 @@ class Document:
     indexed_at: datetime | None = None        # дата индексации (выставляется репозиторием при upsert)
     creator: str | None = None                # автор документа (из frontmatter / git / Confluence history)
     created_at: datetime | None = None        # дата создания документа
+    parent_doc_ids: list[str] = field(default_factory=list)  # doc_id родительских документов (для каскадного удаления)
+    structural: bool = False                               # структурный (навигационный) документ без полезного тела; не чанкуется
     payload: dict = field(default_factory=dict)  # метаданные от DocumentProcessor-ов
 
 
