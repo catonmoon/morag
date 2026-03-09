@@ -51,6 +51,20 @@ class Pipeline:
         INTENT_MODEL: str
         INTENT_API_KEY: str
 
+        SYSTEM_PROMPT: str = (
+            'Ты — ассистент по внутренней документации компании. '
+            'Отвечай только на русском языке в формальном тоне.\n\n'
+            'Правила:\n'
+            '- Отвечай ТОЛЬКО на основе предоставленных чанков из базы знаний. '
+            'Не додумывай и не дополняй информацией из общих знаний.\n'
+            '- Если в чанках нет ответа на вопрос — честно сообщи, '
+            'что в базе знаний нет информации по этому вопросу.\n'
+            '- Если информация в чанках противоречива — укажи на расхождение '
+            'и приведи оба варианта с маркерами источников.\n'
+            '- Отвечай структурированно: используй списки и заголовки, где это уместно.'
+        )
+
+        CITATION_MAX_CHARS: int = 2000  # лимит символов в citation-превью
         HTTP_TIMEOUT: int = 180  # таймаут HTTP-запросов (секунды)
 
     def __init__(self):
@@ -68,8 +82,8 @@ class Pipeline:
             LLM_MODEL=os.getenv('LLM_MODEL', 'qwen2.5:7b'),
             LLM_API_KEY=os.getenv('LLM_API_KEY', 'ollama'),
             LLM_TEMPERATURE=float(os.getenv('LLM_TEMPERATURE', '0.1')),
-            LLM_MAX_TOKENS=int(os.getenv('LLM_MAX_TOKENS', '2048')),
-            LLM_REPETITION_PENALTY=float(os.getenv('LLM_REPETITION_PENALTY', '1.1')),
+            LLM_MAX_TOKENS=int(os.getenv('LLM_MAX_TOKENS', '2024')),
+            LLM_REPETITION_PENALTY=float(os.getenv('LLM_REPETITION_PENALTY', '1.3')),
 
             FILTER_MODEL_URL=os.getenv('FILTER_MODEL_URL', os.getenv('LLM_URL', 'http://localhost:11434/v1')),
             FILTER_MODEL=os.getenv('FILTER_MODEL', os.getenv('LLM_MODEL', 'qwen2.5:7b')),
@@ -143,7 +157,7 @@ class Pipeline:
         for chunk in result_chunks:
             doc_name = chunk['path'][0].split('/')[-1] if chunk['path'] else chunk['doc_id']
             yield self._emit_source(
-                doc_name, chunk['text'], chunk.get('url'),
+                doc_name, chunk['text'][:self.valves.CITATION_MAX_CHARS], chunk.get('url'),
                 source_id=chunk['chunk_id'],
             )
 
@@ -268,7 +282,8 @@ class Pipeline:
         return resp.json()['choices'][0]['message']['content']
 
     def _stream_answer(self, messages: list, context: str) -> Generator:
-        augmented = messages + [{'role': 'user', 'content': context}]
+        system_msg = {'role': 'system', 'content': self.valves.SYSTEM_PROMPT}
+        augmented = [system_msg] + messages + [{'role': 'user', 'content': context}]
         payload = {
             'model': self.valves.LLM_MODEL,
             'messages': augmented,
