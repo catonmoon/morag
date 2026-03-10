@@ -32,8 +32,11 @@ llm:
   model: qwen3.5:9b              # рекомендуется: qwen3.5:9b; см. README → Ollama
   api_key: ollama
   # timeout: 180                  # таймаут HTTP-запросов к LLM (секунды; по умолчанию 180)
+  # context_window: 32768         # контекстное окно модели в токенах (по умолчанию 32768)
   # retry:                        # политика повторных попыток при ошибках LLM
   #   max_retries: 3              # количество повторов (0 = без retry; по умолчанию 3)
+  # model_wait_seconds: 300       # ожидание перезагрузки модели (сек; 0 = не ждать)
+  # model_wait_retries: 3         # количество попыток ожидания модели
 
 # llm_vision — multimodal LLM для описания изображений со страниц Confluence (опционально)
 # Если не задан, изображения пропускаются при индексации
@@ -43,10 +46,14 @@ llm:
 #   api_key: ollama
 
 indexing:
-  chunker: passthrough          # passthrough | llm
-  context: noop                 # noop | llm
-  block_limit: 4000            # в llm-режиме автоматически ограничивается: min(block_limit, (llm_context_window - 512) / 2)
-  llm_context_window: 32768     # контекстное окно LLM в токенах (qwen2.5: 32768, llama3: 8192, ...)
+  chunker:
+    mode: passthrough            # passthrough | llm
+    # block_limit: 32000         # лимит токенов для pre-split блока (в llm-режиме ограничивается: min(block_limit, (context_window - 512) / 2))
+    # halving_retries: 3         # деления блока пополам при таймауте LLM (0 = выключено)
+    # fallback: false            # семантический fallback при исчерпании всех попыток
+  context:
+    mode: noop                   # noop | llm
+    # max_tokens: 256            # лимит токенов в ответе LLMContextGenerator; не задано — без ограничения
 
   # Dense-эмбеддер (FRIDA)
   # По умолчанию: локальная модель (загружается напрямую через sentence-transformers)

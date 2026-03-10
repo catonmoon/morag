@@ -56,7 +56,10 @@ class LLMConfig(BaseModel):
     model: str = 'qwen2.5-coder:7b'
     api_key: str = 'ollama'
     timeout: int = 180  # таймаут HTTP-запросов к LLM (секунды)
+    context_window: int = 32768   # контекстное окно модели (токенов)
     retry: RetryConfig = RetryConfig()
+    model_wait_seconds: int = 0   # ожидание перезагрузки модели (сек); 0 = не ждать
+    model_wait_retries: int = 0   # количество попыток ожидания модели
 
 
 class DenseEmbedderConfig(BaseModel):
@@ -81,12 +84,21 @@ class SparseEmbedderConfig(BaseModel):
     retry: RetryConfig = RetryConfig()  # политика повторных попыток (только в HTTP-режиме)
 
 
+class ChunkerConfig(BaseModel):
+    mode: str = 'passthrough'            # 'passthrough' | 'llm'
+    block_limit: int = 32000             # лимит токенов для pre-split блока
+    halving_retries: int = 0             # деления блока пополам при таймауте LLM; 0 = выключено
+    fallback: bool = False               # семантический fallback; False = при неудаче документ пропускается
+
+
+class ContextConfig(BaseModel):
+    mode: str = 'noop'                   # 'noop' | 'llm'
+    max_tokens: int | None = None        # лимит токенов в ответе LLMContextGenerator; None — без ограничения
+
+
 class IndexingConfig(BaseModel):
-    chunker: str = 'passthrough'         # 'passthrough' | 'llm'
-    context: str = 'noop'               # 'noop' | 'llm'
-    block_limit: int = 32000
-    llm_context_window: int = 32768     # контекстное окно LLM (токенов); используется для расчёта безопасного лимита блока
-    context_max_output_tokens: int | None = None  # лимит токенов в ответе LLMContextGenerator; None — без ограничения
+    chunker: ChunkerConfig = ChunkerConfig()
+    context: ContextConfig = ContextConfig()
     dense_embedder: DenseEmbedderConfig = DenseEmbedderConfig()
     sparse_embedder: SparseEmbedderConfig = SparseEmbedderConfig()
     concurrency: int = 1  # количество документов, обрабатываемых параллельно

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -21,11 +22,22 @@ class GenerationParams:
     seed: int | None = None
 
 
+def _is_model_unavailable(exc: Exception) -> bool:
+    """Определить, связана ли ошибка с недоступностью модели."""
+    msg = str(exc).lower()
+    if 'model not found' in msg or 'model_not_found' in msg:
+        return True
+    return False
+
+
 class LLMClient:
     """Async OpenAI-compatible LLM client.
 
     Works with OpenAI, Ollama, LM Studio and any OpenAI-compatible server
     via the base_url parameter.
+
+    При обнаружении недоступности модели (пустой ответ, Model not found)
+    ожидает перезагрузки модели: model_wait_seconds × model_wait_retries.
     """
 
     def __init__(
@@ -35,9 +47,67 @@ class LLMClient:
         api_key: str = 'ollama',
         timeout: int = 180,
         max_retries: int = 3,
+        model_wait_seconds: int = 0,
+        model_wait_retries: int = 0,
     ) -> None:
-        self._client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout, max_retries=max_retries)
+        self._client = AsyncOpenAI(
+            base_url=base_url, api_key=api_key,
+            timeout=timeout, max_retries=max_retries,
+        )
         self._model = model
+        self._model_wait_seconds = model_wait_seconds
+        self._model_wait_retries = model_wait_retries
+
+    async def _create(self, **kwargs):
+        """Обёртка над chat.completions.create с model-wait логикой.
+
+        Обнаруживает два сигнала недоступности модели:
+        1. response.choices is None — сервер вернул 200, но пустое тело (перезагрузка)
+        2. BadRequestError "Model not found" — модель ещё не загружена
+
+        При обнаружении ждёт model_wait_seconds и повторяет до model_wait_retries раз.
+        Любая ошибка во время ожидания считается «модель ещё не готова» — ждём дальше.
+        """
+        # Первая попытка (без ожидания)
+        try:
+            response = await self._client.chat.completions.create(**kwargs)
+            if response.choices is None:
+                raise _ModelUnavailableError('Empty response from server (choices is None)')
+            return response
+        except Exception as exc:
+            if not (isinstance(exc, _ModelUnavailableError) or _is_model_unavailable(exc)):
+                raise
+            if self._model_wait_retries == 0:
+                if isinstance(exc, _ModelUnavailableError):
+                    raise AttributeError(
+                        "'NoneType' object has no attribute 'choices'"
+                    ) from exc
+                raise
+            last_exc = exc
+
+        # Цикл ожидания перезагрузки модели
+        for wait_attempt in range(1, self._model_wait_retries + 1):
+            logger.warning(
+                'LLMClient: model unavailable, waiting %ds (attempt %d/%d)...',
+                self._model_wait_seconds, wait_attempt, self._model_wait_retries,
+            )
+            await asyncio.sleep(self._model_wait_seconds)
+
+            try:
+                response = await self._client.chat.completions.create(**kwargs)
+                if response.choices is None:
+                    raise _ModelUnavailableError('Empty response from server (choices is None)')
+                return response
+            except Exception as exc:
+                last_exc = exc
+                # Любая ошибка во время ожидания = модель ещё не готова, ждём дальше
+
+        # Все попытки исчерпаны — пробрасываем последнюю ошибку
+        if isinstance(last_exc, _ModelUnavailableError):
+            raise AttributeError(
+                "'NoneType' object has no attribute 'choices'"
+            ) from last_exc
+        raise last_exc
 
     async def complete(
         self,
@@ -62,7 +132,7 @@ class LLMClient:
             kwargs['extra_body'] = {'top_k': params.top_k}
         if max_tokens is not None:
             kwargs['max_tokens'] = max_tokens
-        response = await self._client.chat.completions.create(**kwargs)
+        response = await self._create(**kwargs)
         return response.choices[0].message.content or ''
 
     async def complete_vision(self, prompt: str, image_base64: str, media_type: str = 'image/png') -> str:
@@ -83,7 +153,7 @@ class LLMClient:
                 ],
             }
         ]
-        response = await self._client.chat.completions.create(
+        response = await self._create(
             model=self._model,
             messages=messages,
             temperature=0.0,
@@ -120,7 +190,7 @@ class LLMClient:
             kwargs['seed'] = params.seed
         if params.top_k != 0:
             kwargs['extra_body'] = {'top_k': params.top_k}
-        response = await self._client.chat.completions.create(**kwargs)
+        response = await self._create(**kwargs)
         content = response.choices[0].message.content or '{}'
         logger.debug('LLM raw response: %s', content)
         try:
@@ -128,3 +198,7 @@ class LLMClient:
         except json.JSONDecodeError as e:
             logger.warning('LLM returned invalid JSON: %s\nRaw content: %s', e, content)
             raise ValueError(f'LLM returned invalid JSON: {e}') from e
+
+
+class _ModelUnavailableError(Exception):
+    """Модель временно недоступна (перезагрузка / пустой ответ)."""
