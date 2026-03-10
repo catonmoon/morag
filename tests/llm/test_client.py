@@ -100,3 +100,218 @@ class TestLLMClient:
             LLMClient(base_url='http://localhost:11434/v1', model='llama3.2')
             _, kwargs = cls.call_args
             assert kwargs.get('api_key') == 'ollama'
+
+
+# ---------------------------------------------------------------------------
+# Model wait
+# ---------------------------------------------------------------------------
+
+def make_empty_completion():
+    """Build a fake ChatCompletion with choices=None (model reloading)."""
+    completion = MagicMock()
+    completion.choices = None
+    return completion
+
+
+class TestModelWait:
+    """Тесты ожидания перезагрузки модели в LLMClient."""
+
+    async def test_waits_and_retries_on_model_not_found(self):
+        """При model_not_found ждёт и повторяет; если модель загрузилась — успех."""
+        with patch('morag.llm.client.AsyncOpenAI') as cls:
+            instance = AsyncMock()
+            instance.chat = AsyncMock()
+            instance.chat.completions = AsyncMock()
+            cls.return_value = instance
+
+            call_count = 0
+
+            async def side_effect(**kwargs):
+                nonlocal call_count
+                call_count += 1
+                if call_count <= 2:
+                    raise Exception('400 - Model not found')
+                return make_completion('Hello!')
+
+            instance.chat.completions.create.side_effect = side_effect
+
+            with patch('morag.llm.client.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+                client = LLMClient(
+                    base_url='http://localhost/v1', model='test',
+                    model_wait_seconds=10, model_wait_retries=3,
+                )
+                result = await client.complete([{'role': 'user', 'content': 'Hi'}])
+
+            assert result == 'Hello!'
+            assert call_count == 3
+            assert mock_sleep.call_count == 2
+            mock_sleep.assert_called_with(10)
+
+    async def test_waits_on_empty_response(self):
+        """Wait срабатывает при пустом ответе (choices is None)."""
+        with patch('morag.llm.client.AsyncOpenAI') as cls:
+            instance = AsyncMock()
+            instance.chat = AsyncMock()
+            instance.chat.completions = AsyncMock()
+            cls.return_value = instance
+
+            call_count = 0
+
+            async def side_effect(**kwargs):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return make_empty_completion()
+                return make_completion('ok')
+
+            instance.chat.completions.create.side_effect = side_effect
+
+            with patch('morag.llm.client.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+                client = LLMClient(
+                    base_url='http://localhost/v1', model='test',
+                    model_wait_seconds=10, model_wait_retries=3,
+                )
+                result = await client.complete([{'role': 'user', 'content': 'Hi'}])
+
+            assert result == 'ok'
+            assert call_count == 2
+            assert mock_sleep.call_count == 1
+
+    async def test_model_wait_exhausted_raises(self):
+        """Если все попытки ожидания исчерпаны — пробрасывает ошибку."""
+        with patch('morag.llm.client.AsyncOpenAI') as cls:
+            instance = AsyncMock()
+            instance.chat = AsyncMock()
+            instance.chat.completions = AsyncMock()
+            instance.chat.completions.create.side_effect = Exception('400 - Model not found')
+            cls.return_value = instance
+
+            with patch('morag.llm.client.asyncio.sleep', new_callable=AsyncMock):
+                client = LLMClient(
+                    base_url='http://localhost/v1', model='test',
+                    model_wait_seconds=5, model_wait_retries=2,
+                )
+                with pytest.raises(Exception, match='Model not found'):
+                    await client.complete([{'role': 'user', 'content': 'Hi'}])
+
+            # 1 initial + 2 wait attempts = 3
+            assert instance.chat.completions.create.call_count == 3
+
+    async def test_no_wait_when_disabled(self):
+        """Если model_wait_retries=0 — не ждём, сразу пробрасываем ошибку."""
+        with patch('morag.llm.client.AsyncOpenAI') as cls:
+            instance = AsyncMock()
+            instance.chat = AsyncMock()
+            instance.chat.completions = AsyncMock()
+            instance.chat.completions.create.side_effect = Exception('400 - Model not found')
+            cls.return_value = instance
+
+            client = LLMClient(
+                base_url='http://localhost/v1', model='test',
+            )
+            with pytest.raises(Exception, match='Model not found'):
+                await client.complete([{'role': 'user', 'content': 'Hi'}])
+
+            assert instance.chat.completions.create.call_count == 1
+
+    async def test_empty_response_without_wait_raises_attribute_error(self):
+        """Пустой ответ без model_wait → AttributeError (совместимость с чанкером)."""
+        with patch('morag.llm.client.AsyncOpenAI') as cls:
+            instance = AsyncMock()
+            instance.chat = AsyncMock()
+            instance.chat.completions = AsyncMock()
+            instance.chat.completions.create.return_value = make_empty_completion()
+            cls.return_value = instance
+
+            client = LLMClient(
+                base_url='http://localhost/v1', model='test',
+            )
+            with pytest.raises(AttributeError, match='choices'):
+                await client.complete([{'role': 'user', 'content': 'Hi'}])
+
+    async def test_wait_continues_on_any_error_during_wait(self):
+        """Во время ожидания любые ошибки не прерывают цикл — ждём дальше."""
+        with patch('morag.llm.client.AsyncOpenAI') as cls:
+            instance = AsyncMock()
+            instance.chat = AsyncMock()
+            instance.chat.completions = AsyncMock()
+            cls.return_value = instance
+
+            call_count = 0
+
+            async def side_effect(**kwargs):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    raise Exception('400 - Model not found')
+                if call_count == 2:
+                    return make_empty_completion()
+                if call_count == 3:
+                    raise ConnectionError('connection refused')
+                return make_completion('ok')
+
+            instance.chat.completions.create.side_effect = side_effect
+
+            with patch('morag.llm.client.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+                client = LLMClient(
+                    base_url='http://localhost/v1', model='test',
+                    model_wait_seconds=5, model_wait_retries=5,
+                )
+                result = await client.complete([{'role': 'user', 'content': 'Hi'}])
+
+            assert result == 'ok'
+            assert call_count == 4
+            assert mock_sleep.call_count == 3
+
+    async def test_non_model_error_not_caught(self):
+        """Ошибки, не связанные с моделью, пробрасываются сразу без ожидания."""
+        with patch('morag.llm.client.AsyncOpenAI') as cls:
+            instance = AsyncMock()
+            instance.chat = AsyncMock()
+            instance.chat.completions = AsyncMock()
+            instance.chat.completions.create.side_effect = ConnectionError('refused')
+            cls.return_value = instance
+
+            with patch('morag.llm.client.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+                client = LLMClient(
+                    base_url='http://localhost/v1', model='test',
+                    model_wait_seconds=10, model_wait_retries=3,
+                )
+                with pytest.raises(ConnectionError):
+                    await client.complete([{'role': 'user', 'content': 'Hi'}])
+
+            # Не должно быть ожидания — ошибка не связана с моделью
+            mock_sleep.assert_not_called()
+            assert instance.chat.completions.create.call_count == 1
+
+    async def test_model_wait_works_with_complete_json(self):
+        """Model wait работает и для complete_json."""
+        with patch('morag.llm.client.AsyncOpenAI') as cls:
+            instance = AsyncMock()
+            instance.chat = AsyncMock()
+            instance.chat.completions = AsyncMock()
+            cls.return_value = instance
+
+            call_count = 0
+
+            async def side_effect(**kwargs):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return make_empty_completion()
+                return make_completion('{"key": "value"}')
+
+            instance.chat.completions.create.side_effect = side_effect
+
+            with patch('morag.llm.client.asyncio.sleep', new_callable=AsyncMock):
+                client = LLMClient(
+                    base_url='http://localhost/v1', model='test',
+                    model_wait_seconds=5, model_wait_retries=2,
+                )
+                schema = {'type': 'object', 'properties': {'key': {'type': 'string'}}, 'required': ['key']}
+                result = await client.complete_json(
+                    [{'role': 'user', 'content': 'Hi'}], schema=schema,
+                )
+
+            assert result == {'key': 'value'}
+            assert call_count == 2

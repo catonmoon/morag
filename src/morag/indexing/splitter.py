@@ -179,7 +179,18 @@ class SemanticSplitter(BlockSplitter):
 
     @staticmethod
     def _split_sentences(text: str) -> list[str]:
-        return [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+        """Разбивает текст на предложения.
+
+        Использует razdel для кириллического текста и nltk для латиницы.
+        """
+        cyrillic = sum(1 for c in text if '\u0400' <= c <= '\u04ff')
+        latin = sum(1 for c in text if 'A' <= c <= 'z')
+        if cyrillic >= latin:
+            from razdel import sentenize
+            return [s.text.strip() for s in sentenize(text) if s.text.strip()]
+        else:
+            from nltk.tokenize import sent_tokenize
+            return [s.strip() for s in sent_tokenize(text) if s.strip()]
 
     @staticmethod
     def _cosine_distances(embeddings: list[list[float]]) -> list[float]:

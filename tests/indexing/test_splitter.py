@@ -180,9 +180,9 @@ class TestSemanticSplitter:
 
         text = (
             'Python — язык программирования. '
-            'Python широко используется в ML. '
-            'база данных хранит данные. '
-            'база данных поддерживает SQL.'
+            'Python широко используется в машинном обучении. '
+            'База данных хранит данные. '
+            'База данных поддерживает запросы.'
         )
         chunks = splitter.split(text)
         assert len(chunks) >= 2
@@ -207,6 +207,36 @@ class TestSemanticSplitter:
         text = 'Раз. Два. Три. Четыре. Пять.'
         result = splitter.split(text)
         assert len(result) == 1
+
+
+class TestSplitSentences:
+    """Тесты разбиения на предложения (razdel/nltk)."""
+
+    def test_russian_numbered_list_not_split(self):
+        """Нумерованный список не должен дробиться по точке после цифры."""
+        text = '1. Первый пункт списка. 2. Второй пункт списка. 3. Третий пункт.'
+        sentences = SemanticSplitter._split_sentences(text)
+        # razdel не должен создавать чанки из одних цифр
+        assert all(len(s) > 5 for s in sentences)
+
+    def test_russian_abbreviations(self):
+        """Аббревиатуры т.е., т.д., т.п. не должны резать предложение."""
+        text = 'Используются различные методы, т.е. алгоритмы. Они работают хорошо.'
+        sentences = SemanticSplitter._split_sentences(text)
+        assert len(sentences) == 2
+
+    def test_english_text_uses_nltk(self):
+        """Английский текст должен использовать nltk."""
+        text = 'Mr. Smith went to Washington. He met Dr. Jones there. They discussed AI.'
+        sentences = SemanticSplitter._split_sentences(text)
+        # nltk не должен резать на Mr. и Dr.
+        assert len(sentences) == 3
+
+    def test_simple_russian_sentences(self):
+        """Простые русские предложения разбиваются корректно."""
+        text = 'Первое предложение. Второе предложение. Третье предложение.'
+        sentences = SemanticSplitter._split_sentences(text)
+        assert len(sentences) == 3
 
 
 # ---------------------------------------------------------------------------

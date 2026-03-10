@@ -100,6 +100,8 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         api_key=config.llm.api_key,
         timeout=config.llm.timeout,
         max_retries=config.llm.retry.max_retries,
+        model_wait_seconds=config.llm.model_wait_seconds,
+        model_wait_retries=config.llm.model_wait_retries,
     )
 
     vision_client = None
@@ -125,14 +127,23 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         return
 
     token_counter = TiktokenCounter()
-    chunker = LLMChunker(llm_client) if config.indexing.chunker == 'llm' else PassthroughChunker()
+    chunker = (
+        LLMChunker(
+            llm_client,
+            token_counter=token_counter,
+            embed_fn=embedder.embed,
+            halving_retries=config.indexing.chunker.halving_retries,
+            fallback_enabled=config.indexing.chunker.fallback,
+        )
+        if config.indexing.chunker.mode == 'llm' else PassthroughChunker()
+    )
     context_generator = (
         LLMContextGenerator(
             llm_client,
             token_counter=token_counter,
-            context_window=config.indexing.llm_context_window,
-            max_output_tokens=config.indexing.context_max_output_tokens,
-        ) if config.indexing.context == 'llm' else NoopContextGenerator()
+            context_window=config.llm.context_window,
+            max_output_tokens=config.indexing.context.max_tokens,
+        ) if config.indexing.context.mode == 'llm' else NoopContextGenerator()
     )
     sparse_embedder = _make_sparse_embedder(config.indexing.sparse_embedder)
 
@@ -143,7 +154,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             doc_repo=doc_repo,
             max_tokens=config.indexing.doc_summary.max_tokens,
             token_counter=token_counter,
-            context_window=config.indexing.llm_context_window,
+            context_window=config.llm.context_window,
         ))
 
     chunk_processors = [
@@ -155,17 +166,17 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
     # В LLM-режиме блок + ответ LLM должны влезть в контекстное окно.
     # Ответ ≈ такого же размера как вход, поэтому безопасный лимит: (context_window - overhead) / 2.
     _LLM_PROMPT_OVERHEAD = 512  # токенов на системный промпт + запас
-    if config.indexing.chunker == 'llm':
-        llm_safe_limit = (config.indexing.llm_context_window - _LLM_PROMPT_OVERHEAD) // 2
-        block_limit = min(config.indexing.block_limit, llm_safe_limit)
-        if block_limit < config.indexing.block_limit:
+    if config.indexing.chunker.mode == 'llm':
+        llm_safe_limit = (config.llm.context_window - _LLM_PROMPT_OVERHEAD) // 2
+        block_limit = min(config.indexing.chunker.block_limit, llm_safe_limit)
+        if block_limit < config.indexing.chunker.block_limit:
             logger.info(
                 'LLM block limit capped: %d → %d (context_window=%d, overhead=%d)',
-                config.indexing.block_limit, block_limit,
-                config.indexing.llm_context_window, _LLM_PROMPT_OVERHEAD,
+                config.indexing.chunker.block_limit, block_limit,
+                config.llm.context_window, _LLM_PROMPT_OVERHEAD,
             )
     else:
-        block_limit = config.indexing.block_limit
+        block_limit = config.indexing.chunker.block_limit
 
     pipeline = IndexingPipeline(
         doc_repo, chunk_repo,
@@ -178,7 +189,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         concurrency=config.indexing.concurrency,
     )
 
-    logger.info('Chunker: %s, context: %s, block_limit: %d', config.indexing.chunker, config.indexing.context, block_limit)
+    logger.info('Chunker: %s, context: %s, block_limit: %d', config.indexing.chunker.mode, config.indexing.context.mode, block_limit)
     for source in sources:
         await pipeline.run(source)
 

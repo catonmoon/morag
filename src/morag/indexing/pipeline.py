@@ -239,7 +239,11 @@ class IndexingPipeline:
         chunk_texts: list[str] = []
         for i, pack in enumerate(packs):
             block_text = '\n\n'.join(pack)
-            logger.info('%s  Chunking pack %d/%d (%d chars)...', w, i + 1, len(packs), len(block_text))
+            block_tokens = self._token_counter.count(block_text)
+            logger.info(
+                '%s  Chunking pack %d/%d (%d chars, ~%d tokens)...',
+                w, i + 1, len(packs), len(block_text), block_tokens,
+            )
             new_chunks = await self._chunker.chunk(block_text)
             logger.info('%s    -> %d chunk(s)', w, len(new_chunks))
             chunk_texts.extend(new_chunks)

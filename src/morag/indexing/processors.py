@@ -156,7 +156,10 @@ class DocSummaryProcessor(DocumentProcessor):
             document.payload['doc_summary'] = summary.strip()
             logger.info('DocSummaryProcessor: %s (%d chars)', document.id, len(summary))
         except Exception:
-            logger.warning('DocSummaryProcessor: LLM call failed for %s, summary skipped', document.id)
+            logger.warning(
+                'DocSummaryProcessor: LLM call failed for %s, summary skipped',
+                document.id, exc_info=True,
+            )
 
         return document
 
