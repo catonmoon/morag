@@ -54,7 +54,7 @@ curl -fsSL https://ollama.com/install.sh | sh
 **Загрузка модели:**
 
 ```bash
-ollama pull qwen3.5:9b
+ollama pull ollama pull qwen3-coder:30b
 ```
 
 **Запуск сервера:**
@@ -65,7 +65,7 @@ ollama serve   # по умолчанию слушает http://localhost:11434
 
 После запуска Ollama готова к работе — `config.example.yml` уже настроен на неё по умолчанию.
 
-> **Vision (изображения Confluence).** Та же модель `qwen3.5:9b` поддерживает multimodal-режим.
+> **Vision (изображения Confluence).** Модель `qwen3-vl:30b` поддерживает multimodal-режим.
 > Чтобы включить описание изображений, раскомментируй секцию `llm_vision` в `config.yml`.
 
 ### 2. Установка

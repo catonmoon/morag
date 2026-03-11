@@ -106,11 +106,17 @@ class IndexingConfig(BaseModel):
     doc_summary: DocSummaryConfig = DocSummaryConfig()  # генерация саммари документов; max_tokens=None — отключено
 
 
+class DoclingConfig(BaseModel):
+    base_url: str = 'http://localhost:5001'  # URL docling-serve
+    timeout: int = 300                       # таймаут конвертации документа (секунды)
+
+
 class Config(BaseModel):
     sources: SourcesConfig
     qdrant: QdrantConfig = QdrantConfig()
     llm: LLMConfig = LLMConfig()
     llm_vision: LLMConfig | None = None  # multimodal LLM для распознавания изображений (опционально)
+    docling: DoclingConfig | None = None  # docling-serve для конвертации PDF/DOCX → Markdown (опционально)
     indexing: IndexingConfig = IndexingConfig()
 
 

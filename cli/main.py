@@ -34,7 +34,7 @@ from morag.llm.retry import RetryPolicy
 from morag.sources.confluence import ConfluenceSource
 from morag.sources.jira import JiraSource
 from morag.sources.jira_extractor import JiraLinkExtractor
-from morag.sources.markdown import MarkdownSource
+from morag.sources.local import LocalDocumentSource
 from morag.storage.collections import (
     ensure_chunks_collection,
     ensure_docs_collection,
@@ -115,14 +115,25 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         )
         logger.info('Vision LLM: %s @ %s', config.llm_vision.model, config.llm_vision.base_url)
 
-    sources = []
+    local_source = None
     if config.sources.local_documents:
-        sources.append(MarkdownSource(config.sources.local_documents.path))
-        logger.info('Source: local_documents path=%s', config.sources.local_documents.path)
+        local_source = LocalDocumentSource(
+            root=config.sources.local_documents.path,
+            docling_base_url=config.docling.base_url if config.docling else None,
+            docling_timeout=config.docling.timeout if config.docling else 300,
+            vision_client=vision_client,
+        )
+        logger.info(
+            'Source: local_documents path=%s (docling=%s)',
+            config.sources.local_documents.path,
+            config.docling.base_url if config.docling else 'disabled',
+        )
+
+    sources = []
     if config.sources.confluence:
         sources.append(ConfluenceSource(config.sources.confluence, vision_client=vision_client))
         logger.info('Source: confluence url=%s (vision=%s)', config.sources.confluence.url, vision_client is not None)
-    if not sources:
+    if not sources and local_source is None:
         logger.error('No sources configured in config.yml')
         return
 
@@ -190,6 +201,12 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
     )
 
     logger.info('Chunker: %s, context: %s, block_limit: %d', config.indexing.chunker.mode, config.indexing.context.mode, block_limit)
+
+    # Локальные документы: композитный source с собственным порядком запуска
+    if local_source is not None:
+        await local_source.run(pipeline)
+
+    # Остальные source (Confluence и т.д.)
     for source in sources:
         await pipeline.run(source)
 
@@ -309,12 +326,19 @@ try:
 except Exception:
     _VERSION = 'unknown'
 
-LOGO = f"""
+"""
   ░▒▓█████
  ░▒▓███████         Catonmoon
 ▒▓██(=^.^=)██       Morag v{_VERSION}
  ▓█████████
   ▓███████
+"""
+
+LOGO = f"""
+   ░▒▓██████
+  ░▒▓█/\ /\█▓       Catonmoon
+  ▒▓█(=^.^=)▒       Morag v{_VERSION}
+   ▓████████  
 """
 
 
