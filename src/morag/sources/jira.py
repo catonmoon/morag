@@ -36,7 +36,7 @@ class JiraSource(Source):
 
     @property
     def source_type(self) -> str:
-        return 'jira'
+        return 'attached_jira'
 
     def __init__(
         self,
@@ -54,14 +54,37 @@ class JiraSource(Source):
             password=credential,
             cloud=config.api_token is not None,
             timeout=config.timeout,
+            backoff_and_retry=config.max_retries > 0,
+            max_backoff_retries=config.max_retries,
         )
         self._base_url = config.url.rstrip('/')
         self._issue_map = issue_map         # {issue_key: [doc_path, ...]}
         self._parent_ids_map = parent_ids_map or {}  # {issue_key: [doc_id, ...]}
         self._timeout = config.timeout
+        self._custom_fields = config.custom_fields  # ['customfield_10100', ...]
+        self._field_names: dict[str, str] = {}  # кеш: field_id → display_name
+
+    async def _ensure_field_names(self) -> None:
+        """Загрузить маппинг field_id → display_name (один раз)."""
+        if self._field_names or not self._custom_fields:
+            return
+        try:
+            all_fields = await asyncio.to_thread(self._client.get_all_fields)
+            self._field_names = {f['id']: f['name'] for f in all_fields}
+            logger.info(
+                'Loaded %d field name(s) from Jira, custom fields: %s',
+                len(self._field_names),
+                ', '.join(
+                    f'{fid} -> {self._field_names.get(fid, "?")}'
+                    for fid in self._custom_fields
+                ),
+            )
+        except Exception:
+            logger.exception('Failed to load Jira field names')
 
     async def get_metadata(self) -> list[Document]:
         """Вернуть стабы задач: только key, summary, updated_at, без описания и комментариев."""
+        await self._ensure_field_names()
         stubs: list[Document] = []
         for issue_key, doc_paths in self._issue_map.items():
             try:
@@ -99,7 +122,7 @@ class JiraSource(Source):
             path=path,
             text='',
             updated_at=updated_at,
-            source_type='jira',
+            source_type='attached_jira',
             size=0,
             url=f'{self._base_url}/browse/{issue_key}',
             parent_doc_ids=self._parent_ids_map.get(issue_key, []),
@@ -107,8 +130,11 @@ class JiraSource(Source):
 
     async def _fetch_full(self, issue_key: str, doc_paths: list[str]) -> Document | None:
         """Получить полную задачу и сконвертировать в Document."""
+        fields_to_request = _FULL_FIELDS
+        if self._custom_fields:
+            fields_to_request = _FULL_FIELDS + ',' + ','.join(self._custom_fields)
         issue = await asyncio.to_thread(
-            self._client.issue, issue_key, fields=_FULL_FIELDS,
+            self._client.issue, issue_key, fields=fields_to_request,
         )
         fields = issue.get('fields', {})
 
@@ -124,7 +150,12 @@ class JiraSource(Source):
         if fields.get('issuetype', {}).get('name', '').lower() == 'epic':
             epic_issues = await self._fetch_epic_issues(issue_key)
 
-        text = _build_markdown(issue_key, fields, epic_issues=epic_issues)
+        custom_field_names = {fid: self._field_names.get(fid, fid) for fid in self._custom_fields}
+        text = _build_markdown(
+            issue_key, fields,
+            epic_issues=epic_issues,
+            custom_field_names=custom_field_names,
+        )
         path = [f'{dp}/{issue_key}' for dp in doc_paths]
 
         return Document(
@@ -132,7 +163,7 @@ class JiraSource(Source):
             path=path,
             text=text,
             updated_at=updated_at,
-            source_type='jira',
+            source_type='attached_jira',
             size=len(text.encode('utf-8')),
             url=f'{self._base_url}/browse/{issue_key}',
             creator=reporter,
@@ -159,7 +190,12 @@ class JiraSource(Source):
             return []
 
 
-def _build_markdown(issue_key: str, fields: dict, epic_issues: list[dict] | None = None) -> str:
+def _build_markdown(
+    issue_key: str,
+    fields: dict,
+    epic_issues: list[dict] | None = None,
+    custom_field_names: dict[str, str] | None = None,
+) -> str:
     """Сформировать markdown-представление задачи Jira."""
     lines: list[str] = []
 
@@ -203,6 +239,19 @@ def _build_markdown(issue_key: str, fields: dict, epic_issues: list[dict] | None
             lines.append('## Описание')
             lines.append('')
             lines.append(desc_text)
+
+    # Кастомные поля
+    if custom_field_names:
+        for field_id, display_name in custom_field_names.items():
+            value = fields.get(field_id)
+            if not value:
+                continue
+            text = _extract_custom_field_text(value)
+            if text:
+                lines.append('')
+                lines.append(f'## {display_name}')
+                lines.append('')
+                lines.append(text)
 
     # Подзадачи — все поля, доступные в ответе родительской задачи без доп. запросов
     subtasks = fields.get('subtasks', [])
@@ -284,6 +333,34 @@ def _build_markdown(issue_key: str, fields: dict, epic_issues: list[dict] | None
                 lines.append(body)
 
     return '\n'.join(lines)
+
+
+def _extract_custom_field_text(value) -> str:
+    """Извлечь текст из значения кастомного поля Jira.
+
+    Кастомные поля могут быть: строкой, числом, словарём (select/ADF),
+    списком (multi-select), None.
+    """
+    if value is None:
+        return ''
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, dict):
+        # Select-поле: {'value': 'Option A'} или {'name': 'Name'}
+        if 'value' in value:
+            return value['value']
+        if 'name' in value:
+            return value['name']
+        # ADF (Atlassian Document Format)
+        if 'type' in value and 'content' in value:
+            return _extract_adf_text(value)
+        return ''
+    if isinstance(value, list):
+        parts = [_extract_custom_field_text(item) for item in value]
+        return ', '.join(p for p in parts if p)
+    return ''
 
 
 def _get_display_name(user: dict | None) -> str | None:

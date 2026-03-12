@@ -32,9 +32,11 @@ from morag.indexing.token_counter import TiktokenCounter
 from morag.llm.client import LLMClient
 from morag.llm.retry import RetryPolicy
 from morag.sources.confluence import ConfluenceSource
+from morag.sources.confluence_pdf import ConfluencePdfSource
 from morag.sources.jira import JiraSource
 from morag.sources.jira_extractor import JiraLinkExtractor
 from morag.sources.local import LocalDocumentSource
+from morag.sources.pdf_converter import DoclingPdfConverter
 from morag.storage.collections import (
     ensure_chunks_collection,
     ensure_docs_collection,
@@ -210,11 +212,34 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
     for source in sources:
         await pipeline.run(source)
 
+    # Confluence PDF attachments: после страниц, чтобы parent pages уже были в базе
+    if config.sources.confluence and config.sources.confluence.attachments.enabled:
+        if config.docling:
+            confluence_pdf_converter = DoclingPdfConverter(
+                docling_base_url=config.docling.base_url,
+                docling_timeout=config.docling.timeout,
+                vision_client=vision_client,
+            )
+            confluence_pdf_source = ConfluencePdfSource(
+                config=config.sources.confluence,
+                converter=confluence_pdf_converter,
+                doc_repo=doc_repo,
+            )
+            logger.info(
+                'Source: confluence_pdf (mime_types=%s)',
+                config.sources.confluence.attachments.mime_types,
+            )
+            await pipeline.run(confluence_pdf_source)
+        else:
+            logger.warning(
+                'Confluence attachments enabled but docling is not configured — skipping'
+            )
+
     # Jira: сканируем проиндексированные документы на ссылки, затем индексируем задачи.
     # Удаление устаревших задач происходит каскадно через parent_doc_ids при удалении родительских документов.
     if config.sources.jira:
         logger.info('Source: jira url=%s', config.sources.jira.url)
-        all_docs = await doc_repo.scroll_all(exclude_source_types=['jira'])
+        all_docs = await doc_repo.scroll_all(exclude_source_types=['attached_jira'])
         logger.info('Scanning %d indexed document(s) for Jira links...', len(all_docs))
         extractor = JiraLinkExtractor(config.sources.jira.url)
         issue_map = extractor.extract_from_docs(all_docs)

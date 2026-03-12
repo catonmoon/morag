@@ -121,6 +121,50 @@ class TestDocRepository:
         assert result.payload.get('author') == 'Алиса'
         assert result.payload.get('tags') == ['rag', 'test']
 
+    async def test_delete_attached_removes_only_attached_children(self, doc_repo, chunk_repo):
+        """delete_attached удаляет только детей с source_type 'attached_*'."""
+        parent = make_document('page_42', source_type='confluence')
+        await doc_repo.upsert(parent)
+
+        jira_child = make_document('PROJ-1', source_type='attached_jira',
+                                   parent_doc_ids=['page_42'])
+        pdf_child = make_document('att:100', source_type='attached_pdf',
+                                  parent_doc_ids=['page_42'])
+        conf_child = make_document('page_99', source_type='confluence',
+                                   parent_doc_ids=['page_42'])
+        await doc_repo.upsert(jira_child)
+        await doc_repo.upsert(pdf_child)
+        await doc_repo.upsert(conf_child)
+
+        # Добавим чанки для attached-детей
+        chunks_jira = make_chunks('PROJ-1', count=2)
+        chunks_pdf = make_chunks('att:100', count=1)
+        await chunk_repo.upsert_batch(chunks_jira + chunks_pdf)
+
+        await doc_repo.delete_attached('page_42', chunk_repo)
+
+        # attached-дети удалены
+        assert await doc_repo.get_by_id('PROJ-1') is None
+        assert await doc_repo.get_by_id('att:100') is None
+        assert await chunk_repo.get_index_status('PROJ-1') is None
+        assert await chunk_repo.get_index_status('att:100') is None
+
+        # confluence-ребёнок не тронут
+        assert await doc_repo.get_by_id('page_99') is not None
+
+    async def test_delete_attached_noop_when_no_attached_children(self, doc_repo, chunk_repo):
+        """delete_attached ничего не делает если нет attached-детей."""
+        parent = make_document('page_42', source_type='confluence')
+        await doc_repo.upsert(parent)
+
+        conf_child = make_document('page_99', source_type='confluence',
+                                   parent_doc_ids=['page_42'])
+        await doc_repo.upsert(conf_child)
+
+        await doc_repo.delete_attached('page_42', chunk_repo)
+
+        assert await doc_repo.get_by_id('page_99') is not None
+
     async def test_different_ids_stored_independently(self, doc_repo):
         doc_a = make_document('a.md', text='Документ A')
         doc_b = make_document('b.md', text='Документ B')
