@@ -28,6 +28,14 @@ class Embedder(ABC):
         """Эмбеддинг для поискового запроса (с префиксом search_query:)."""
         ...
 
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Батчевый эмбеддинг для хранения документов.
+
+        По умолчанию вызывает embed() по одному. Подклассы могут
+        переопределить для более эффективной батчевой обработки.
+        """
+        return [self.embed(t) for t in texts]
+
     @property
     @abstractmethod
     def dim(self) -> int:
@@ -55,6 +63,10 @@ class FridaEmbedder(Embedder):
 
     def embed_query(self, text: str) -> list[float]:
         return self._model.encode(_QUERY_PREFIX + text, normalize_embeddings=False).tolist()
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        prefixed = [_DOCUMENT_PREFIX + t for t in texts]
+        return self._model.encode(prefixed, normalize_embeddings=False).tolist()
 
     @property
     def dim(self) -> int:

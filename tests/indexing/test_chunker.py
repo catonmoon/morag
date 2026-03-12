@@ -1,9 +1,9 @@
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
 from morag.indexing.chunker import (
-    Chunker, ChunkingError, LLMChunker, PassthroughChunker,
+    Chunker, ChunkingError, LLMChunker, PassthroughChunker, SemanticChunker,
     _LLMError, _classify_error,
 )
 from morag.indexing.token_counter import TiktokenCounter
@@ -406,5 +406,167 @@ class TestLLMChunkerHalving:
             await chunker.chunk('Блок текста')
         # max_retries=2 попытки, без halving
         assert client.complete_json.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# SemanticChunker
+# ---------------------------------------------------------------------------
+
+def _make_batch_embed_fn(topic_vectors: dict[str, list[float]]):
+    """Мок батчевый embed_fn: возвращает вектор по первому найденному ключевому слову."""
+    default = [1.0, 0.0, 0.0]
+
+    def embed_fn(texts: list[str]) -> list[list[float]]:
+        result = []
+        for text in texts:
+            vec = default
+            for keyword, v in topic_vectors.items():
+                if keyword.lower() in text.lower():
+                    vec = v
+                    break
+            result.append(vec)
+        return result
+
+    return embed_fn
+
+
+class TestSemanticChunker:
+    def test_is_chunker(self):
+        def noop(texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0]] * len(texts)
+
+        chunker = SemanticChunker(embed_fn=noop, counter=TiktokenCounter())
+        assert isinstance(chunker, Chunker)
+
+    async def test_short_block_returns_single_chunk(self):
+        """Блок короче max_tokens возвращается целиком."""
+        def noop(texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0]] * len(texts)
+
+        chunker = SemanticChunker(
+            embed_fn=noop, counter=TiktokenCounter(), max_tokens=500,
+        )
+        block = 'Короткий текст из нескольких слов.'
+        result = await chunker.chunk(block)
+        assert result == [block]
+
+    async def test_splits_into_multiple_chunks(self):
+        """Длинный блок разбивается на несколько чанков."""
+        embed_fn = _make_batch_embed_fn({
+            'python': [1.0, 0.0, 0.0],
+            'база данных': [0.0, 1.0, 0.0],
+            'машинное обучение': [0.0, 0.0, 1.0],
+        })
+        counter = TiktokenCounter()
+        chunker = SemanticChunker(
+            embed_fn=embed_fn, counter=counter, min_tokens=20, max_tokens=80,
+        )
+
+        block = (
+            'Python — язык программирования. '
+            'Python используется для веб-разработки. '
+            'Python имеет богатую экосистему. '
+            'База данных хранит данные. '
+            'База данных поддерживает транзакции. '
+            'База данных масштабируется горизонтально. '
+            'Машинное обучение решает задачи классификации. '
+            'Машинное обучение использует нейронные сети. '
+            'Машинное обучение требует больших данных.'
+        )
+        result = await chunker.chunk(block)
+        assert len(result) >= 2
+
+    async def test_chunks_within_size_limits(self):
+        """Все чанки (кроме, возможно, последнего) в пределах [min, max] токенов."""
+        def embed_fn(texts: list[str]) -> list[list[float]]:
+            return [
+                [float(hash(t) % 1000 % (i + 1)) for i in range(10)]
+                for t in texts
+            ]
+
+        counter = TiktokenCounter()
+        min_t, max_t = 30, 100
+        chunker = SemanticChunker(
+            embed_fn=embed_fn, counter=counter, min_tokens=min_t, max_tokens=max_t,
+        )
+
+        block = '. '.join([
+            f'Предложение номер {i} с некоторым текстом для тестирования'
+            for i in range(40)
+        ]) + '.'
+        result = await chunker.chunk(block)
+
+        assert len(result) >= 2
+        # Все чанки кроме последнего должны быть >= min_tokens
+        for chunk in result[:-1]:
+            tokens = counter.count(chunk)
+            assert tokens >= min_t, f'Chunk too small: {tokens} tokens'
+            assert tokens <= max_t, f'Chunk too large: {tokens} tokens'
+        # Последний чанк может быть < min_tokens (остаток)
+        assert counter.count(result[-1]) <= max_t
+
+    async def test_preserves_all_content(self):
+        """Все предложения сохраняются после разбиения."""
+        def embed_fn(texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0]] * len(texts)
+
+        counter = TiktokenCounter()
+        chunker = SemanticChunker(
+            embed_fn=embed_fn, counter=counter, min_tokens=10, max_tokens=50,
+        )
+
+        sentences = [f'Предложение {i}.' for i in range(15)]
+        block = ' '.join(sentences)
+        result = await chunker.chunk(block)
+        combined = ' '.join(result)
+        for s in sentences:
+            # Проверяем содержательную часть (без финальной точки для надёжности)
+            assert f'Предложение {sentences.index(s)}'.split('.')[0] in combined
+
+    async def test_batch_embed_is_used(self):
+        """embed_fn вызывается батчем, а не по одному."""
+        calls: list[int] = []
+
+        def tracking_embed_fn(texts: list[str]) -> list[list[float]]:
+            calls.append(len(texts))
+            return [[1.0, 0.0, 0.0]] * len(texts)
+
+        counter = TiktokenCounter()
+        chunker = SemanticChunker(
+            embed_fn=tracking_embed_fn, counter=counter,
+            min_tokens=10, max_tokens=40,
+        )
+        block = '. '.join([f'Предложение {i} с текстом' for i in range(20)]) + '.'
+        await chunker.chunk(block)
+
+        # embed_fn вызывается несколько раз (по одному на границу),
+        # но каждый раз с батчем > 1
+        assert len(calls) >= 1
+        assert all(n >= 2 for n in calls)
+
+    async def test_finds_semantic_boundary(self):
+        """Разрез происходит между темами."""
+        embed_fn = _make_batch_embed_fn({
+            'кошки': [1.0, 0.0, 0.0],
+            'программирование': [0.0, 1.0, 0.0],
+        })
+        counter = TiktokenCounter()
+        chunker = SemanticChunker(
+            embed_fn=embed_fn, counter=counter, min_tokens=15, max_tokens=60,
+        )
+
+        block = (
+            'Кошки — домашние животные. '
+            'Кошки любят спать и играть. '
+            'Кошки охотятся на мышей. '
+            'Программирование — создание программ. '
+            'Программирование требует логического мышления. '
+            'Программирование используется повсеместно.'
+        )
+        result = await chunker.chunk(block)
+        assert len(result) >= 2
+        # Первый чанк про кошек, последний про программирование
+        assert 'Кошки' in result[0]
+        assert 'Программирование' in result[-1]
 
 

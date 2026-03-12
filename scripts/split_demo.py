@@ -24,7 +24,7 @@ def main() -> None:
         limit=LIMIT,
         splitters=[
             MarkdownHeaderSplitter(),
-            TableRowSplitter(),
+            TableRowSplitter(counter=counter, limit=LIMIT),
             FixedSizeSplitter(counter=counter, limit=LIMIT),
         ],
     )
