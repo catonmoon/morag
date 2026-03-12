@@ -11,6 +11,12 @@ sources:
     # skip_ancestor_ids: ["333444"]            # исключить эти страницы и всех их потомков
     # min_image_size_bytes: 3072              # пропускать изображения меньше N байт (SVG всегда пропускаются); не задано — без фильтрации
     # timeout: 180                            # таймаут HTTP-запросов к Confluence API (секунды; по умолчанию 180)
+    # attachments:                            # обработка вложений (PDF и др.) — требует docling
+    #   enabled: true                         # по умолчанию false
+    #   mime_types:                           # фильтр по MIME-типу (по умолчанию только PDF)
+    #     - application/pdf
+    #   skip_ancestor_ids: ["123456"]         # пропускать вложения со страниц-потомков этих разделов
+    #   url_mode: preview                     # preview (on-premise, по умолчанию) | download | parent_page
   # jira — индексация задач, найденных в других источниках (опционально)
   # Задачи обнаруживаются автоматически по ссылкам вида {url}/browse/PROJ-123
   # в уже проиндексированных документах Confluence и Markdown
@@ -29,7 +35,7 @@ qdrant:
 
 llm:
   base_url: http://localhost:11434/v1
-  model: qwen3.5:9b              # рекомендуется: qwen3.5:9b; см. README → Ollama
+  model: qwen3-coder:30b              # рекомендуется: qwen3-coder:30b; см. README → Ollama
   api_key: ollama
   # timeout: 180                  # таймаут HTTP-запросов к LLM (секунды; по умолчанию 180)
   # context_window: 32768         # контекстное окно модели в токенах (по умолчанию 32768)
@@ -38,12 +44,18 @@ llm:
   # model_wait_seconds: 300       # ожидание перезагрузки модели (сек; 0 = не ждать)
   # model_wait_retries: 3         # количество попыток ожидания модели
 
-# llm_vision — multimodal LLM для описания изображений со страниц Confluence (опционально)
+# llm_vision — multimodal LLM для описания изображений из Confluence и PDF (опционально)
 # Если не задан, изображения пропускаются при индексации
 # llm_vision:
 #   base_url: http://localhost:11434/v1
-#   model: qwen3.5:9b            # та же модель поддерживает vision
+#   model: qwen3-vl:30b            # поддерживает vision
 #   api_key: ollama
+
+# docling — сервис конвертации PDF/DOCX → Markdown (опционально)
+# Если не задан, PDF-файлы в local_documents пропускаются
+# docling:
+#   base_url: http://localhost:5001   # URL docling-serve
+#   timeout: 300                       # таймаут конвертации (секунды; по умолчанию 300)
 
 indexing:
   chunker:
