@@ -10,6 +10,13 @@ class LocalDocumentsConfig(BaseModel):
     path: str
 
 
+class AttachmentsConfig(BaseModel):
+    enabled: bool = False                                    # включить обработку вложений
+    mime_types: list[str] = ['application/pdf']              # фильтр по MIME-типу; пока только PDF
+    skip_ancestor_ids: list[str] = []                        # пропускать вложения со страниц-потомков этих разделов
+    url_mode: str = 'preview'                                # preview | download | parent_page
+
+
 class ConfluenceConfig(BaseModel):
     url: str
     username: str
@@ -20,6 +27,8 @@ class ConfluenceConfig(BaseModel):
     skip_ancestor_ids: list[str] = []  # исключить страницы и всех их потомков
     min_image_size_bytes: int | None = None  # пропускать изображения меньше этого размера (байт); None — без фильтрации
     timeout: int = 180  # таймаут HTTP-запросов к Confluence API и скачивания изображений (секунды)
+    max_retries: int = 3  # количество повторных попыток при сетевых ошибках (urllib3 Retry); 0 = без retry
+    attachments: AttachmentsConfig = AttachmentsConfig()     # обработка вложений (PDF и др.)
 
 
 class JiraConfig(BaseModel):
@@ -28,6 +37,8 @@ class JiraConfig(BaseModel):
     password: str | None = None        # on-premise
     api_token: str | None = None       # Atlassian Cloud
     timeout: int = 180                 # таймаут HTTP-запросов к Jira API (секунды)
+    max_retries: int = 3              # количество повторных попыток при сетевых ошибках (urllib3 Retry); 0 = без retry
+    custom_fields: list[str] = []     # список ID кастомных полей (например ['customfield_10100']); названия берутся из Jira API
 
 
 class SourcesConfig(BaseModel):
@@ -106,11 +117,17 @@ class IndexingConfig(BaseModel):
     doc_summary: DocSummaryConfig = DocSummaryConfig()  # генерация саммари документов; max_tokens=None — отключено
 
 
+class DoclingConfig(BaseModel):
+    base_url: str = 'http://localhost:5001'  # URL docling-serve
+    timeout: int = 300                       # таймаут конвертации документа (секунды)
+
+
 class Config(BaseModel):
     sources: SourcesConfig
     qdrant: QdrantConfig = QdrantConfig()
     llm: LLMConfig = LLMConfig()
     llm_vision: LLMConfig | None = None  # multimodal LLM для распознавания изображений (опционально)
+    docling: DoclingConfig | None = None  # docling-serve для конвертации PDF/DOCX → Markdown (опционально)
     indexing: IndexingConfig = IndexingConfig()
 
 

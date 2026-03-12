@@ -32,9 +32,11 @@ from morag.indexing.token_counter import TiktokenCounter
 from morag.llm.client import LLMClient
 from morag.llm.retry import RetryPolicy
 from morag.sources.confluence import ConfluenceSource
+from morag.sources.confluence_pdf import ConfluencePdfSource
 from morag.sources.jira import JiraSource
 from morag.sources.jira_extractor import JiraLinkExtractor
-from morag.sources.markdown import MarkdownSource
+from morag.sources.local import LocalDocumentSource
+from morag.sources.pdf_converter import DoclingPdfConverter
 from morag.storage.collections import (
     ensure_chunks_collection,
     ensure_docs_collection,
@@ -115,14 +117,25 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         )
         logger.info('Vision LLM: %s @ %s', config.llm_vision.model, config.llm_vision.base_url)
 
-    sources = []
+    local_source = None
     if config.sources.local_documents:
-        sources.append(MarkdownSource(config.sources.local_documents.path))
-        logger.info('Source: local_documents path=%s', config.sources.local_documents.path)
+        local_source = LocalDocumentSource(
+            root=config.sources.local_documents.path,
+            docling_base_url=config.docling.base_url if config.docling else None,
+            docling_timeout=config.docling.timeout if config.docling else 300,
+            vision_client=vision_client,
+        )
+        logger.info(
+            'Source: local_documents path=%s (docling=%s)',
+            config.sources.local_documents.path,
+            config.docling.base_url if config.docling else 'disabled',
+        )
+
+    sources = []
     if config.sources.confluence:
         sources.append(ConfluenceSource(config.sources.confluence, vision_client=vision_client))
         logger.info('Source: confluence url=%s (vision=%s)', config.sources.confluence.url, vision_client is not None)
-    if not sources:
+    if not sources and local_source is None:
         logger.error('No sources configured in config.yml')
         return
 
@@ -190,14 +203,43 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
     )
 
     logger.info('Chunker: %s, context: %s, block_limit: %d', config.indexing.chunker.mode, config.indexing.context.mode, block_limit)
+
+    # Локальные документы: композитный source с собственным порядком запуска
+    if local_source is not None:
+        await local_source.run(pipeline)
+
+    # Остальные source (Confluence и т.д.)
     for source in sources:
         await pipeline.run(source)
+
+    # Confluence PDF attachments: после страниц, чтобы parent pages уже были в базе
+    if config.sources.confluence and config.sources.confluence.attachments.enabled:
+        if config.docling:
+            confluence_pdf_converter = DoclingPdfConverter(
+                docling_base_url=config.docling.base_url,
+                docling_timeout=config.docling.timeout,
+                vision_client=vision_client,
+            )
+            confluence_pdf_source = ConfluencePdfSource(
+                config=config.sources.confluence,
+                converter=confluence_pdf_converter,
+                doc_repo=doc_repo,
+            )
+            logger.info(
+                'Source: confluence_pdf (mime_types=%s)',
+                config.sources.confluence.attachments.mime_types,
+            )
+            await pipeline.run(confluence_pdf_source)
+        else:
+            logger.warning(
+                'Confluence attachments enabled but docling is not configured — skipping'
+            )
 
     # Jira: сканируем проиндексированные документы на ссылки, затем индексируем задачи.
     # Удаление устаревших задач происходит каскадно через parent_doc_ids при удалении родительских документов.
     if config.sources.jira:
         logger.info('Source: jira url=%s', config.sources.jira.url)
-        all_docs = await doc_repo.scroll_all(exclude_source_types=['jira'])
+        all_docs = await doc_repo.scroll_all(exclude_source_types=['attached_jira'])
         logger.info('Scanning %d indexed document(s) for Jira links...', len(all_docs))
         extractor = JiraLinkExtractor(config.sources.jira.url)
         issue_map = extractor.extract_from_docs(all_docs)
@@ -309,12 +351,19 @@ try:
 except Exception:
     _VERSION = 'unknown'
 
-LOGO = f"""
+"""
   ░▒▓█████
  ░▒▓███████         Catonmoon
 ▒▓██(=^.^=)██       Morag v{_VERSION}
  ▓█████████
   ▓███████
+"""
+
+LOGO = f"""
+   ░▒▓██████
+  ░▒▓█/\ /\█▓       Catonmoon
+  ▒▓█(=^.^=)▒       Morag v{_VERSION}
+   ▓████████  
 """
 
 

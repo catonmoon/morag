@@ -57,6 +57,8 @@ class ConfluenceSource(Source):
             password=credential,
             cloud=config.api_token is not None,
             timeout=config.timeout,
+            backoff_and_retry=config.max_retries > 0,
+            max_backoff_retries=config.max_retries,
         )
         self._base_url = config.url.rstrip('/')
         self._spaces = config.spaces

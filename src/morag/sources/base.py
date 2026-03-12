@@ -14,7 +14,7 @@ class Document:
     path: list[str]                            # пути для отображения; список — один документ может встречаться в нескольких местах
     text: str                                  # полный текст в Markdown
     updated_at: datetime                       # дата последнего изменения файла (mtime)
-    source_type: str                           # "markdown" | "confluence" | "jira"
+    source_type: str                           # "markdown" | "confluence" | "attached_jira" | "attached_pdf"
     size: int = 0                              # размер файла в байтах
     url: str | None = None                    # ссылка на источник (для Confluence — URL страницы, для Markdown — None)
     indexed_at: datetime | None = None        # дата индексации (выставляется репозиторием при upsert)
@@ -48,7 +48,7 @@ class Source(ABC):
     @property
     @abstractmethod
     def source_type(self) -> str:
-        """Тип источника: 'markdown' | 'confluence' | 'jira'."""
+        """Тип источника: 'markdown' | 'confluence' | 'attached_jira' | 'attached_pdf'."""
         ...
 
     @abstractmethod

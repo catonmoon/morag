@@ -64,7 +64,7 @@ class Pipeline:
             '- Отвечай структурированно: используй списки и заголовки, где это уместно.'
         )
 
-        CITATION_MAX_CHARS: int = 2000  # лимит символов в citation-превью
+        CITATION_MAX_CHARS: int = 5000  # лимит символов в citation-превью
         HTTP_TIMEOUT: int = 180  # таймаут HTTP-запросов (секунды)
 
     def __init__(self):

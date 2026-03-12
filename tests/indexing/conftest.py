@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-DATA_DIR = Path(__file__).parent.parent.parent / 'data'
+DATA_DIR = Path(__file__).parent.parent.parent / 'examples'
 
 
 @pytest.fixture

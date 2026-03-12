@@ -139,6 +139,20 @@ class DocRepository:
             points=[point_id],
         )
 
+    async def delete_attached(self, doc_id: str, chunk_repo: 'ChunkRepository') -> None:
+        """Удалить attached-детей документа (jira, pdf и пр.), не трогая дочерние страницы.
+
+        Удаляет только документы с source_type, начинающимся на 'attached_'.
+        Дочерние Confluence-страницы (source_type='confluence') не затрагиваются.
+        """
+        children = await self.find_children(doc_id)
+        for child in children:
+            if not child.source_type.startswith('attached_'):
+                continue
+            await chunk_repo.delete_by_doc_id(child.id)
+            await self.delete(child.id)
+            logger.info('Deleted attached child: %s (source_type=%s)', child.id, child.source_type)
+
     async def cascade_delete(self, doc_id: str, chunk_repo: 'ChunkRepository') -> None:
         """Каскадное удаление документа.
 
