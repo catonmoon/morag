@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 import re
 from abc import ABC, abstractmethod
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 
@@ -35,9 +38,15 @@ class MarkdownHeaderSplitter(BlockSplitter):
         lines = text.split('\n')
         blocks: list[list[str]] = []
         current: list[str] = []
+        in_fence = False
 
         for line in lines:
-            if self._HEADER_RE.match(line) and current:
+            if _CODE_FENCE_RE.match(line):
+                in_fence = not in_fence
+                current.append(line)
+                continue
+
+            if self._HEADER_RE.match(line) and current and not in_fence:
                 blocks.append('\n'.join(current).strip())
                 current = [line]
             else:
@@ -50,16 +59,23 @@ class MarkdownHeaderSplitter(BlockSplitter):
 
 
 class TableRowSplitter(BlockSplitter):
-    """Разделяет таблицы Markdown по N строк с дублированием шапки."""
+    """Разделяет таблицы Markdown по строкам с дублированием шапки.
+
+    Набирает строки жадно, пока помещаются в лимит токенов (шапка + строки данных).
+    """
 
     _TABLE_ROW_RE = re.compile(r'^\s*\|')
     _SEPARATOR_RE = re.compile(r'^\s*\|[\s\-:|]+\|\s*$')
 
-    def __init__(self, rows_per_chunk: int = 20) -> None:
-        self.rows_per_chunk = rows_per_chunk
+    def __init__(self, counter: TokenCounter, limit: int) -> None:
+        self._counter = counter
+        self._limit = limit
 
     def can_split(self, text: str) -> bool:
-        return len(self._extract_data_rows(text)) > self.rows_per_chunk
+        """Применим если таблица не влезает в лимит целиком и имеет > 1 строки данных."""
+        if self._counter.fits(text, self._limit):
+            return False
+        return len(self._extract_data_rows(text)) > 1
 
     def split(self, text: str) -> list[str]:
         lines = text.split('\n')
@@ -99,29 +115,40 @@ class TableRowSplitter(BlockSplitter):
         if not data_rows:
             return [text]
 
+        header_parts = table_header + ([separator] if separator else [])
+        header_text = '\n'.join(header_parts)
+        header_tokens = self._counter.count(header_text)
+
         chunks: list[str] = []
-        total = len(data_rows)
+        current_rows: list[str] = []
+        current_tokens = header_tokens
 
-        for i in range(0, total, self.rows_per_chunk):
-            batch = data_rows[i : i + self.rows_per_chunk]
-            parts: list[str] = []
+        for idx, row in enumerate(data_rows):
+            row_tokens = self._counter.count(row)
+            if current_rows and current_tokens + row_tokens > self._limit:
+                parts: list[str] = []
+                if not chunks and pre_lines:
+                    parts.extend(pre_lines)
+                parts.append(header_text)
+                parts.extend(current_rows)
+                chunks.append('\n'.join(parts).strip())
+                current_rows = [row]
+                current_tokens = header_tokens + row_tokens
+            else:
+                current_rows.append(row)
+                current_tokens += row_tokens
 
-            if i == 0 and pre_lines:
+        if current_rows:
+            parts = []
+            if not chunks and pre_lines:
                 parts.extend(pre_lines)
-
-            parts.extend(table_header)
-            if separator:
-                parts.append(separator)
-            parts.extend(batch)
-
-            if i + self.rows_per_chunk >= total and post_lines:
+            parts.append(header_text)
+            parts.extend(current_rows)
+            if post_lines:
                 parts.extend(post_lines)
+            chunks.append('\n'.join(parts).strip())
 
-            chunk = '\n'.join(parts).strip()
-            if chunk:
-                chunks.append(chunk)
-
-        return chunks
+        return chunks if len(chunks) > 1 else [text]
 
     def _extract_data_rows(self, text: str) -> list[str]:
         lines = text.split('\n')
@@ -139,6 +166,212 @@ class TableRowSplitter(BlockSplitter):
                     break
 
         return data_rows
+
+
+def split_sentences(text: str) -> list[str]:
+    """Разбивает текст на предложения.
+
+    Использует razdel для кириллического текста и nltk для латиницы.
+    """
+    cyrillic = sum(1 for c in text if '\u0400' <= c <= '\u04ff')
+    latin = sum(1 for c in text if 'A' <= c <= 'z')
+    if cyrillic >= latin:
+        from razdel import sentenize
+        return [s.text.strip() for s in sentenize(text) if s.text.strip()]
+    else:
+        from nltk.tokenize import sent_tokenize
+        return [s.strip() for s in sent_tokenize(text) if s.strip()]
+
+
+_CODE_FENCE_RE = re.compile(r'^\s*```')
+_TABLE_ROW_RE = re.compile(r'^\s*\|')
+_HEADER_RE = re.compile(r'^#{1,6}\s', re.MULTILINE)
+
+
+def split_into_units(text: str) -> list[str]:
+    """Разбивает текст на атомарные единицы для семантического чанкинга.
+
+    Атомарные блоки (не разрезаются):
+    - Code fences (``` ... ```) — включая plantuml, mermaid, ASCII-диаграммы
+    - Таблицы Markdown (последовательные строки с |)
+
+    Всё остальное разбивается на предложения через split_sentences().
+    """
+    lines = text.split('\n')
+    units: list[str] = []
+    text_buf: list[str] = []
+    i = 0
+
+    while i < len(lines):
+        line = lines[i]
+
+        # Code fence: ``` ... ```
+        if _CODE_FENCE_RE.match(line):
+            # Ищем закрывающий fence; если не нашли — это одиночный ```, трактуем как текст
+            fence_lines = [line]
+            j = i + 1
+            found_close = False
+            while j < len(lines):
+                fence_lines.append(lines[j])
+                if _CODE_FENCE_RE.match(lines[j]):
+                    found_close = True
+                    j += 1
+                    break
+                j += 1
+            if found_close:
+                _flush_text_buffer(text_buf, units)
+                text_buf = []
+                units.append('\n'.join(fence_lines))
+                i = j
+            else:
+                # Одиночный ``` без пары — обычная текстовая строка
+                text_buf.append(line)
+                i += 1
+            continue
+
+        # Table: consecutive lines starting with |
+        if _TABLE_ROW_RE.match(line):
+            _flush_text_buffer(text_buf, units)
+            text_buf = []
+            table_lines = [line]
+            i += 1
+            while i < len(lines) and _TABLE_ROW_RE.match(lines[i]):
+                table_lines.append(lines[i])
+                i += 1
+            units.append('\n'.join(table_lines))
+            continue
+
+        text_buf.append(line)
+        i += 1
+
+    _flush_text_buffer(text_buf, units)
+    return [u for u in units if u.strip()]
+
+
+def _flush_text_buffer(buf: list[str], units: list[str]) -> None:
+    """Накопленный текст разбивает на предложения и добавляет в units."""
+    if not buf:
+        return
+    text = '\n'.join(buf).strip()
+    if not text:
+        return
+    sentences = split_sentences(text)
+    units.extend(sentences)
+
+
+def _split_paragraphs(text: str) -> list[str]:
+    """Разбивает текст по пустым строкам, не разрывая code fences и таблицы."""
+    lines = text.split('\n')
+    paragraphs: list[str] = []
+    current: list[str] = []
+    in_fence = False
+
+    for line in lines:
+        if _CODE_FENCE_RE.match(line):
+            in_fence = not in_fence
+            current.append(line)
+            continue
+
+        if in_fence:
+            current.append(line)
+            continue
+
+        # Строка таблицы — не разрывать
+        if _TABLE_ROW_RE.match(line):
+            current.append(line)
+            continue
+
+        # Пустая строка вне fence/table — граница абзаца
+        if not line.strip():
+            if current:
+                paragraphs.append('\n'.join(current).strip())
+                current = []
+        else:
+            current.append(line)
+
+    if current:
+        paragraphs.append('\n'.join(current).strip())
+
+    return [p for p in paragraphs if p]
+
+
+def split_into_semantic_units(
+    text: str,
+    counter: TokenCounter,
+    max_tokens: int,
+) -> list[str]:
+    """Иерархическая нарезка текста на единицы для SemanticChunker.
+
+    1. По заголовкам Markdown → секции (заголовок + контент до следующего)
+    2. По абзацам (двойной перенос строки; code fences и таблицы — цельные абзацы)
+    3. Для каждого абзаца > max_tokens:
+       а) таблица     → разрезка по строкам с дублированием шапки (≤ max_tokens)
+       б) code fence  → оставить как есть + WARNING
+       в) текст       → разбить на предложения (split_sentences)
+    """
+    sections = _split_by_headers(text)
+    table_splitter = TableRowSplitter(counter, max_tokens)
+
+    units: list[str] = []
+    for section in sections:
+        section = section.strip()
+        if not section:
+            continue
+        if counter.count(section) <= max_tokens:
+            units.append(section)
+            continue
+
+        paragraphs = _split_paragraphs(section)
+        for para in paragraphs:
+            if counter.count(para) <= max_tokens:
+                units.append(para)
+            elif table_splitter.can_split(para):
+                units.extend(table_splitter.split(para))
+            elif _is_code_fence(para):
+                logger.warning(
+                    'Code fence exceeds max_tokens (%d > %d), keeping as-is',
+                    counter.count(para), max_tokens,
+                )
+                units.append(para)
+            else:
+                sentences = split_sentences(para)
+                units.extend(s for s in sentences if s.strip())
+
+    return [u for u in units if u.strip()]
+
+
+def _is_code_fence(text: str) -> bool:
+    """Проверяет, является ли текст code fence блоком (``` ... ```)."""
+    return bool(_CODE_FENCE_RE.match(text.lstrip()))
+
+
+def _split_by_headers(text: str) -> list[str]:
+    """Разбивает текст по заголовкам Markdown. Каждый заголовок начинает новую секцию.
+
+    Не разрывает code fences: строки с ``#`` внутри fenced-блоков
+    (YAML-комментарии, bash-комментарии и т.п.) не считаются заголовками.
+    """
+    lines = text.split('\n')
+    sections: list[str] = []
+    current: list[str] = []
+    in_fence = False
+
+    for line in lines:
+        if _CODE_FENCE_RE.match(line):
+            in_fence = not in_fence
+            current.append(line)
+            continue
+
+        if _HEADER_RE.match(line) and current and not in_fence:
+            sections.append('\n'.join(current))
+            current = [line]
+        else:
+            current.append(line)
+
+    if current:
+        sections.append('\n'.join(current))
+
+    return sections
 
 
 class SemanticSplitter(BlockSplitter):
@@ -159,10 +392,10 @@ class SemanticSplitter(BlockSplitter):
         self._min_sentences = min_sentences
 
     def can_split(self, text: str) -> bool:
-        return len(self._split_sentences(text)) >= self._min_sentences
+        return len(split_sentences(text)) >= self._min_sentences
 
     def split(self, text: str) -> list[str]:
-        sentences = self._split_sentences(text)
+        sentences = split_sentences(text)
         if len(sentences) < self._min_sentences:
             return [text]
 
@@ -176,21 +409,6 @@ class SemanticSplitter(BlockSplitter):
             return [text]
 
         return self._join_by_breakpoints(sentences, breakpoints)
-
-    @staticmethod
-    def _split_sentences(text: str) -> list[str]:
-        """Разбивает текст на предложения.
-
-        Использует razdel для кириллического текста и nltk для латиницы.
-        """
-        cyrillic = sum(1 for c in text if '\u0400' <= c <= '\u04ff')
-        latin = sum(1 for c in text if 'A' <= c <= 'z')
-        if cyrillic >= latin:
-            from razdel import sentenize
-            return [s.text.strip() for s in sentenize(text) if s.text.strip()]
-        else:
-            from nltk.tokenize import sent_tokenize
-            return [s.strip() for s in sent_tokenize(text) if s.strip()]
 
     @staticmethod
     def _cosine_distances(embeddings: list[list[float]]) -> list[float]:
@@ -218,6 +436,7 @@ class SemanticSplitter(BlockSplitter):
         return chunks if chunks else [' '.join(sentences)]
 
 
+
 class FixedSizeSplitter(BlockSplitter):
     """Последний резерв: разбивает по абзацам, предложениям, словам и символам."""
 
@@ -232,7 +451,7 @@ class FixedSizeSplitter(BlockSplitter):
         return bool(text.strip())
 
     def split(self, text: str) -> list[str]:
-        paragraphs = [p.strip() for p in re.split(r'\n\n+', text) if p.strip()]
+        paragraphs = _split_paragraphs(text)
 
         chunks: list[str] = []
         current_parts: list[str] = []

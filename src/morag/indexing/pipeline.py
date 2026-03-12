@@ -82,6 +82,7 @@ class IndexingPipeline:
         token_counter: TokenCounter | None = None,
         block_limit: int = _DEFAULT_BLOCK_LIMIT,
         concurrency: int = 1,
+        skip_presplit: bool = False,
     ) -> None:
         self._doc_repo = doc_repo
         self._chunk_repo = chunk_repo
@@ -92,15 +93,17 @@ class IndexingPipeline:
         self._token_counter = token_counter or TiktokenCounter()
         self._block_limit = block_limit
         self._concurrency = max(1, concurrency)
-        self._splitter = RecursiveSplitter(
-            self._token_counter,
-            self._block_limit,
-            splitters=[
-                MarkdownHeaderSplitter(),
-                TableRowSplitter(),
-                FixedSizeSplitter(self._token_counter, self._block_limit),
-            ],
-        )
+        self._skip_presplit = skip_presplit
+        if not skip_presplit:
+            self._splitter = RecursiveSplitter(
+                self._token_counter,
+                self._block_limit,
+                splitters=[
+                    MarkdownHeaderSplitter(),
+                    TableRowSplitter(self._token_counter, self._block_limit),
+                    FixedSizeSplitter(self._token_counter, self._block_limit),
+                ],
+            )
 
     async def _is_up_to_date(self, stub: Document) -> bool:
         """Проверить актуальность документа по стабу метаданных без загрузки контента."""
@@ -220,16 +223,12 @@ class IndexingPipeline:
         indexed = sum(results)
         logger.info('Indexing complete: %d indexed, %d skipped', indexed, total - indexed)
 
-    async def _chunk_document(self, document: Document, w: str = '') -> None:
-        """Разбить документ на чанки и сохранить в Qdrant."""
-        logger.info('%sChunking: %s', w, document.id)
-
-        # Pre-split на блоки + жадная упаковка
+    async def _presplit_and_chunk(self, document: Document, w: str = '') -> list[str]:
+        """Pre-split на блоки + жадная упаковка + chunker для каждой пачки."""
         blocks = self._splitter.split(document.text)
         packs = pack_blocks(blocks, self._token_counter, self._block_limit)
         logger.info('%s  Pre-split: %d block(s) -> %d pack(s)', w, len(blocks), len(packs))
 
-        # Chunker: каждая пачка → список текстов чанков
         chunk_texts: list[str] = []
         for i, pack in enumerate(packs):
             block_text = '\n\n'.join(pack)
@@ -241,6 +240,21 @@ class IndexingPipeline:
             new_chunks = await self._chunker.chunk(block_text)
             logger.info('%s    -> %d chunk(s)', w, len(new_chunks))
             chunk_texts.extend(new_chunks)
+        return chunk_texts
+
+    async def _chunk_document(self, document: Document, w: str = '') -> None:
+        """Разбить документ на чанки и сохранить в Qdrant."""
+        logger.info('%sChunking: %s', w, document.id)
+
+        if self._skip_presplit:
+            # SemanticChunker делает иерархическую нарезку сам
+            doc_tokens = self._token_counter.count(document.text)
+            logger.info('%s  Semantic chunking (%d chars, ~%d tokens)...', w, len(document.text), doc_tokens)
+            chunk_texts = await self._chunker.chunk(document.text)
+            logger.info('%s  -> %d chunk(s)', w, len(chunk_texts))
+        else:
+            chunk_texts = await self._presplit_and_chunk(document, w)
+
 
         total = len(chunk_texts)
         logger.info('%s  Total chunks: %d', w, total)

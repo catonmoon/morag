@@ -11,7 +11,7 @@ import sys
 from qdrant_client import AsyncQdrantClient
 
 from morag.config import DenseEmbedderConfig, RetryConfig, SparseEmbedderConfig, load_config
-from morag.indexing.chunker import LLMChunker, PassthroughChunker
+from morag.indexing.chunker import LLMChunker, PassthroughChunker, SemanticChunker
 from morag.indexing.context import LLMContextGenerator, NoopContextGenerator
 from morag.indexing.embedder import (
     Embedder,
@@ -140,16 +140,24 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         return
 
     token_counter = TiktokenCounter()
-    chunker = (
-        LLMChunker(
+    chunker_mode = config.indexing.chunker.mode
+    if chunker_mode == 'semantic':
+        chunker = SemanticChunker(
+            embed_fn=embedder.embed_batch,
+            counter=token_counter,
+            min_tokens=config.indexing.chunker.min_tokens,
+            max_tokens=config.indexing.chunker.max_tokens,
+        )
+    elif chunker_mode == 'llm':
+        chunker = LLMChunker(
             llm_client,
             token_counter=token_counter,
             embed_fn=embedder.embed,
             halving_retries=config.indexing.chunker.halving_retries,
             fallback_enabled=config.indexing.chunker.fallback,
         )
-        if config.indexing.chunker.mode == 'llm' else PassthroughChunker()
-    )
+    else:
+        chunker = PassthroughChunker()
     context_generator = (
         LLMContextGenerator(
             llm_client,
@@ -179,7 +187,8 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
     # В LLM-режиме блок + ответ LLM должны влезть в контекстное окно.
     # Ответ ≈ такого же размера как вход, поэтому безопасный лимит: (context_window - overhead) / 2.
     _LLM_PROMPT_OVERHEAD = 512  # токенов на системный промпт + запас
-    if config.indexing.chunker.mode == 'llm':
+    skip_presplit = chunker_mode == 'semantic'
+    if chunker_mode == 'llm':
         llm_safe_limit = (config.llm.context_window - _LLM_PROMPT_OVERHEAD) // 2
         block_limit = min(config.indexing.chunker.block_limit, llm_safe_limit)
         if block_limit < config.indexing.chunker.block_limit:
@@ -200,9 +209,14 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         block_limit=block_limit,
         token_counter=token_counter,
         concurrency=config.indexing.concurrency,
+        skip_presplit=skip_presplit,
     )
 
-    logger.info('Chunker: %s, context: %s, block_limit: %d', config.indexing.chunker.mode, config.indexing.context.mode, block_limit)
+    logger.info(
+        'Chunker: %s, context: %s%s',
+        chunker_mode, config.indexing.context.mode,
+        f', block_limit: {block_limit}' if not skip_presplit else '',
+    )
 
     # Локальные документы: композитный source с собственным порядком запуска
     if local_source is not None:

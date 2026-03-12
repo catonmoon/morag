@@ -23,7 +23,7 @@ splitter = RecursiveSplitter(
     counter, BLOCK_LIMIT,
     splitters=[
         MarkdownHeaderSplitter(),
-        TableRowSplitter(),
+        TableRowSplitter(counter, BLOCK_LIMIT),
         FixedSizeSplitter(counter, BLOCK_LIMIT),
     ],
 )

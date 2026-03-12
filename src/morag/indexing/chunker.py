@@ -4,12 +4,15 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Callable
 
+import numpy as np
+
 from morag.indexing.splitter import (
     FixedSizeSplitter,
     MarkdownHeaderSplitter,
     RecursiveSplitter,
     SemanticSplitter,
     pack_blocks,
+    split_into_semantic_units,
 )
 from morag.indexing.token_counter import TokenCounter
 from morag.llm.client import GenerationParams
@@ -378,3 +381,146 @@ class LLMChunker(Chunker):
             return None, _LLMError.OTHER
 
         return result, ''
+
+
+class SemanticChunker(Chunker):
+    """Чанкер на основе семантических границ через эмбеддинги.
+
+    Жадный алгоритм слева направо: для каждой границы генерирует пары кандидатов
+    (левый чанк, правый чанк) в диапазоне [min_tokens, max_tokens], батчем эмбеддит
+    все кандидаты и выбирает пару с максимальным cosine distance.
+    """
+
+    def __init__(
+        self,
+        embed_fn: Callable[[list[str]], list[list[float]]],
+        counter: TokenCounter,
+        min_tokens: int = 50,
+        max_tokens: int = 250,
+    ) -> None:
+        self._embed_fn = embed_fn
+        self._counter = counter
+        self._min_tokens = min_tokens
+        self._max_tokens = max_tokens
+
+    async def chunk(self, block: str) -> list[str]:
+        sentences = split_into_semantic_units(
+            block, self._counter, self._max_tokens,
+        )
+        if not sentences:
+            return [block] if block.strip() else []
+
+        sentence_tokens = [self._counter.count(s) for s in sentences]
+        total_tokens = sum(sentence_tokens)
+
+        # Весь блок влезает в max_tokens — один чанк
+        if total_tokens <= self._max_tokens:
+            return [block]
+
+        chunks: list[str] = []
+        pos = 0
+
+        while pos < len(sentences):
+            remaining_tokens = sum(sentence_tokens[pos:])
+
+            # Остаток влезает в max_tokens — последний чанк
+            if remaining_tokens <= self._max_tokens:
+                chunks.append(' '.join(sentences[pos:]))
+                break
+
+            # Индексы конца (exclusive) левых кандидатов: [min_tokens, max_tokens]
+            left_ends = self._candidate_ends(sentence_tokens, pos, forward=True)
+
+            if not left_ends:
+                # Ни одно предложение не набирает min_tokens — берём до max_tokens
+                end = self._greedy_end(sentence_tokens, pos)
+                chunks.append(' '.join(sentences[pos:end]))
+                pos = end
+                continue
+
+            if len(left_ends) == 1:
+                # Единственный вариант — без сравнения
+                end = left_ends[0]
+                chunks.append(' '.join(sentences[pos:end]))
+                pos = end
+                continue
+
+            # Для каждого левого кандидата — правые кандидаты
+            pairs: list[tuple[int, str, str]] = []  # (left_end, left_text, right_text)
+
+            for left_end in left_ends:
+                right_ends = self._candidate_ends(sentence_tokens, left_end, forward=True)
+                if right_ends:
+                    for right_end in right_ends:
+                        left_text = ' '.join(sentences[pos:left_end])
+                        right_text = ' '.join(sentences[left_end:right_end])
+                        pairs.append((left_end, left_text, right_text))
+                else:
+                    # Остаток < min_tokens — берём что есть как правый кандидат
+                    remaining = sentences[left_end:]
+                    if remaining:
+                        left_text = ' '.join(sentences[pos:left_end])
+                        right_text = ' '.join(remaining)
+                        pairs.append((left_end, left_text, right_text))
+
+            if not pairs:
+                end = left_ends[0]
+                chunks.append(' '.join(sentences[pos:end]))
+                pos = end
+                continue
+
+            # Батчевый embed всех уникальных текстов
+            unique_texts = list({t for _, lt, rt in pairs for t in (lt, rt)})
+            embeddings = self._embed_fn(unique_texts)
+            text_to_emb = dict(zip(unique_texts, embeddings))
+
+            # Выбрать пару с максимальным cosine distance
+            best_dist = -1.0
+            best_left_end = left_ends[0]
+
+            for left_end, left_text, right_text in pairs:
+                dist = self._cosine_distance(
+                    text_to_emb[left_text], text_to_emb[right_text],
+                )
+                if dist > best_dist:
+                    best_dist = dist
+                    best_left_end = left_end
+
+            chunks.append(' '.join(sentences[pos:best_left_end]))
+            pos = best_left_end
+
+        return chunks if chunks else [block]
+
+    def _candidate_ends(
+        self, sentence_tokens: list[int], start: int, *, forward: bool = True,
+    ) -> list[int]:
+        """Индексы конца (exclusive) кандидатов в диапазоне [min_tokens, max_tokens]."""
+        ends: list[int] = []
+        total = 0
+        for i in range(start, len(sentence_tokens)):
+            total += sentence_tokens[i]
+            if total > self._max_tokens:
+                break
+            if total >= self._min_tokens:
+                ends.append(i + 1)
+        return ends
+
+    def _greedy_end(self, sentence_tokens: list[int], start: int) -> int:
+        """Набирает предложения до max_tokens, возвращает exclusive end."""
+        total = 0
+        end = start
+        for i in range(start, len(sentence_tokens)):
+            if total + sentence_tokens[i] > self._max_tokens and i > start:
+                break
+            total += sentence_tokens[i]
+            end = i + 1
+        return end
+
+    @staticmethod
+    def _cosine_distance(a: list[float], b: list[float]) -> float:
+        """Cosine distance между двумя векторами."""
+        va = np.array(a, dtype=np.float32)
+        vb = np.array(b, dtype=np.float32)
+        norm = np.linalg.norm(va) * np.linalg.norm(vb)
+        similarity = float(np.dot(va, vb) / (norm + 1e-8))
+        return 1.0 - similarity

@@ -1,6 +1,3 @@
-import math
-
-import numpy as np
 import pytest
 
 from morag.indexing.splitter import (
@@ -11,6 +8,7 @@ from morag.indexing.splitter import (
     SemanticSplitter,
     TableRowSplitter,
     pack_blocks,
+    split_sentences,
 )
 from morag.indexing.token_counter import TiktokenCounter
 
@@ -30,8 +28,8 @@ def header_splitter() -> MarkdownHeaderSplitter:
 
 
 @pytest.fixture
-def table_splitter() -> TableRowSplitter:
-    return TableRowSplitter(rows_per_chunk=5)
+def table_splitter(counter) -> TableRowSplitter:
+    return TableRowSplitter(counter=counter, limit=100)
 
 
 @pytest.fixture
@@ -126,12 +124,15 @@ class TestTableRowSplitter:
         for i in range(1, 51):
             assert f'Строка {i}' in all_text
 
-    def test_split_respects_rows_per_chunk(self, table_splitter):
+    def test_split_respects_token_limit(self, counter):
         rows = '\n'.join(f'| Row {i} | Val {i} |' for i in range(1, 16))
         text = f'| A | B |\n|---|---|\n{rows}'
-        chunks = table_splitter.split(text)
-        # 15 строк при rows_per_chunk=5 → 3 чанка
-        assert len(chunks) == 3
+        splitter = TableRowSplitter(counter=counter, limit=50)
+        chunks = splitter.split(text)
+        # Каждый чанк (кроме последнего) должен быть ≤ лимита
+        for chunk in chunks[:-1]:
+            assert counter.count(chunk) <= 50
+        assert len(chunks) > 1
 
     def test_split_pre_text_in_first_chunk_only(self, md_with_large_table, table_splitter):
         chunks = table_splitter.split(md_with_large_table)
@@ -200,7 +201,8 @@ class TestSemanticSplitter:
 
     def test_split_returns_original_when_no_breakpoints(self):
         # Все предложения с одинаковым эмбеддингом → нет границ
-        embed_fn = lambda t: [1.0, 0.0, 0.0]
+        def embed_fn(t: str) -> list[float]:
+            return [1.0, 0.0, 0.0]
         splitter = SemanticSplitter(
             embed_fn=embed_fn, breakpoint_percentile=99, min_sentences=3
         )
@@ -215,27 +217,27 @@ class TestSplitSentences:
     def test_russian_numbered_list_not_split(self):
         """Нумерованный список не должен дробиться по точке после цифры."""
         text = '1. Первый пункт списка. 2. Второй пункт списка. 3. Третий пункт.'
-        sentences = SemanticSplitter._split_sentences(text)
+        sentences = split_sentences(text)
         # razdel не должен создавать чанки из одних цифр
         assert all(len(s) > 5 for s in sentences)
 
     def test_russian_abbreviations(self):
         """Аббревиатуры т.е., т.д., т.п. не должны резать предложение."""
         text = 'Используются различные методы, т.е. алгоритмы. Они работают хорошо.'
-        sentences = SemanticSplitter._split_sentences(text)
+        sentences = split_sentences(text)
         assert len(sentences) == 2
 
     def test_english_text_uses_nltk(self):
         """Английский текст должен использовать nltk."""
         text = 'Mr. Smith went to Washington. He met Dr. Jones there. They discussed AI.'
-        sentences = SemanticSplitter._split_sentences(text)
+        sentences = split_sentences(text)
         # nltk не должен резать на Mr. и Dr.
         assert len(sentences) == 3
 
     def test_simple_russian_sentences(self):
         """Простые русские предложения разбиваются корректно."""
         text = 'Первое предложение. Второе предложение. Третье предложение.'
-        sentences = SemanticSplitter._split_sentences(text)
+        sentences = split_sentences(text)
         assert len(sentences) == 3
 
 
@@ -321,7 +323,7 @@ class TestFixedSizeSplitter:
         # Строка с 'альт. поход)' должна быть в одном чанке целиком
         row_with_dot = '| Айвазян Артур | Разработка | Получение ИНН через сайт (альт. поход), сервис Саруман |'
         matching = [c for c in chunks if row_with_dot in c]
-        assert len(matching) == 1, f'Строка таблицы разорвана или потеряна. Чанки:\n' + '\n---\n'.join(chunks)
+        assert len(matching) == 1, 'Строка таблицы разорвана или потеряна. Чанки:\n' + '\n---\n'.join(chunks)
 
     def test_split_table_chunks_all_have_header(self, counter):
         """После разбивки таблицы каждый чанк содержит шапку."""
@@ -391,7 +393,7 @@ class TestRecursiveSplitter:
             limit=limit,
             splitters=[
                 MarkdownHeaderSplitter(),
-                TableRowSplitter(rows_per_chunk=5),
+                TableRowSplitter(counter=counter, limit=limit),
                 FixedSizeSplitter(counter=counter, limit=limit),
             ],
         )

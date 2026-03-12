@@ -96,8 +96,10 @@ class SparseEmbedderConfig(BaseModel):
 
 
 class ChunkerConfig(BaseModel):
-    mode: str = 'passthrough'            # 'passthrough' | 'llm'
-    block_limit: int = 32000             # лимит токенов для pre-split блока
+    mode: str = 'semantic'               # 'semantic' | 'passthrough' | 'llm'
+    block_limit: int = 32000             # лимит токенов для pre-split блока (llm/passthrough)
+    min_tokens: int = 50                 # мин. размер чанка в токенах (semantic)
+    max_tokens: int = 250                # макс. размер чанка в токенах (semantic)
     halving_retries: int = 0             # деления блока пополам при таймауте LLM; 0 = выключено
     fallback: bool = False               # семантический fallback; False = при неудаче документ пропускается
 
