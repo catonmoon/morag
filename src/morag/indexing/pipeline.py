@@ -108,10 +108,7 @@ class IndexingPipeline:
         if existing is None:
             return False
 
-        same_content = existing.updated_at == stub.updated_at
-        if stub.source_type not in ('confluence', 'jira'):
-            same_content = same_content and existing.size == stub.size
-        if not same_content:
+        if existing.updated_at != stub.updated_at:
             return False
 
         # Структурные документы не имеют чанков — достаточно совпадения метаданных
@@ -133,11 +130,7 @@ class IndexingPipeline:
         existing = await self._doc_repo.get_by_id(document.id)
 
         if existing is not None:
-            # Для Confluence и Jira size нестабилен, ориентируемся только на дату изменения.
-            same_content = existing.updated_at == document.updated_at
-            if document.source_type not in ('confluence', 'jira'):
-                same_content = same_content and existing.size == document.size
-            if same_content:
+            if existing.updated_at == document.updated_at:
                 status = await self._chunk_repo.get_index_status(document.id)
                 if status is not None:
                     count, total = status
@@ -145,8 +138,9 @@ class IndexingPipeline:
                         logger.info('%sDocument up to date, skipping: %s', w, document.id)
                         return None
 
-            # Документ изменился или индексация была прервана — удаляем каскадно
+            # Документ изменился или индексация была прервана — удаляем attached-детей и сам документ
             logger.info('%sRe-indexing document: %s', w, document.id)
+            await self._doc_repo.delete_attached(document.id, self._chunk_repo)
             await self._chunk_repo.delete_by_doc_id(document.id)
             await self._doc_repo.delete(document.id)
 

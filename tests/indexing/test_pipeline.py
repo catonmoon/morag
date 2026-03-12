@@ -85,13 +85,13 @@ class TestIndexingPipelineRun:
         doc_repo.upsert.assert_called_once()
 
     async def test_skips_up_to_date_document(self, pipeline, doc_repo, chunk_repo):
-        """Документ с совпадающим updated_at, size и полным набором чанков пропускается."""
+        """Документ с совпадающим updated_at и полным набором чанков пропускается."""
         ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
-        doc_repo.get_by_id.return_value = make_document(updated_at=ts, size=1024)
+        doc_repo.get_by_id.return_value = make_document(updated_at=ts)
         chunk_repo.get_index_status.return_value = (3, 3)
 
         source = MagicMock(spec=Source)
-        source.get_metadata.return_value = [make_stub(updated_at=ts, size=1024)]
+        source.get_metadata.return_value = [make_stub(updated_at=ts)]
 
         await pipeline.run(source)
 
@@ -115,19 +115,43 @@ class TestIndexingPipelineRun:
         doc_repo.delete.assert_called_once_with('test.md')
         doc_repo.upsert.assert_called_once()
 
-    async def test_reindexes_when_size_changed(self, pipeline, doc_repo, chunk_repo):
-        """Документ с изменённым size должен быть переиндексирован."""
+    async def test_skips_when_size_changed_but_updated_at_same(self, pipeline, doc_repo, chunk_repo):
+        """Документ с изменённым size, но тем же updated_at пропускается (size не проверяется)."""
         ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
         doc_repo.get_by_id.return_value = make_document(updated_at=ts, size=1024)
+        chunk_repo.get_index_status.return_value = (3, 3)
 
         source = MagicMock(spec=Source)
-        setup_source(source, [make_document(updated_at=ts, size=2048)])
+        source.get_metadata.return_value = [make_stub(updated_at=ts, size=2048)]
 
         await pipeline.run(source)
 
-        chunk_repo.delete_by_doc_id.assert_called_once_with('test.md')
-        doc_repo.delete.assert_called_once_with('test.md')
-        doc_repo.upsert.assert_called_once()
+        doc_repo.upsert.assert_not_called()
+        source.load_one.assert_not_called()
+
+    async def test_delete_attached_called_on_reindex(self, pipeline, doc_repo, chunk_repo):
+        """При переиндексации вызывается delete_attached для удаления attached-детей."""
+        old_ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        new_ts = datetime(2024, 6, 1, tzinfo=timezone.utc)
+        doc_repo.get_by_id.return_value = make_document(updated_at=old_ts)
+
+        source = MagicMock(spec=Source)
+        setup_source(source, [make_document(updated_at=new_ts)])
+
+        await pipeline.run(source)
+
+        doc_repo.delete_attached.assert_called_once_with('test.md', chunk_repo)
+
+    async def test_delete_attached_not_called_for_new_document(self, pipeline, doc_repo, chunk_repo):
+        """Для нового документа delete_attached не вызывается."""
+        doc_repo.get_by_id.return_value = None
+
+        source = MagicMock(spec=Source)
+        setup_source(source, [make_document()])
+
+        await pipeline.run(source)
+
+        doc_repo.delete_attached.assert_not_called()
 
     async def test_reindexes_when_chunks_incomplete(self, pipeline, doc_repo, chunk_repo):
         """Если индексация была прервана (count < total), переиндексируем."""
@@ -248,11 +272,11 @@ class TestIndexingPipelineRun:
     async def test_load_one_not_called_for_up_to_date(self, pipeline, doc_repo, chunk_repo):
         """load_one не вызывается для актуальных документов."""
         ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
-        doc_repo.get_by_id.return_value = make_document(updated_at=ts, size=1024)
+        doc_repo.get_by_id.return_value = make_document(updated_at=ts)
         chunk_repo.get_index_status.return_value = (5, 5)
 
         source = MagicMock(spec=Source)
-        source.get_metadata.return_value = [make_stub(updated_at=ts, size=1024)]
+        source.get_metadata.return_value = [make_stub(updated_at=ts)]
 
         await pipeline.run(source)
 
