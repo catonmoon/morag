@@ -25,11 +25,13 @@ class LocalDocumentSource:
         docling_base_url: str | None = None,
         docling_timeout: int = 300,
         vision_client: LLMClient | None = None,
+        vision_max_tokens: int | None = None,
     ) -> None:
         self._root = Path(root).resolve()
         self._docling_base_url = docling_base_url
         self._docling_timeout = docling_timeout
         self._vision_client = vision_client
+        self._vision_max_tokens = vision_max_tokens
 
     async def run(self, pipeline) -> None:
         """Запустить индексацию всех локальных источников в правильном порядке.
@@ -57,6 +59,7 @@ class LocalDocumentSource:
                 docling_base_url=self._docling_base_url,
                 docling_timeout=self._docling_timeout,
                 vision_client=self._vision_client,
+                vision_max_tokens=self._vision_max_tokens,
             )
             logger.info('Phase 3/3: indexing PDF files...')
             await pipeline.run(pdf_source)

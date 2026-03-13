@@ -29,6 +29,7 @@ class PdfSource(Source):
         docling_base_url: str,
         docling_timeout: int = 300,
         vision_client: LLMClient | None = None,
+        vision_max_tokens: int | None = None,
         converter: PdfConverter | None = None,
     ) -> None:
         self._root = Path(root).resolve()
@@ -36,6 +37,7 @@ class PdfSource(Source):
             docling_base_url=docling_base_url,
             docling_timeout=docling_timeout,
             vision_client=vision_client,
+            vision_max_tokens=vision_max_tokens,
         )
 
     async def get_metadata(self) -> list[Document]:

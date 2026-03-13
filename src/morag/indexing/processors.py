@@ -62,6 +62,10 @@ class ChunkProcessor(ABC):
         """Обработать чанк и вернуть обновлённую версию."""
         ...
 
+    def process_batch(self, chunks: list[Chunk], document: Document) -> list[Chunk]:
+        """Батчевая обработка чанков. По умолчанию вызывает process() по одному."""
+        return [self.process(c, document) for c in chunks]
+
 
 class DenseEmbeddingProcessor(ChunkProcessor):
     """Добавляет dense-вектор 'full' в chunk.vectors.
@@ -73,10 +77,23 @@ class DenseEmbeddingProcessor(ChunkProcessor):
     def __init__(self, embedder: Embedder) -> None:
         self._embedder = embedder
 
+    @staticmethod
+    def _full_text(chunk: Chunk) -> str:
+        return f'{"\n".join(chunk.path)}\n{chunk.text}\n{chunk.context}'
+
     def process(self, chunk: Chunk, document: Document) -> Chunk:
-        full_text = f'{"\n".join(chunk.path)}\n{chunk.text}\n{chunk.context}'
-        chunk.vectors['full'] = self._embedder.embed(full_text)
+        chunk.vectors['full'] = self._embedder.embed(self._full_text(chunk))
         return chunk
+
+    def process_batch(self, chunks: list[Chunk], document: Document) -> list[Chunk]:
+        """Батчевый эмбеддинг всех чанков документа за один вызов."""
+        if not chunks:
+            return chunks
+        texts = [self._full_text(c) for c in chunks]
+        vectors = self._embedder.embed_batch(texts)
+        for chunk, vec in zip(chunks, vectors):
+            chunk.vectors['full'] = vec
+        return chunks
 
 
 class SparseEmbeddingProcessor(ChunkProcessor):
