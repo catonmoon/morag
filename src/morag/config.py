@@ -68,6 +68,7 @@ class LLMConfig(BaseModel):
     api_key: str = 'ollama'
     timeout: int = 180  # таймаут HTTP-запросов к LLM (секунды)
     context_window: int = 32768   # контекстное окно модели (токенов)
+    max_tokens: int | None = None  # лимит токенов ответа; None — без ограничения
     retry: RetryConfig = RetryConfig()
     model_wait_seconds: int = 0   # ожидание перезагрузки модели (сек); 0 = не ждать
     model_wait_retries: int = 0   # количество попыток ожидания модели
@@ -114,6 +115,7 @@ class IndexingConfig(BaseModel):
     context: ContextConfig = ContextConfig()
     dense_embedder: DenseEmbedderConfig = DenseEmbedderConfig()
     sparse_embedder: SparseEmbedderConfig = SparseEmbedderConfig()
+    vision_max_tokens: int = 1024  # лимит токенов ответа Vision LLM (изображения, формулы)
     concurrency: int = 1  # количество документов, обрабатываемых параллельно
     schedule: str | None = None  # cron-выражение для serve-режима (например '0 */6 * * *')
     doc_summary: DocSummaryConfig = DocSummaryConfig()  # генерация саммари документов; max_tokens=None — отключено

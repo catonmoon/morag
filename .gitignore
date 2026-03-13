@@ -17,5 +17,8 @@ coverage_html/
 .env
 config.yml
 
+# Reports — experiment logs
+reports/
+
 # Claude Code internal instructions — never commit
 CLAUDE.md

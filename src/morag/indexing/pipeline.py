@@ -181,7 +181,7 @@ class IndexingPipeline:
 
         async def process_one(i: int, stub: Document) -> bool:
             """Обработать один документ. Возвращает True если был проиндексирован."""
-            w = f'[W{i}] ' if self._concurrency > 1 else ''
+            w = f'[{i}/{total}] '
             async with sem:
                 try:
                     logger.info('%sChecking [%d/%d]: %s', w, i, total, stub.id)
@@ -259,10 +259,14 @@ class IndexingPipeline:
         total = len(chunk_texts)
         logger.info('%s  Total chunks: %d', w, total)
 
-        # Собираем Chunk-объекты с order/total, генерируем context, применяем процессоры
+        # Собираем Chunk-объекты с order/total, генерируем context
         chunks: list[Chunk] = []
         for order, text in enumerate(chunk_texts):
-            logger.info('%s  Processing chunk %d/%d: %s...', w, order + 1, total, repr(text[:60]))
+            chunk_tokens = self._token_counter.count(text)
+            logger.info(
+                '%s  Processing chunk %d/%d (~%d tok): %s...',
+                w, order + 1, total, chunk_tokens, repr(text[:60]),
+            )
             context = await self._context_generator.generate(document.text, text)
 
             chunk = Chunk(
@@ -275,17 +279,19 @@ class IndexingPipeline:
                 context=context,
                 updated_at=document.updated_at,
             )
+            chunks.append(chunk)
 
-            for processor in self._chunk_processors:
-                chunk = processor.process(chunk, document)
+        # Применяем процессоры батчами — DenseEmbeddingProcessor использует embed_batch
+        for processor in self._chunk_processors:
+            chunks = processor.process_batch(chunks, document)
 
+        for chunk in chunks:
             vec_summary = ', '.join(
                 f"{k}:dense({len(v)})" if isinstance(v, list)
                 else f"{k}:sparse({len(v['indices'])})"
                 for k, v in chunk.vectors.items()
             )
-            logger.info('%s    vectors: [%s]', w, vec_summary)
-            chunks.append(chunk)
+            logger.info('%s    chunk %d/%d vectors: [%s]', w, chunk.order + 1, total, vec_summary)
 
         await self._chunk_repo.upsert_batch(chunks)
         logger.info('%sChunks saved: %s (%d)', w, document.id, total)

@@ -124,6 +124,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             docling_base_url=config.docling.base_url if config.docling else None,
             docling_timeout=config.docling.timeout if config.docling else 300,
             vision_client=vision_client,
+            vision_max_tokens=config.indexing.vision_max_tokens,
         )
         logger.info(
             'Source: local_documents path=%s (docling=%s)',
@@ -133,7 +134,11 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
 
     sources = []
     if config.sources.confluence:
-        sources.append(ConfluenceSource(config.sources.confluence, vision_client=vision_client))
+        sources.append(ConfluenceSource(
+            config.sources.confluence,
+            vision_client=vision_client,
+            vision_max_tokens=config.indexing.vision_max_tokens,
+        ))
         logger.info('Source: confluence url=%s (vision=%s)', config.sources.confluence.url, vision_client is not None)
     if not sources and local_source is None:
         logger.error('No sources configured in config.yml')
@@ -233,6 +238,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
                 docling_base_url=config.docling.base_url,
                 docling_timeout=config.docling.timeout,
                 vision_client=vision_client,
+                vision_max_tokens=config.indexing.vision_max_tokens,
             )
             confluence_pdf_source = ConfluencePdfSource(
                 config=config.sources.confluence,

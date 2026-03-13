@@ -5,11 +5,32 @@ import re
 from abc import ABC, abstractmethod
 from typing import Callable
 
-logger = logging.getLogger(__name__)
-
 import numpy as np
+from markdown_it import MarkdownIt
 
 from morag.indexing.token_counter import TokenCounter
+
+logger = logging.getLogger(__name__)
+
+
+# CommonMark-парсер с поддержкой GFM-таблиц.
+# Инстанс stateless (parse создаёт свежий State) — безопасно переиспользовать.
+_md_parser = MarkdownIt().enable('table')
+
+# Строка вида ```...] в начале строки — часть конструкции [Изображение: ```plantuml...```].
+# CommonMark трактует как fence (info string ']'). Добавляем backtick в конец →
+# info string содержит backtick → fence невалиден по спеке CommonMark §4.5.
+_BRACKET_FENCE_RE = re.compile(r'^([ \t]*`{3,}[^`]*\])[ \t]*$', re.MULTILINE)
+
+
+def _parse_md(text: str) -> list:
+    """Парсит Markdown с предобработкой Confluence-специфичных конструкций.
+
+    Предобработка не меняет количество строк — номера строк в token.map
+    соответствуют исходному тексту.
+    """
+    processed = _BRACKET_FENCE_RE.sub(r'\1`', text)
+    return _md_parser.parse(processed)
 
 
 class BlockSplitter(ABC):
@@ -27,35 +48,19 @@ class BlockSplitter(ABC):
 
 
 class MarkdownHeaderSplitter(BlockSplitter):
-    """Разделяет текст по заголовкам Markdown (# ## ###...)."""
+    """Разделяет текст по заголовкам Markdown (# ## ###...).
 
-    _HEADER_RE = re.compile(r'^#{1,6}\s', re.MULTILINE)
+    Использует CommonMark-парсер: заголовки внутри code fences не считаются заголовками.
+    """
 
     def can_split(self, text: str) -> bool:
-        return len(self._HEADER_RE.findall(text)) > 1
+        tokens = _parse_md(text)
+        heading_count = sum(1 for t in tokens if t.type == 'heading_open')
+        return heading_count > 1
 
     def split(self, text: str) -> list[str]:
-        lines = text.split('\n')
-        blocks: list[list[str]] = []
-        current: list[str] = []
-        in_fence = False
-
-        for line in lines:
-            if _CODE_FENCE_RE.match(line):
-                in_fence = not in_fence
-                current.append(line)
-                continue
-
-            if self._HEADER_RE.match(line) and current and not in_fence:
-                blocks.append('\n'.join(current).strip())
-                current = [line]
-            else:
-                current.append(line)
-
-        if current:
-            blocks.append('\n'.join(current).strip())
-
-        return [b for b in blocks if b]
+        sections = _split_by_headers(text)
+        return [s.strip() for s in sections if s.strip()]
 
 
 class TableRowSplitter(BlockSplitter):
@@ -183,9 +188,25 @@ def split_sentences(text: str) -> list[str]:
         return [s.strip() for s in sent_tokenize(text) if s.strip()]
 
 
-_CODE_FENCE_RE = re.compile(r'^\s*```')
-_TABLE_ROW_RE = re.compile(r'^\s*\|')
-_HEADER_RE = re.compile(r'^#{1,6}\s', re.MULTILINE)
+def _top_level_blocks(text: str) -> list[tuple[str, int, int]]:
+    """Извлекает top-level блоки из Markdown-текста через CommonMark-парсер.
+
+    Возвращает список (token_type, start_line, end_line) для каждого
+    top-level блок-элемента. Строки 0-based, end_line exclusive.
+    """
+    tokens = _parse_md(text)
+    blocks: list[tuple[str, int, int]] = []
+    level = 0
+    for token in tokens:
+        if token.nesting == 1:
+            if level == 0 and token.map:
+                blocks.append((token.type, token.map[0], token.map[1]))
+            level += 1
+        elif token.nesting == -1:
+            level -= 1
+        elif token.nesting == 0 and level == 0 and token.map:
+            blocks.append((token.type, token.map[0], token.map[1]))
+    return blocks
 
 
 def split_into_units(text: str) -> list[str]:
@@ -197,102 +218,43 @@ def split_into_units(text: str) -> list[str]:
 
     Всё остальное разбивается на предложения через split_sentences().
     """
-    lines = text.split('\n')
+    source_lines = text.split('\n')
+    blocks = _top_level_blocks(text)
     units: list[str] = []
-    text_buf: list[str] = []
-    i = 0
 
-    while i < len(lines):
-        line = lines[i]
-
-        # Code fence: ``` ... ```
-        if _CODE_FENCE_RE.match(line):
-            # Ищем закрывающий fence; если не нашли — это одиночный ```, трактуем как текст
-            fence_lines = [line]
-            j = i + 1
-            found_close = False
-            while j < len(lines):
-                fence_lines.append(lines[j])
-                if _CODE_FENCE_RE.match(lines[j]):
-                    found_close = True
-                    j += 1
-                    break
-                j += 1
-            if found_close:
-                _flush_text_buffer(text_buf, units)
-                text_buf = []
-                units.append('\n'.join(fence_lines))
-                i = j
-            else:
-                # Одиночный ``` без пары — обычная текстовая строка
-                text_buf.append(line)
-                i += 1
+    for block_type, start, end in blocks:
+        block_text = '\n'.join(source_lines[start:end]).strip()
+        if not block_text:
             continue
+        if block_type in ('fence', 'code_block', 'table_open'):
+            units.append(block_text)
+        else:
+            sentences = split_sentences(block_text)
+            units.extend(sentences)
 
-        # Table: consecutive lines starting with |
-        if _TABLE_ROW_RE.match(line):
-            _flush_text_buffer(text_buf, units)
-            text_buf = []
-            table_lines = [line]
-            i += 1
-            while i < len(lines) and _TABLE_ROW_RE.match(lines[i]):
-                table_lines.append(lines[i])
-                i += 1
-            units.append('\n'.join(table_lines))
-            continue
-
-        text_buf.append(line)
-        i += 1
-
-    _flush_text_buffer(text_buf, units)
     return [u for u in units if u.strip()]
 
 
-def _flush_text_buffer(buf: list[str], units: list[str]) -> None:
-    """Накопленный текст разбивает на предложения и добавляет в units."""
-    if not buf:
-        return
-    text = '\n'.join(buf).strip()
-    if not text:
-        return
-    sentences = split_sentences(text)
-    units.extend(sentences)
-
-
 def _split_paragraphs(text: str) -> list[str]:
-    """Разбивает текст по пустым строкам, не разрывая code fences и таблицы."""
-    lines = text.split('\n')
+    """Разбивает текст на блоки по структуре Markdown.
+
+    Использует CommonMark-парсер для корректного определения блоков:
+    code fences, таблицы, заголовки, параграфы, списки и т.д.
+    """
+    source_lines = text.split('\n')
+    blocks = _top_level_blocks(text)
+
+    if not blocks:
+        stripped = text.strip()
+        return [stripped] if stripped else []
+
     paragraphs: list[str] = []
-    current: list[str] = []
-    in_fence = False
+    for _, start, end in blocks:
+        block_text = '\n'.join(source_lines[start:end]).strip()
+        if block_text:
+            paragraphs.append(block_text)
 
-    for line in lines:
-        if _CODE_FENCE_RE.match(line):
-            in_fence = not in_fence
-            current.append(line)
-            continue
-
-        if in_fence:
-            current.append(line)
-            continue
-
-        # Строка таблицы — не разрывать
-        if _TABLE_ROW_RE.match(line):
-            current.append(line)
-            continue
-
-        # Пустая строка вне fence/table — граница абзаца
-        if not line.strip():
-            if current:
-                paragraphs.append('\n'.join(current).strip())
-                current = []
-        else:
-            current.append(line)
-
-    if current:
-        paragraphs.append('\n'.join(current).strip())
-
-    return [p for p in paragraphs if p]
+    return paragraphs
 
 
 def split_into_semantic_units(
@@ -342,35 +304,39 @@ def split_into_semantic_units(
 
 def _is_code_fence(text: str) -> bool:
     """Проверяет, является ли текст code fence блоком (``` ... ```)."""
-    return bool(_CODE_FENCE_RE.match(text.lstrip()))
+    return text.lstrip().startswith('```')
 
 
 def _split_by_headers(text: str) -> list[str]:
     """Разбивает текст по заголовкам Markdown. Каждый заголовок начинает новую секцию.
 
-    Не разрывает code fences: строки с ``#`` внутри fenced-блоков
-    (YAML-комментарии, bash-комментарии и т.п.) не считаются заголовками.
+    Использует CommonMark-парсер: заголовки внутри code fences корректно игнорируются.
     """
+    tokens = _parse_md(text)
     lines = text.split('\n')
+
+    heading_starts = [t.map[0] for t in tokens if t.type == 'heading_open' and t.map]
+
+    if not heading_starts:
+        return [text]
+
+    # Первый заголовок на первой строке не создаёт разбиение
+    # (совместимость с прежним поведением: split только если есть контент до заголовка)
+    if heading_starts[0] == 0:
+        split_points = heading_starts[1:]
+    else:
+        split_points = heading_starts
+
+    if not split_points:
+        return [text]
+
     sections: list[str] = []
-    current: list[str] = []
-    in_fence = False
+    prev = 0
+    for sp in split_points:
+        sections.append('\n'.join(lines[prev:sp]))
+        prev = sp
 
-    for line in lines:
-        if _CODE_FENCE_RE.match(line):
-            in_fence = not in_fence
-            current.append(line)
-            continue
-
-        if _HEADER_RE.match(line) and current and not in_fence:
-            sections.append('\n'.join(current))
-            current = [line]
-        else:
-            current.append(line)
-
-    if current:
-        sections.append('\n'.join(current))
-
+    sections.append('\n'.join(lines[prev:]))
     return sections
 
 
@@ -547,7 +513,7 @@ class FixedSizeSplitter(BlockSplitter):
             result = self._split_table_rows(text)
             if len(result) > 1:
                 return result
-        sentences = [s for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+        sentences = split_sentences(text)
         if len(sentences) > 1:
             return self._pack_and_recurse(sentences, ' ', self._split_by_words)
         return self._split_by_words(text)

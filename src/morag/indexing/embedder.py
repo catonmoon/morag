@@ -59,14 +59,20 @@ class FridaEmbedder(Embedder):
         logger.info('Embedding model loaded, dim=%d', self._dim)
 
     def embed(self, text: str) -> list[float]:
-        return self._model.encode(_DOCUMENT_PREFIX + text, normalize_embeddings=False).tolist()
+        return self._model.encode(
+            _DOCUMENT_PREFIX + text, normalize_embeddings=False, show_progress_bar=False,
+        ).tolist()
 
     def embed_query(self, text: str) -> list[float]:
-        return self._model.encode(_QUERY_PREFIX + text, normalize_embeddings=False).tolist()
+        return self._model.encode(
+            _QUERY_PREFIX + text, normalize_embeddings=False, show_progress_bar=False,
+        ).tolist()
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         prefixed = [_DOCUMENT_PREFIX + t for t in texts]
-        return self._model.encode(prefixed, normalize_embeddings=False).tolist()
+        return self._model.encode(
+            prefixed, normalize_embeddings=False, show_progress_bar=False,
+        ).tolist()
 
     @property
     def dim(self) -> int:

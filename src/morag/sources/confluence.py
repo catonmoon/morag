@@ -46,7 +46,7 @@ class ConfluenceSource(Source):
     def source_type(self) -> str:
         return 'confluence'
 
-    def __init__(self, config: ConfluenceConfig, vision_client=None) -> None:
+    def __init__(self, config: ConfluenceConfig, vision_client=None, vision_max_tokens: int | None = None) -> None:
         credential = config.api_token or config.password
         if not credential:
             raise ValueError('Confluence config requires either api_token or password')
@@ -65,6 +65,7 @@ class ConfluenceSource(Source):
         self._ancestor_ids = config.ancestor_ids
         self._skip_ancestor_ids = config.skip_ancestor_ids
         self._vision_client = vision_client
+        self._vision_max_tokens = vision_max_tokens
         self._min_image_size_bytes = config.min_image_size_bytes
         self._timeout = config.timeout
 
@@ -286,6 +287,7 @@ class ConfluenceSource(Source):
         try:
             description = await self._vision_client.complete_vision(
                 _IMAGE_PROMPT, image_b64, media_type,
+                max_tokens=self._vision_max_tokens,
             )
             logger.info('Page %s: image described: %s -> %s...', page_id, src[:80], description[:80].replace('\n', '\\n'))
             return description.strip() or None

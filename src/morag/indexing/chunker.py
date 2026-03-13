@@ -412,9 +412,18 @@ class SemanticChunker(Chunker):
 
         sentence_tokens = [self._counter.count(s) for s in sentences]
         total_tokens = sum(sentence_tokens)
+        oversized_units = sum(1 for t in sentence_tokens if t > self._max_tokens)
+        logger.info(
+            'SemanticChunker: %d unit(s), ~%d tokens total, %d oversized (>%d)',
+            len(sentences), total_tokens, oversized_units, self._max_tokens,
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            for i, (s, t) in enumerate(zip(sentences, sentence_tokens)):
+                logger.debug('  unit[%d] %d tok: %s', i, t, repr(s[:80]))
 
         # Весь блок влезает в max_tokens — один чанк
         if total_tokens <= self._max_tokens:
+            logger.info('SemanticChunker: entire block fits in max_tokens, 1 chunk')
             return [block]
 
         chunks: list[str] = []
@@ -489,7 +498,27 @@ class SemanticChunker(Chunker):
             chunks.append(' '.join(sentences[pos:best_left_end]))
             pos = best_left_end
 
-        return chunks if chunks else [block]
+        result = chunks if chunks else [block]
+
+        # Статистика по финальным чанкам
+        chunk_token_counts = [self._counter.count(c) for c in result]
+        avg_tokens = sum(chunk_token_counts) / len(chunk_token_counts) if chunk_token_counts else 0
+        over_512 = sum(1 for t in chunk_token_counts if t > 512)
+        over_max = sum(1 for t in chunk_token_counts if t > self._max_tokens)
+        logger.info(
+            'SemanticChunker: %d chunk(s), avg=%d tok, over_max(%d)=%d, over_512=%d',
+            len(result), int(avg_tokens), self._max_tokens, over_max, over_512,
+        )
+        for i, (c, t) in enumerate(zip(result, chunk_token_counts)):
+            if t > 512:
+                logger.warning(
+                    'SemanticChunker: chunk[%d] exceeds 512 tokens (%d tok): %s...',
+                    i, t, repr(c[:100]),
+                )
+            elif logger.isEnabledFor(logging.DEBUG):
+                logger.debug('  chunk[%d] %d tok: %s', i, t, repr(c[:80]))
+
+        return result
 
     def _candidate_ends(
         self, sentence_tokens: list[int], start: int, *, forward: bool = True,

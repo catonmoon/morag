@@ -135,7 +135,13 @@ class LLMClient:
         response = await self._create(**kwargs)
         return response.choices[0].message.content or ''
 
-    async def complete_vision(self, prompt: str, image_base64: str, media_type: str = 'image/png') -> str:
+    async def complete_vision(
+        self,
+        prompt: str,
+        image_base64: str,
+        media_type: str = 'image/png',
+        max_tokens: int | None = None,
+    ) -> str:
         """Описать изображение через multimodal LLM (Vision).
 
         Принимает изображение в формате base64 и текстовый запрос.
@@ -153,11 +159,14 @@ class LLMClient:
                 ],
             }
         ]
-        response = await self._create(
+        kwargs: dict = dict(
             model=self._model,
             messages=messages,
             temperature=0.0,
         )
+        if max_tokens is not None:
+            kwargs['max_tokens'] = max_tokens
+        response = await self._create(**kwargs)
         return response.choices[0].message.content or ''
 
     async def complete_json(

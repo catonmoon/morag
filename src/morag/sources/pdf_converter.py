@@ -77,10 +77,12 @@ class DoclingPdfConverter(PdfConverter):
         docling_base_url: str,
         docling_timeout: int = 300,
         vision_client: LLMClient | None = None,
+        vision_max_tokens: int | None = None,
     ) -> None:
         self._docling_base_url = docling_base_url.rstrip('/')
         self._docling_timeout = docling_timeout
         self._vision_client = vision_client
+        self._vision_max_tokens = vision_max_tokens
 
     async def convert(self, pdf_bytes: bytes, filename: str) -> str | None:
         """Конвертировать PDF в Markdown через docling-serve."""
@@ -206,6 +208,7 @@ class DoclingPdfConverter(PdfConverter):
             try:
                 desc = await self._vision_client.complete_vision(
                     _IMAGE_PROMPT, img_b64, media_type='image/png',
+                    max_tokens=self._vision_max_tokens,
                 )
                 descriptions[i] = desc
             except Exception as exc:
@@ -259,6 +262,7 @@ class DoclingPdfConverter(PdfConverter):
             try:
                 desc = await self._vision_client.complete_vision(
                     _FORMULA_PROMPT, img_b64, media_type='image/png',
+                    max_tokens=self._vision_max_tokens,
                 )
                 descriptions[i] = desc
             except Exception as exc:
