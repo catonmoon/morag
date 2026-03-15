@@ -62,11 +62,11 @@ class TestLLMContextGenerator:
         assert 'Уникальный текст чанка' in messages[0]['content']
 
     async def test_uses_deterministic_params(self, generator, mock_client):
-        from morag.indexing.context import _LLM_PARAMS
+        from morag.indexing.context import _llm_params
         mock_client.complete.return_value = 'ok'
         await generator.generate('Документ', 'Чанк')
         _, kwargs = mock_client.complete.call_args
-        assert kwargs.get('params') == _LLM_PARAMS
+        assert kwargs.get('params') == _llm_params()
 
     async def test_fallback_on_exception(self, generator, mock_client):
         mock_client.complete.side_effect = Exception('network error')

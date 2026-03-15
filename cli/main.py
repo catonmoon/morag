@@ -25,6 +25,7 @@ from morag.indexing.pipeline import IndexingPipeline
 from morag.indexing.processors import (
     DenseEmbeddingProcessor,
     DocSummaryProcessor,
+    DocTitleProcessor,
     MetadataProcessor,
     SparseEmbeddingProcessor,
 )
@@ -231,6 +232,15 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
     sparse_embedder = _make_sparse_embedder(config.indexing.sparse_embedder)
 
     doc_processors = []
+    if config.indexing.doc_title.max_tokens is not None:
+        doc_processors.append(DocTitleProcessor(
+            llm_client=llm_client,
+            max_tokens=config.indexing.doc_title.max_tokens,
+            scan_tokens=config.indexing.doc_title.scan_tokens,
+            token_counter=token_counter,
+            context_window=config.llm.context_window,
+            enable_thinking=config.llm.enable_thinking,
+        ))
     if config.indexing.doc_summary.max_tokens is not None:
         doc_processors.append(DocSummaryProcessor(
             llm_client=llm_client,
@@ -433,11 +443,11 @@ except Exception:
 
 LOGO = f"""
     ▄▀▀▀▀▀▀▀▀▄
-   █  /\\_/\\ █      Catonmoon
+   █  /\\_/\\   █      Catonmoon
    █ ( =^.^=) █      ╔╦╗ ╔═╗ ┬─┐ ┌─┐ ┌─┐
    █  /> < /  █      ║║║ ║ ║ ├┬┘ ├─┤ │ ┬
     ▀▄▄▄▄▄▄▄▄▀       ╩ ╩ ╚═╝ ┴└─ ┴ ┴ └─┘
-                     Indexer v{_VERSION}
+                     Indexer      v{_VERSION}
 """
 
 
