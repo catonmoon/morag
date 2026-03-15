@@ -98,7 +98,12 @@ class LLMContextGenerator(ContextGenerator):
         prompt = _PROMPT_TEMPLATE.format(doc_text=doc_text, chunk_text=chunk_text)
         messages = [{'role': 'user', 'content': prompt}]
         try:
-            return await self._client.complete(messages, params=_LLM_PARAMS, max_tokens=self._max_output_tokens)
+            result = await self._client.complete(messages, params=_LLM_PARAMS, max_tokens=self._max_output_tokens)
+            logger.info(
+                'LLMContextGenerator: generated context (%d chars) for chunk (%d chars)',
+                len(result), len(chunk_text),
+            )
+            return result
         except Exception:
             logger.warning('LLMContextGenerator: failed to generate context, returning empty string')
             return ''

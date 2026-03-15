@@ -19,6 +19,15 @@ from pydantic import BaseModel
 
 _MD5_MOD = 4_294_967_295  # DO NOT CHANGE — ломает индекс
 
+_LOGO = r"""
+    ▄▀▀▀▀▀▀▀▀▄
+   █  /\_/\   █      Catonmoon
+   █ ( =^.^=) █      ╔╦╗ ╔═╗ ┬─┐ ┌─┐ ┌─┐
+   █  /> < /  █      ║║║ ║ ║ ├┬┘ ├─┤ │ ┬
+    ▀▄▄▄▄▄▄▄▀       ╩ ╩ ╚═╝ ┴└─ ┴ ┴ └─┘
+                     pipeline v0.2.0
+"""
+
 
 class Pipeline:
     class Valves(BaseModel):
@@ -52,22 +61,40 @@ class Pipeline:
         INTENT_API_KEY: str
 
         SYSTEM_PROMPT: str = (
-            'Ты — ассистент по внутренней документации компании. '
-            'Отвечай только на русском языке в формальном тоне.\n\n'
-            'Правила:\n'
-            '- Отвечай ТОЛЬКО на основе предоставленных чанков из базы знаний. '
-            'Не додумывай и не дополняй информацией из общих знаний.\n'
-            '- Если в чанках нет ответа на вопрос — честно сообщи, '
-            'что в базе знаний нет информации по этому вопросу.\n'
-            '- Если информация в чанках противоречива — укажи на расхождение '
-            'и приведи оба варианта с маркерами источников.\n'
-            '- Отвечай структурированно: используй списки и заголовки, где это уместно.'
+            'Ты – RAG система, которая отвечает на вопрос пользователя, '
+            'с использованием чанков текста из страниц Confluence в формате markdown.\n'
+            'Ниже будет представлена следующая информация, для каждого чанка:\n'
+            '1. Путь, который представляет иерархию заголовков страниц откуда был получен чанк.\n'
+            '2. Контекст который дает саммари страницы, из которой взят чанк.\n'
+            '3. Текст чанка.\n'
+            '4. Дата и время актуальности чанка.\n'
+            'Используя наиболее релевантные данные, ответь на вопрос пользователя '
+            'c **оформлением в markdown**.\n'
+            'Чанков может и не быть, в этом случае попроси пользователя уточнить запрос.\n'
+            '**Запрещено говорить пользователю о существовании чанков. '
+            'Важна только информация которая в них содержится! '
+            'Ссылки на источники в формате [N] допустимы.**\n'
+            'Если релевантной информации недостаточно, то задай уточняющие вопросы пользователю.\n'
+            'Не придумывай и не додумывай, руководствуйся только информацией из чанков!\n'
+            'При формировании ответа обращай внимание на дату и время актуальности информации. '
+            'Отдавай предпочтение более свежей информации в чанках.\n'
+            'В конце выдай пользователю ссылки для самостоятельного уточнения информации '
+            '(только на основании чанков, если они есть).\n'
+            'Если в ответе есть диаграмма, переделай ее в нотацию mermaid!\n'
+            'Важно: Диаграммы и схемы включай в ответ только если об этом попросит пользователь!\n\n'
+            'Еще информация, которая может тебе понадобиться (говори только если об этом спрашивают):\n'
+            'Тебя создали в Машинном отделении (МО).\n'
+            'Твое имя – Мораг, а если спросят почему, то отшучивайся.\n'
+            'Текущая дата и время: {current_datetime}\n'
+            'Текущий день недели: {current_weekday}\n'
+            'Имя текущего пользователя: {user_name}'
         )
 
         CITATION_MAX_CHARS: int = 5000  # лимит символов в citation-превью
         HTTP_TIMEOUT: int = 180  # таймаут HTTP-запросов (секунды)
 
     def __init__(self):
+        print(_LOGO, flush=True)
         self.valves = self.Valves(
             QDRANT_URL=os.getenv('QDRANT_URL', 'http://qdrant:6333'),
             QDRANT_COLLECTION=os.getenv('QDRANT_COLLECTION', 'chunks'),
@@ -167,7 +194,11 @@ class Pipeline:
 
         # 5. Стриминг финального ответа
         context = self._build_context(result_chunks, doc_summaries)
-        yield from self._stream_answer(messages, context)
+        user_name = ''
+        user_info = body.get('__user__', {}) if body else {}
+        if isinstance(user_info, dict):
+            user_name = user_info.get('name', user_info.get('email', ''))
+        yield from self._stream_answer(messages, context, user_name=user_name)
 
     # ── Intent extraction ─────────────────────────────────────────────────────
 
@@ -281,8 +312,15 @@ class Pipeline:
         resp.raise_for_status()
         return resp.json()['choices'][0]['message']['content']
 
-    def _stream_answer(self, messages: list, context: str) -> Generator:
-        system_msg = {'role': 'system', 'content': self.valves.SYSTEM_PROMPT}
+    def _stream_answer(self, messages: list, context: str, user_name: str = '') -> Generator:
+        now = datetime.now(timezone.utc)
+        weekdays_ru = ['понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье']
+        prompt_text = self.valves.SYSTEM_PROMPT.format(
+            current_datetime=now.strftime('%Y-%m-%d %H:%M:%S UTC'),
+            current_weekday=weekdays_ru[now.weekday()],
+            user_name=user_name or 'неизвестен',
+        )
+        system_msg = {'role': 'system', 'content': prompt_text}
         augmented = [system_msg] + messages + [{'role': 'user', 'content': context}]
         payload = {
             'model': self.valves.LLM_MODEL,
