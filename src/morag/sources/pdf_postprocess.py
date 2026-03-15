@@ -13,6 +13,8 @@ from difflib import SequenceMatcher
 
 logger = logging.getLogger(__name__)
 
+_PAGE_MARKER_RE = re.compile(r'<!-- page:\d+ -->\n?')
+
 
 class PdfPostProcessor(ABC):
     """Базовый класс постпроцессора PDF-конвертации."""
@@ -104,6 +106,11 @@ class DeduplicatePostProcessor(PdfPostProcessor):
         for para in paragraphs:
             stripped = para.strip()
             if not stripped:
+                continue
+
+            # Абзацы с маркерами страниц не дедуплицируем — маркеры нужны для grounding
+            if _PAGE_MARKER_RE.search(stripped):
+                result.append(para)
                 continue
 
             # Короткие абзацы (заголовки, разделители) не дедуплицируем

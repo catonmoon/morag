@@ -3,7 +3,13 @@ from datetime import datetime, timezone
 import pytest
 
 from morag.indexing.embedder import Embedder, SparseEmbedder
-from morag.indexing.processors import ChunkProcessor, DenseEmbeddingProcessor, DocumentProcessor, SparseEmbeddingProcessor
+from morag.indexing.processors import (
+    ChunkProcessor,
+    DenseEmbeddingProcessor,
+    DocumentProcessor,
+    PageMarkerProcessor,
+    SparseEmbeddingProcessor,
+)
 from morag.sources.base import Chunk, Document
 
 
@@ -268,3 +274,48 @@ class TestSparseEmbeddingProcessor:
         result = processor.process(chunk, make_document())
         assert result.vectors['full'] == [1.0, 2.0, 3.0, 4.0]
         assert 'keywords' in result.vectors
+
+
+# ---------------------------------------------------------------------------
+# PageMarkerProcessor
+# ---------------------------------------------------------------------------
+
+class TestPageMarkerProcessor:
+    def test_extracts_single_page(self):
+        processor = PageMarkerProcessor()
+        chunk = make_chunk()
+        chunk.text = '<!-- page:3 -->\nТекст третьей страницы.'
+        result = processor.process(chunk, make_document())
+        assert result.payload['pages'] == [3]
+        assert '<!-- page' not in result.text
+        assert result.text == 'Текст третьей страницы.'
+
+    def test_extracts_multiple_pages(self):
+        processor = PageMarkerProcessor()
+        chunk = make_chunk()
+        chunk.text = '<!-- page:2 -->\nНачало.\n\n<!-- page:3 -->\nПродолжение.'
+        result = processor.process(chunk, make_document())
+        assert result.payload['pages'] == [2, 3]
+        assert '<!-- page' not in result.text
+
+    def test_no_markers_no_pages_key(self):
+        processor = PageMarkerProcessor()
+        chunk = make_chunk()
+        chunk.text = 'Обычный текст без маркеров.'
+        result = processor.process(chunk, make_document())
+        assert 'pages' not in result.payload
+        assert result.text == 'Обычный текст без маркеров.'
+
+    def test_deduplicates_page_numbers(self):
+        processor = PageMarkerProcessor()
+        chunk = make_chunk()
+        chunk.text = '<!-- page:5 -->\nА.\n<!-- page:5 -->\nБ.'
+        result = processor.process(chunk, make_document())
+        assert result.payload['pages'] == [5]
+
+    def test_strips_marker_newline(self):
+        processor = PageMarkerProcessor()
+        chunk = make_chunk()
+        chunk.text = '<!-- page:1 -->\nТекст.'
+        result = processor.process(chunk, make_document())
+        assert result.text == 'Текст.'
