@@ -186,6 +186,7 @@ class Pipeline:
             yield self._emit_source(
                 doc_name, chunk['text'][:self.valves.CITATION_MAX_CHARS], chunk.get('url'),
                 source_id=chunk['chunk_id'],
+                pages=chunk.get('pages'),
             )
 
         # Достать doc_summary для каждого уникального документа из результатов
@@ -535,12 +536,17 @@ class Pipeline:
         return {'event': {'type': 'status', 'data': {'description': f'{emoji} {text}', 'done': done}}}
 
     @staticmethod
-    def _emit_source(name: str, content: str, url: str | None = None, source_id: str | None = None) -> dict[str, Any]:
+    def _emit_source(
+        name: str, content: str, url: str | None = None,
+        source_id: str | None = None, pages: list[int] | None = None,
+    ) -> dict[str, Any]:
         metadata: dict[str, Any] = {'source': source_id or name, 'name': name, 'html': False}
         source: dict[str, Any] = {'name': name}
         if url:
             metadata['url'] = url
             source['url'] = url
+        if pages:
+            metadata['pages'] = pages
         return {
             'event': {
                 'type': 'citation',
@@ -592,5 +598,6 @@ def _point_to_chunk(p: dict) -> dict:
         'creator': payload.get('creator', ''),
         'url': payload.get('url'),
         'source_type': payload.get('source_type', ''),
+        'pages': payload.get('pages', []),
         'score': p.get('score', 0.0),
     }
