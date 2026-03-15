@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
 
 from openai import AsyncOpenAI
@@ -19,7 +20,29 @@ class GenerationParams:
     top_k: int = 0
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
+    repetition_penalty: float | None = None  # vLLM/omlx: >1.0 штрафует повторы
     seed: int | None = None
+    enable_thinking: bool | None = None  # включить/выключить thinking; None = default
+
+
+_THINKING_RE = re.compile(r'<think>.*?</think>\s*', flags=re.DOTALL)
+
+
+def _strip_thinking(text: str) -> str:
+    """Удалить блоки <think>...</think> из ответа thinking-моделей."""
+    return _THINKING_RE.sub('', text)
+
+
+def _build_extra_body(params: GenerationParams) -> dict | None:
+    """Собрать extra_body для нестандартных параметров (top_k, repetition_penalty, thinking)."""
+    extra: dict = {}
+    if params.top_k != 0:
+        extra['top_k'] = params.top_k
+    if params.repetition_penalty is not None:
+        extra['repetition_penalty'] = params.repetition_penalty
+    if params.enable_thinking is not None:
+        extra['chat_template_kwargs'] = {'enable_thinking': params.enable_thinking}
+    return extra or None
 
 
 def _is_model_unavailable(exc: Exception) -> bool:
@@ -128,12 +151,13 @@ class LLMClient:
         )
         if params.seed is not None:
             kwargs['seed'] = params.seed
-        if params.top_k != 0:
-            kwargs['extra_body'] = {'top_k': params.top_k}
+        extra_body = _build_extra_body(params)
+        if extra_body:
+            kwargs['extra_body'] = extra_body
         if max_tokens is not None:
             kwargs['max_tokens'] = max_tokens
         response = await self._create(**kwargs)
-        return response.choices[0].message.content or ''
+        return _strip_thinking(response.choices[0].message.content or '')
 
     async def complete_vision(
         self,
@@ -141,12 +165,15 @@ class LLMClient:
         image_base64: str,
         media_type: str = 'image/png',
         max_tokens: int | None = None,
+        params: GenerationParams | None = None,
     ) -> str:
         """Описать изображение через multimodal LLM (Vision).
 
         Принимает изображение в формате base64 и текстовый запрос.
         Возвращает текстовое описание изображения.
         """
+        if params is None:
+            params = GenerationParams()
         messages = [
             {
                 'role': 'user',
@@ -162,12 +189,19 @@ class LLMClient:
         kwargs: dict = dict(
             model=self._model,
             messages=messages,
-            temperature=0.0,
+            temperature=params.temperature,
+            frequency_penalty=params.frequency_penalty,
+            presence_penalty=params.presence_penalty,
         )
+        if params.seed is not None:
+            kwargs['seed'] = params.seed
+        extra_body = _build_extra_body(params)
+        if extra_body:
+            kwargs['extra_body'] = extra_body
         if max_tokens is not None:
             kwargs['max_tokens'] = max_tokens
         response = await self._create(**kwargs)
-        return response.choices[0].message.content or ''
+        return _strip_thinking(response.choices[0].message.content or '')
 
     async def complete_json(
         self,
@@ -197,10 +231,11 @@ class LLMClient:
         )
         if params.seed is not None:
             kwargs['seed'] = params.seed
-        if params.top_k != 0:
-            kwargs['extra_body'] = {'top_k': params.top_k}
+        extra_body = _build_extra_body(params)
+        if extra_body:
+            kwargs['extra_body'] = extra_body
         response = await self._create(**kwargs)
-        content = response.choices[0].message.content or '{}'
+        content = _strip_thinking(response.choices[0].message.content or '{}')
         logger.debug('LLM raw response: %s', content)
         try:
             return json.loads(content)
