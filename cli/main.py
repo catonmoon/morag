@@ -27,6 +27,7 @@ from morag.indexing.processors import (
     DocSummaryProcessor,
     DocTitleProcessor,
     MetadataProcessor,
+    PageMarkerProcessor,
     SparseEmbeddingProcessor,
 )
 from morag.indexing.token_counter import TiktokenCounter
@@ -252,6 +253,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         ))
 
     chunk_processors = [
+        PageMarkerProcessor(),
         MetadataProcessor(),
         DenseEmbeddingProcessor(embedder),
         SparseEmbeddingProcessor(sparse_embedder),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from abc import ABC, abstractmethod
 
 from morag.indexing.embedder import Embedder, SparseEmbedder
@@ -266,6 +267,24 @@ class DocTitleProcessor(DocumentProcessor):
             )
 
         return document
+
+
+_PAGE_MARKER_RE = re.compile(r'<!-- page:(\d+) -->\n?')
+
+
+class PageMarkerProcessor(ChunkProcessor):
+    """Извлекает номера страниц из маркеров <!-- page:N --> в тексте чанка.
+
+    Сохраняет список страниц в chunk.payload['pages'] и удаляет маркеры из текста,
+    чтобы они не попали в эмбеддинги. Должен выполняться до embedding-процессоров.
+    """
+
+    def process(self, chunk: Chunk, document: Document) -> Chunk:
+        markers = _PAGE_MARKER_RE.findall(chunk.text)
+        if markers:
+            chunk.payload['pages'] = sorted({int(m) for m in markers})
+        chunk.text = _PAGE_MARKER_RE.sub('', chunk.text)
+        return chunk
 
 
 class MetadataProcessor(ChunkProcessor):

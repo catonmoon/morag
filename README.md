@@ -70,7 +70,6 @@ Source.get_metadata() → full sync → BFS по parent_doc_ids
 ```
 
 Режимы чанкинга: `semantic` (default, на эмбеддингах), `passthrough`, `llm`. Контекст: `noop` или `llm`.
-
 ### Источники данных
 
 | Источник | `source_type` |

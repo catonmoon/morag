@@ -458,14 +458,17 @@ class VisionPdfConverter(PdfConverter):
                 for i, img in enumerate(page_images)
             ]))
 
-        # Сшиваем в порядке страниц, пропуская None
-        page_markdowns = [md for md in results if md]
+        # Сшиваем в порядке страниц с маркерами, пропуская None
+        page_markdowns = [
+            f'<!-- page:{i + 1} -->\n{md}'
+            for i, md in enumerate(results) if md
+        ]
 
         if not page_markdowns:
             logger.error('Vision LLM returned no content for %s', filename)
             return None
 
-        result = '\n\n---\n\n'.join(page_markdowns)
+        result = '\n\n'.join(page_markdowns)
 
         for pp in self._postprocessors:
             result = pp.process(result)
