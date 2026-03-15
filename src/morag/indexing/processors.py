@@ -19,7 +19,8 @@ def _llm_params(enable_thinking: bool | None = None) -> GenerationParams:
 
 _SUMMARY_PROMPT_NO_PARENT = """\
 Кратко опиши содержание документа — о чём он, какую задачу решает или что описывает. \
-Пиши только саммари, без вводных фраз.
+Пиши только саммари, без вводных фраз. \
+Отвечай на языке оригинального документа.
 
 Документ:
 {doc_text}\
@@ -27,7 +28,8 @@ _SUMMARY_PROMPT_NO_PARENT = """\
 
 _SUMMARY_PROMPT_WITH_PARENTS = """\
 Кратко опиши содержание документа с учётом его места в иерархии. \
-Пиши только саммари, без вводных фраз.
+Пиши только саммари, без вводных фраз. \
+Отвечай на языке оригинального документа.
 
 Контекст родительских документов:
 {parent_context}
@@ -189,6 +191,77 @@ class DocSummaryProcessor(DocumentProcessor):
         except Exception:
             logger.warning(
                 'DocSummaryProcessor: LLM call failed for %s, summary skipped',
+                document.id, exc_info=True,
+            )
+
+        return document
+
+
+_TITLE_PROMPT = """\
+Определи название документа по его содержимому. \
+Если в тексте есть явный заголовок или титульная страница — используй его. \
+Если явного заголовка нет — сформулируй короткое название, отражающее суть документа.
+
+Требования:
+- Верни ТОЛЬКО название, без кавычек, без пояснений, без вводных фраз.
+- Название должно быть на языке оригинального документа.
+- Название должно быть кратким (до 10 слов).
+
+Документ:
+{doc_text}\
+"""
+
+
+class DocTitleProcessor(DocumentProcessor):
+    """Определяет название документа через LLM и сохраняет в payload['title'].
+
+    Просматривает первые scan_tokens токенов документа, отправляет в LLM
+    для определения названия. Структурные документы и документы без текста пропускаются.
+    """
+
+    def __init__(
+        self,
+        llm_client: LLMClient,
+        max_tokens: int = 64,
+        scan_tokens: int = 32768,
+        token_counter: TokenCounter | None = None,
+        context_window: int = 32768,
+        enable_thinking: bool | None = None,
+    ) -> None:
+        self._client = llm_client
+        self._max_tokens = max_tokens
+        self._scan_tokens = scan_tokens
+        self._token_counter = token_counter or TiktokenCounter()
+        self._context_window = context_window
+        self._params = _llm_params(enable_thinking)
+        self._prompt_overhead = self._token_counter.count(
+            _TITLE_PROMPT.format(doc_text='')
+        )
+
+    async def process(self, document: Document) -> Document:
+        if document.structural or not document.text.strip():
+            return document
+
+        scan_limit = min(
+            self._scan_tokens,
+            self._context_window - self._prompt_overhead - self._max_tokens,
+        )
+        if scan_limit <= 0:
+            logger.warning('DocTitleProcessor: no room for doc text, skipping %s', document.id)
+            return document
+
+        doc_text = self._token_counter.truncate(document.text, scan_limit)
+        prompt = _TITLE_PROMPT.format(doc_text=doc_text)
+        messages = [{'role': 'user', 'content': prompt}]
+        try:
+            title = await self._client.complete(
+                messages, params=self._params, max_tokens=self._max_tokens,
+            )
+            document.payload['title'] = title.strip()
+            logger.info('DocTitleProcessor: %s → %s', document.id, title.strip())
+        except Exception:
+            logger.warning(
+                'DocTitleProcessor: LLM call failed for %s, title skipped',
                 document.id, exc_info=True,
             )
 

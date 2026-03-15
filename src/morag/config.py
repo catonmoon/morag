@@ -58,6 +58,11 @@ class RetryConfig(BaseModel):
     max_retries: int = 3    # количество повторных попыток (0 = без retry)
 
 
+class DocTitleConfig(BaseModel):
+    max_tokens: int | None = None  # лимит токенов ответа LLM; None — генерация названия отключена
+    scan_tokens: int = 32768       # глубина просмотра документа (токены от начала)
+
+
 class DocSummaryConfig(BaseModel):
     max_tokens: int | None = None  # лимит токенов ответа LLM; None — генерация саммари отключена
 
@@ -119,6 +124,7 @@ class IndexingConfig(BaseModel):
     vision_max_tokens: int = 1024  # лимит токенов ответа Vision LLM (изображения, формулы)
     concurrency: int = 1  # количество документов, обрабатываемых параллельно
     schedule: str | None = None  # cron-выражение для serve-режима (например '0 */6 * * *')
+    doc_title: DocTitleConfig = DocTitleConfig()  # генерация названия документа; max_tokens=None — отключено
     doc_summary: DocSummaryConfig = DocSummaryConfig()  # генерация саммари документов; max_tokens=None — отключено
 
 
