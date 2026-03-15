@@ -4,9 +4,8 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from morag.llm.client import LLMClient
 from morag.sources.base import Document, Source
-from morag.sources.pdf_converter import DoclingPdfConverter, PdfConverter
+from morag.sources.pdf_converter import PdfConverter
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +13,7 @@ logger = logging.getLogger(__name__)
 class PdfSource(Source):
     """Источник локальных PDF-файлов.
 
-    Рекурсивно сканирует директорию, конвертирует PDF → Markdown через PdfConverter,
-    обрабатывает изображения и формулы через Vision LLM.
+    Рекурсивно сканирует директорию, конвертирует PDF → Markdown через PdfConverter.
     parent_doc_ids ссылается на структурные документы директорий (создаются DirectorySource).
     """
 
@@ -26,19 +24,10 @@ class PdfSource(Source):
     def __init__(
         self,
         root: Path | str,
-        docling_base_url: str,
-        docling_timeout: int = 300,
-        vision_client: LLMClient | None = None,
-        vision_max_tokens: int | None = None,
-        converter: PdfConverter | None = None,
+        converter: PdfConverter,
     ) -> None:
         self._root = Path(root).resolve()
-        self._converter = converter or DoclingPdfConverter(
-            docling_base_url=docling_base_url,
-            docling_timeout=docling_timeout,
-            vision_client=vision_client,
-            vision_max_tokens=vision_max_tokens,
-        )
+        self._converter = converter
 
     async def get_metadata(self) -> list[Document]:
         """Вернуть стабы PDF-файлов (без конвертации)."""

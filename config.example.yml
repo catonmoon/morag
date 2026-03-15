@@ -11,7 +11,7 @@ sources:
     # skip_ancestor_ids: ["333444"]            # исключить эти страницы и всех их потомков
     # min_image_size_bytes: 3072              # пропускать изображения меньше N байт (SVG всегда пропускаются); не задано — без фильтрации
     # timeout: 180                            # таймаут HTTP-запросов к Confluence API (секунды; по умолчанию 180)
-    # attachments:                            # обработка вложений (PDF и др.) — требует docling
+    # attachments:                            # обработка вложений (PDF и др.) — требует секцию pdf
     #   enabled: true                         # по умолчанию false
     #   mime_types:                           # фильтр по MIME-типу (по умолчанию только PDF)
     #     - application/pdf
@@ -33,9 +33,13 @@ qdrant:
   collection_docs: docs
   collection_chunks: chunks
 
+# LLM для текстовых задач (чанкинг, контекст, саммари)
+# Рекомендуется: qwen3.5:9b через Ollama — нативно мультимодальная модель,
+# используется и для текста, и для vision (см. llm_vision ниже).
+# Установка: ollama pull qwen3.5:9b
 llm:
   base_url: http://localhost:11434/v1
-  model: qwen3-coder:30b              # рекомендуется: qwen3-coder:30b; см. README → Ollama
+  model: qwen3.5:9b
   api_key: ollama
   # timeout: 180                  # таймаут HTTP-запросов к LLM (секунды; по умолчанию 180)
   # context_window: 32768         # контекстное окно модели в токенах (по умолчанию 32768)
@@ -43,29 +47,58 @@ llm:
   #   max_retries: 3              # количество повторов (0 = без retry; по умолчанию 3)
   # model_wait_seconds: 300       # ожидание перезагрузки модели (сек; 0 = не ждать)
   # model_wait_retries: 3         # количество попыток ожидания модели
+  # enable_thinking: false        # отключить thinking-режим (для thinking-моделей; по умолчанию не задано)
 
-# llm_vision — multimodal LLM для описания изображений из Confluence и PDF (опционально)
-# Если не задан, изображения пропускаются при индексации
-# llm_vision:
-#   base_url: http://localhost:11434/v1
-#   model: qwen3-vl:30b            # поддерживает vision
-#   api_key: ollama
+# llm_vision — multimodal LLM для описания изображений из Confluence и конвертации PDF
+# Рекомендуется: та же qwen3.5:9b — нативно мультимодальная, не нужна отдельная VL-модель.
+# Для thinking-моделей обязательно enable_thinking: false (OCR — перцептивная задача,
+# thinking тратит бюджет max_tokens на рассуждения вместо полезного контента).
+# Если не задан, изображения пропускаются при индексации.
+llm_vision:
+  base_url: http://localhost:11434/v1
+  model: qwen3.5:9b
+  api_key: ollama
+  enable_thinking: false           # отключить thinking для OCR-задач
+  # timeout: 180                   # таймаут HTTP-запросов (секунды; по умолчанию 180)
+  # model_wait_seconds: 300        # ожидание перезагрузки модели (сек; 0 = не ждать)
+  # model_wait_retries: 3          # количество попыток ожидания модели
 
-# docling — сервис конвертации PDF/DOCX → Markdown (опционально)
-# Если не задан, PDF-файлы в local_documents пропускаются
-# docling:
-#   base_url: http://localhost:5001   # URL docling-serve
-#   timeout: 300                       # таймаут конвертации (секунды; по умолчанию 300)
+# pdf — конвертация PDF → Markdown (опционально)
+# Если не задан, PDF-файлы пропускаются при индексации.
+# Два режима:
+#   vision  — каждая страница рендерится в PNG и отправляется в llm_vision (требует llm_vision)
+#   docling — конвертация через docling-serve + Vision LLM для изображений/формул
+# Рекомендуется: vision с qwen3.5:9b — сопоставимое с docling качество, проще деплой.
+pdf:
+  mode: vision                       # 'docling' | 'vision'
+  dpi: 144                           # разрешение рендеринга страниц (vision-режим; по умолчанию 144)
+  page_max_tokens: 8192              # лимит токенов ответа LLM на страницу (vision-режим; по умолчанию 4096)
+  concurrency: 16                    # параллельных запросов к Vision LLM (vision-режим; по умолчанию 1)
+  temperature: 0.1                   # немного вариативности (0.0 может кэшироваться на некоторых серверах)
+  repetition_penalty: 1.2            # штраф за повторы (>1.0 штрафует; для omlx/vLLM)
+  context_tail_lines: 0              # 0 = выключен; >0 = передать N последних строк предыдущей страницы
+  postprocessing:
+    strip_code_fences: true          # удалить orphan code fences из ответов Vision LLM
+    dedup:
+      enabled: true                  # программная дедупликация после генерации
+      threshold: 0.7                 # порог fuzzy-сходства (0..1)
+      window: 5                      # скользящее окно межабзацной дедупликации
+      min_phrase_len: 20             # мин. длина фразы для дедупликации
+  # docling:                         # настройки docling-serve (только для mode: docling)
+  #   base_url: http://localhost:5001
+  #   timeout: 300                   # таймаут конвертации (секунды; по умолчанию 300)
 
 indexing:
   chunker:
-    mode: passthrough            # passthrough | llm
+    mode: semantic                # semantic | passthrough | llm
+    min_tokens: 32                # мин. размер чанка (semantic)
+    max_tokens: 256               # макс. размер чанка (semantic)
     # block_limit: 32000         # лимит токенов для pre-split блока (в llm-режиме ограничивается: min(block_limit, (context_window - 512) / 2))
     # halving_retries: 3         # деления блока пополам при таймауте LLM (0 = выключено)
     # fallback: false            # семантический fallback при исчерпании всех попыток
   context:
-    mode: noop                   # noop | llm
-    # max_tokens: 256            # лимит токенов в ответе LLMContextGenerator; не задано — без ограничения
+    mode: llm                    # noop | llm
+    max_tokens: 256              # лимит токенов в ответе LLMContextGenerator; не задано — без ограничения
 
   # Dense-эмбеддер (FRIDA)
   # По умолчанию: локальная модель (загружается напрямую через sentence-transformers)
@@ -96,5 +129,5 @@ indexing:
   # Генерирует payload['doc_summary'] для каждого документа через LLM.
   # Учитывает иерархию: если у документа есть родители, их саммари включается в промпт.
   # Retry для LLM-вызовов наследуется из секции llm.retry.
-  # doc_summary:
-  #   max_tokens: 128             # лимит токенов ответа; не задано — генерация отключена
+  doc_summary:
+    max_tokens: 256              # лимит токенов ответа; не задано — генерация отключена

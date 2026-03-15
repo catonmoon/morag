@@ -35,12 +35,7 @@ def mock_converter():
 
 @pytest.fixture
 def source(pdf_dir, mock_converter) -> PdfSource:
-    return PdfSource(
-        pdf_dir,
-        docling_base_url='http://localhost:5001',
-        docling_timeout=30,
-        converter=mock_converter,
-    )
+    return PdfSource(pdf_dir, converter=mock_converter)
 
 
 class TestPdfSource:
@@ -101,13 +96,13 @@ class TestPdfSource:
         (tmp_path / 'readme.md').write_text('# Doc')
         (tmp_path / 'data.txt').write_text('text')
         (tmp_path / 'doc.pdf').write_bytes(b'%PDF-1.4')
-        source = PdfSource(tmp_path, 'http://localhost:5001', converter=mock_converter)
+        source = PdfSource(tmp_path, converter=mock_converter)
         stubs = await source.get_metadata()
         assert len(stubs) == 1
         assert stubs[0].id == 'doc.pdf'
 
     async def test_empty_directory(self, tmp_path, mock_converter):
-        source = PdfSource(tmp_path, 'http://localhost:5001', converter=mock_converter)
+        source = PdfSource(tmp_path, converter=mock_converter)
         stubs = await source.get_metadata()
         assert stubs == []
 
@@ -116,7 +111,7 @@ class TestPdfSourceLoadOne:
     async def test_load_one_calls_converter(self, pdf_dir, mock_converter):
         """load_one конвертирует PDF через converter и возвращает Document."""
         mock_converter.convert.return_value = '# Report\n\nSome content.'
-        source = PdfSource(pdf_dir, 'http://localhost:5001', converter=mock_converter)
+        source = PdfSource(pdf_dir, converter=mock_converter)
 
         doc = await source.load_one('report.pdf')
 
@@ -129,21 +124,21 @@ class TestPdfSourceLoadOne:
         mock_converter.convert.assert_called_once()
 
     async def test_load_one_returns_none_for_nonexistent(self, pdf_dir, mock_converter):
-        source = PdfSource(pdf_dir, 'http://localhost:5001', converter=mock_converter)
+        source = PdfSource(pdf_dir, converter=mock_converter)
         doc = await source.load_one('nonexistent.pdf')
         assert doc is None
 
     async def test_load_one_returns_none_on_converter_error(self, pdf_dir, mock_converter):
         """При ошибке конвертера возвращает None."""
         mock_converter.convert.return_value = None
-        source = PdfSource(pdf_dir, 'http://localhost:5001', converter=mock_converter)
+        source = PdfSource(pdf_dir, converter=mock_converter)
         doc = await source.load_one('report.pdf')
         assert doc is None
 
     async def test_load_one_preserves_original_metadata(self, pdf_dir, mock_converter):
         """Document содержит метаданные оригинального PDF, а не сконвертированного md."""
         mock_converter.convert.return_value = '# Doc'
-        source = PdfSource(pdf_dir, 'http://localhost:5001', converter=mock_converter)
+        source = PdfSource(pdf_dir, converter=mock_converter)
         pdf_path = pdf_dir / 'report.pdf'
         pdf_stat = pdf_path.stat()
 
@@ -156,7 +151,7 @@ class TestPdfSourceLoadOne:
     async def test_load_one_passes_bytes_to_converter(self, pdf_dir, mock_converter):
         """load_one передаёт содержимое PDF в converter.convert()."""
         mock_converter.convert.return_value = '# Doc'
-        source = PdfSource(pdf_dir, 'http://localhost:5001', converter=mock_converter)
+        source = PdfSource(pdf_dir, converter=mock_converter)
 
         await source.load_one('report.pdf')
 

@@ -72,6 +72,7 @@ class LLMConfig(BaseModel):
     retry: RetryConfig = RetryConfig()
     model_wait_seconds: int = 0   # ожидание перезагрузки модели (сек); 0 = не ждать
     model_wait_retries: int = 0   # количество попыток ожидания модели
+    enable_thinking: bool | None = None  # включить/выключить thinking; None = поведение модели по умолчанию
 
 
 class DenseEmbedderConfig(BaseModel):
@@ -121,9 +122,35 @@ class IndexingConfig(BaseModel):
     doc_summary: DocSummaryConfig = DocSummaryConfig()  # генерация саммари документов; max_tokens=None — отключено
 
 
-class DoclingConfig(BaseModel):
+class PdfDoclingConfig(BaseModel):
     base_url: str = 'http://localhost:5001'  # URL docling-serve
     timeout: int = 300                       # таймаут конвертации документа (секунды)
+
+
+class PdfDeduplicateConfig(BaseModel):
+    enabled: bool = False                    # включить дедупликацию
+    threshold: float = 0.7                   # порог fuzzy-сходства (0..1)
+    window: int = 5                          # скользящее окно (предыдущих абзацев)
+    min_phrase_len: int = 20                 # мин. длина фразы для дедупликации
+
+
+class PdfPostProcessingConfig(BaseModel):
+    strip_code_fences: bool = False              # удалять orphan code fences из ответов Vision LLM
+    dedup: PdfDeduplicateConfig = PdfDeduplicateConfig()
+
+
+class PdfConfig(BaseModel):
+    mode: str = 'docling'                    # 'docling' | 'vision'
+    dpi: int = 144                           # разрешение рендеринга страниц (vision-режим)
+    page_max_tokens: int = 4096              # лимит токенов ответа LLM на страницу (vision-режим)
+    concurrency: int = 1                     # параллельных запросов к Vision LLM (vision-режим)
+    temperature: float = 0.0                 # температура генерации (0 = детерминированная)
+    repetition_penalty: float | None = None  # штраф за повторы (>1.0); None = не передавать
+    frequency_penalty: float = 0.0           # OpenAI-стандартный штраф за частоту токенов
+    presence_penalty: float = 0.0            # OpenAI-стандартный штраф за наличие токенов
+    context_tail_lines: int = 0              # sliding window: строк хвоста предыдущей страницы (0 = выкл)
+    postprocessing: PdfPostProcessingConfig = PdfPostProcessingConfig()
+    docling: PdfDoclingConfig = PdfDoclingConfig()  # настройки docling-serve (docling-режим)
 
 
 class Config(BaseModel):
@@ -131,7 +158,7 @@ class Config(BaseModel):
     qdrant: QdrantConfig = QdrantConfig()
     llm: LLMConfig = LLMConfig()
     llm_vision: LLMConfig | None = None  # multimodal LLM для распознавания изображений (опционально)
-    docling: DoclingConfig | None = None  # docling-serve для конвертации PDF/DOCX → Markdown (опционально)
+    pdf: PdfConfig | None = None         # конвертация PDF → Markdown (опционально; mode: docling | vision)
     indexing: IndexingConfig = IndexingConfig()
 
 

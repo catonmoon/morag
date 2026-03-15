@@ -2,6 +2,7 @@
 
 PdfConverter — абстрактный интерфейс для конвертации PDF-файлов в Markdown.
 DoclingPdfConverter — реализация через docling-serve + Vision LLM для изображений и формул.
+VisionPdfConverter — реализация только через Vision LLM (постраничный рендеринг).
 """
 
 from __future__ import annotations
@@ -20,7 +21,8 @@ from tempfile import NamedTemporaryFile
 import fitz
 import httpx
 
-from morag.llm.client import LLMClient
+from morag.llm.client import GenerationParams, LLMClient
+from morag.sources.pdf_postprocess import PdfPostProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +211,7 @@ class DoclingPdfConverter(PdfConverter):
                 desc = await self._vision_client.complete_vision(
                     _IMAGE_PROMPT, img_b64, media_type='image/png',
                     max_tokens=self._vision_max_tokens,
+                    params=GenerationParams(seed=42),
                 )
                 descriptions[i] = desc
             except Exception as exc:
@@ -263,6 +266,7 @@ class DoclingPdfConverter(PdfConverter):
                 desc = await self._vision_client.complete_vision(
                     _FORMULA_PROMPT, img_b64, media_type='image/png',
                     max_tokens=self._vision_max_tokens,
+                    params=GenerationParams(seed=42),
                 )
                 descriptions[i] = desc
             except Exception as exc:
@@ -323,6 +327,195 @@ def _parse_json_content(json_content: str | dict | None, filename: str) -> dict 
     except (json.JSONDecodeError, TypeError):
         logger.warning('Failed to parse docling JSON for %s', filename)
         return None
+
+
+# Регулярное выражение для удаления обёрток ```markdown ... ```
+_CODE_FENCE_WRAP_RE = re.compile(
+    r'^```(?:markdown)?\s*\n(.*?)```\s*$',
+    re.DOTALL,
+)
+
+_VISION_PAGE_PROMPT = (
+    'Перед тобой скан страницы документа. Преобразуй её содержимое в Markdown.\n\n'
+    'Правила:\n'
+    '- Сохраняй структуру: заголовки (##), списки, абзацы.\n'
+    '- Таблицы оформляй как markdown-таблицы (| ... | ... |).\n'
+    '- Формулы записывай в LaTeX: инлайн $...$ или блочные $$...$$.\n'
+    '- Диаграммы и графики: опиши текстом в блоке вида\n'
+    '  **[Диаграмма]** *Описание: ...*\n'
+    '  Укажи тип диаграммы, оси, основные данные и тренды.\n'
+    '- Изображения (фото, скриншоты, иллюстрации): опиши кратко в блоке\n'
+    '  **[Изображение]** *Описание: ...*\n'
+    '- Не добавляй информацию, которой нет на странице.\n'
+    '- Не добавляй колонтитулы и номера страниц.\n'
+    '- НЕ оборачивай ответ в ```markdown``` или другие code fences.\n'
+    '- Отвечай ТОЛЬКО markdown-содержимым страницы, без вступлений и пояснений.'
+)
+
+_VISION_PAGE_PROMPT_WITH_CONTEXT = (
+    'Перед тобой скан страницы документа. Преобразуй её содержимое в Markdown.\n\n'
+    'Для справки — конец предыдущей страницы:\n'
+    '---\n'
+    '{prev_tail}\n'
+    '---\n\n'
+    'Правила:\n'
+    '- Преобразуй ВСЁ содержимое текущей страницы. Не пропускай текст, '
+    'даже если он частично совпадает с концом предыдущей страницы.\n'
+    '- Если предложение начато на предыдущей странице и продолжается на текущей, '
+    'начни с продолжения этого предложения.\n'
+    '- Сохраняй структуру: заголовки (##), списки, абзацы.\n'
+    '- Таблицы оформляй как markdown-таблицы (| ... | ... |).\n'
+    '- Формулы записывай в LaTeX: инлайн $...$ или блочные $$...$$.\n'
+    '- Диаграммы и графики: опиши текстом в блоке вида\n'
+    '  **[Диаграмма]** *Описание: ...*\n'
+    '  Укажи тип диаграммы, оси, основные данные и тренды.\n'
+    '- Изображения (фото, скриншоты, иллюстрации): опиши кратко в блоке\n'
+    '  **[Изображение]** *Описание: ...*\n'
+    '- Не добавляй информацию, которой нет на странице.\n'
+    '- Не добавляй колонтитулы и номера страниц.\n'
+    '- НЕ оборачивай ответ в ```markdown``` или другие code fences.\n'
+    '- Отвечай ТОЛЬКО markdown-содержимым страницы, без вступлений и пояснений.'
+)
+
+_CONTEXT_TAIL_LINES = 15  # количество строк хвоста предыдущей страницы
+
+
+def _strip_code_fences(text: str) -> str:
+    """Убрать обёртку ```markdown ... ``` из ответа LLM."""
+    stripped = text.strip()
+    m = _CODE_FENCE_WRAP_RE.match(stripped)
+    if m:
+        return m.group(1).strip()
+    return stripped
+
+
+class VisionPdfConverter(PdfConverter):
+    """Конвертация PDF через Vision LLM: постраничный рендеринг → markdown."""
+
+    def __init__(
+        self,
+        vision_client: LLMClient,
+        max_tokens: int = 4096,
+        dpi: int = 144,
+        concurrency: int = 1,
+        generation_params: GenerationParams | None = None,
+        context_tail_lines: int = 0,
+        postprocessors: list[PdfPostProcessor] | None = None,
+    ) -> None:
+        self._vision_client = vision_client
+        self._max_tokens = max_tokens
+        self._zoom = dpi / 72.0  # PDF default is 72 DPI
+        self._semaphore = asyncio.Semaphore(concurrency)
+        self._gen_params = generation_params
+        self._context_tail_lines = context_tail_lines
+        self._postprocessors = postprocessors or []
+
+    async def convert(self, pdf_bytes: bytes, filename: str) -> str | None:
+        """Конвертировать PDF постранично через Vision LLM."""
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype='pdf')
+        except Exception as exc:
+            logger.error('Failed to open PDF %s: %s', filename, exc)
+            return None
+
+        page_count = len(doc)
+        logger.info(
+            'Processing %d page(s) of %s via Vision LLM (concurrency=%d, context_tail=%d)...',
+            page_count, filename, self._semaphore._value, self._context_tail_lines,
+        )
+
+        loop = asyncio.get_event_loop()
+        mat = fitz.Matrix(self._zoom, self._zoom)
+
+        # Рендерим все страницы параллельно в executor
+        render_tasks = [
+            loop.run_in_executor(None, self._render_page, doc, i, mat)
+            for i in range(page_count)
+        ]
+        page_images = await asyncio.gather(*render_tasks)
+        doc.close()
+
+        use_sliding = self._context_tail_lines > 0
+
+        if use_sliding:
+            # Последовательная обработка с передачей хвоста предыдущей страницы
+            results: list[str | None] = []
+            prev_tail: str | None = None
+            for idx, img_b64 in enumerate(page_images):
+                md = await self._process_page(
+                    idx, img_b64, page_count, filename, prev_tail,
+                )
+                results.append(md)
+                if md:
+                    lines = md.splitlines()
+                    prev_tail = '\n'.join(lines[-self._context_tail_lines:])
+                else:
+                    prev_tail = None
+        else:
+            # Параллельная обработка (без контекста)
+            results = list(await asyncio.gather(*[
+                self._process_page(i, img, page_count, filename, None)
+                for i, img in enumerate(page_images)
+            ]))
+
+        # Сшиваем в порядке страниц, пропуская None
+        page_markdowns = [md for md in results if md]
+
+        if not page_markdowns:
+            logger.error('Vision LLM returned no content for %s', filename)
+            return None
+
+        result = '\n\n---\n\n'.join(page_markdowns)
+
+        for pp in self._postprocessors:
+            result = pp.process(result)
+
+        return result
+
+    async def _process_page(
+        self,
+        idx: int,
+        img_b64: str | None,
+        page_count: int,
+        filename: str,
+        prev_tail: str | None,
+    ) -> str | None:
+        """Обработать одну страницу через Vision LLM."""
+        if img_b64 is None:
+            logger.warning('Skipping page %d of %s: render failed', idx + 1, filename)
+            return None
+        if prev_tail:
+            prompt = _VISION_PAGE_PROMPT_WITH_CONTEXT.format(prev_tail=prev_tail)
+        else:
+            prompt = _VISION_PAGE_PROMPT
+        async with self._semaphore:
+            try:
+                raw = await self._vision_client.complete_vision(
+                    prompt, img_b64,
+                    media_type='image/png',
+                    max_tokens=self._max_tokens,
+                    params=self._gen_params,
+                )
+                md = _strip_code_fences(raw) if raw else None
+                logger.info('Page %d/%d of %s done', idx + 1, page_count, filename)
+                return md
+            except Exception as exc:
+                logger.warning(
+                    'Vision LLM failed for page %d of %s: %s', idx + 1, filename, exc,
+                )
+                return None
+
+    @staticmethod
+    def _render_page(doc: fitz.Document, page_idx: int, mat: fitz.Matrix) -> str | None:
+        """Отрендерить страницу PDF в base64 PNG."""
+        try:
+            page = doc[page_idx]
+            pix = page.get_pixmap(matrix=mat)
+            img_bytes = pix.tobytes('png')
+            return base64.b64encode(img_bytes).decode()
+        except Exception as exc:
+            logger.warning('Failed to render page %d: %s', page_idx + 1, exc)
+            return None
 
 
 def _parse_elements(

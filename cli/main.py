@@ -10,7 +10,7 @@ import sys
 
 from qdrant_client import AsyncQdrantClient
 
-from morag.config import DenseEmbedderConfig, RetryConfig, SparseEmbedderConfig, load_config
+from morag.config import Config, DenseEmbedderConfig, PdfConfig, RetryConfig, SparseEmbedderConfig, load_config
 from morag.indexing.chunker import LLMChunker, PassthroughChunker, SemanticChunker
 from morag.indexing.context import LLMContextGenerator, NoopContextGenerator
 from morag.indexing.embedder import (
@@ -29,14 +29,15 @@ from morag.indexing.processors import (
     SparseEmbeddingProcessor,
 )
 from morag.indexing.token_counter import TiktokenCounter
-from morag.llm.client import LLMClient
+from morag.llm.client import GenerationParams, LLMClient
 from morag.llm.retry import RetryPolicy
 from morag.sources.confluence import ConfluenceSource
 from morag.sources.confluence_pdf import ConfluencePdfSource
 from morag.sources.jira import JiraSource
 from morag.sources.jira_extractor import JiraLinkExtractor
 from morag.sources.local import LocalDocumentSource
-from morag.sources.pdf_converter import DoclingPdfConverter
+from morag.sources.pdf_converter import DoclingPdfConverter, PdfConverter, VisionPdfConverter
+from morag.sources.pdf_postprocess import CodeFencePostProcessor, DeduplicatePostProcessor, PdfPostProcessor
 from morag.storage.collections import (
     ensure_chunks_collection,
     ensure_docs_collection,
@@ -44,6 +45,20 @@ from morag.storage.collections import (
     gte_sparse_vectors_config,
 )
 from morag.storage.repository import ChunkRepository, DocRepository
+
+def _build_postprocessors(pdf_config: PdfConfig) -> list[PdfPostProcessor]:
+    """Собрать цепочку постпроцессоров по конфигу."""
+    processors: list[PdfPostProcessor] = []
+    if pdf_config.postprocessing.strip_code_fences:
+        processors.append(CodeFencePostProcessor())
+    if pdf_config.postprocessing.dedup.enabled:
+        processors.append(DeduplicatePostProcessor(
+            threshold=pdf_config.postprocessing.dedup.threshold,
+            window=pdf_config.postprocessing.dedup.window,
+            min_phrase_len=pdf_config.postprocessing.dedup.min_phrase_len,
+        ))
+    return processors
+
 
 def _make_retry(cfg: RetryConfig) -> RetryPolicy:
     return RetryPolicy(max_retries=cfg.max_retries)
@@ -59,6 +74,49 @@ def _make_sparse_embedder(cfg: SparseEmbedderConfig) -> SparseEmbedder:
     if cfg.base_url is not None:
         return HttpGteSparseEmbedder(cfg.base_url, cfg.timeout, retry_policy=_make_retry(cfg.retry))
     return GteSparseEmbedder(cfg.model, device=cfg.device)
+
+
+def _make_pdf_converter(
+    config: Config,
+    vision_client: LLMClient | None,
+) -> PdfConverter | None:
+    """Создать PDF-конвертер по конфигу."""
+    if config.pdf is None:
+        return None
+
+    mode = config.pdf.mode
+    if mode == 'vision':
+        if vision_client is None:
+            logger.error('pdf.mode=vision requires llm_vision to be configured')
+            return None
+        gen_params = GenerationParams(
+            temperature=config.pdf.temperature,
+            repetition_penalty=config.pdf.repetition_penalty,
+            frequency_penalty=config.pdf.frequency_penalty,
+            presence_penalty=config.pdf.presence_penalty,
+            seed=42,
+            enable_thinking=config.llm_vision.enable_thinking,
+        )
+        postprocessors = _build_postprocessors(config.pdf)
+        return VisionPdfConverter(
+            vision_client=vision_client,
+            max_tokens=config.pdf.page_max_tokens,
+            dpi=config.pdf.dpi,
+            concurrency=config.pdf.concurrency,
+            generation_params=gen_params,
+            context_tail_lines=config.pdf.context_tail_lines,
+            postprocessors=postprocessors,
+        )
+    elif mode == 'docling':
+        return DoclingPdfConverter(
+            docling_base_url=config.pdf.docling.base_url,
+            docling_timeout=config.pdf.docling.timeout,
+            vision_client=vision_client,
+            vision_max_tokens=config.indexing.vision_max_tokens,
+        )
+    else:
+        logger.error('Unknown pdf.mode: %s (expected "docling" or "vision")', mode)
+        return None
 
 
 logging.basicConfig(
@@ -117,20 +175,17 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         )
         logger.info('Vision LLM: %s @ %s', config.llm_vision.model, config.llm_vision.base_url)
 
+    # Фабрика PDF-конвертера
+    pdf_converter = _make_pdf_converter(config, vision_client)
+
     local_source = None
     if config.sources.local_documents:
         local_source = LocalDocumentSource(
             root=config.sources.local_documents.path,
-            docling_base_url=config.docling.base_url if config.docling else None,
-            docling_timeout=config.docling.timeout if config.docling else 300,
-            vision_client=vision_client,
-            vision_max_tokens=config.indexing.vision_max_tokens,
+            pdf_converter=pdf_converter,
         )
-        logger.info(
-            'Source: local_documents path=%s (docling=%s)',
-            config.sources.local_documents.path,
-            config.docling.base_url if config.docling else 'disabled',
-        )
+        pdf_mode = config.pdf.mode if config.pdf else 'disabled'
+        logger.info('Source: local_documents path=%s (pdf=%s)', config.sources.local_documents.path, pdf_mode)
 
     sources = []
     if config.sources.confluence:
@@ -233,16 +288,10 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
 
     # Confluence PDF attachments: после страниц, чтобы parent pages уже были в базе
     if config.sources.confluence and config.sources.confluence.attachments.enabled:
-        if config.docling:
-            confluence_pdf_converter = DoclingPdfConverter(
-                docling_base_url=config.docling.base_url,
-                docling_timeout=config.docling.timeout,
-                vision_client=vision_client,
-                vision_max_tokens=config.indexing.vision_max_tokens,
-            )
+        if pdf_converter is not None:
             confluence_pdf_source = ConfluencePdfSource(
                 config=config.sources.confluence,
-                converter=confluence_pdf_converter,
+                converter=pdf_converter,
                 doc_repo=doc_repo,
             )
             logger.info(
@@ -252,7 +301,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             await pipeline.run(confluence_pdf_source)
         else:
             logger.warning(
-                'Confluence attachments enabled but docling is not configured — skipping'
+                'Confluence attachments enabled but pdf is not configured — skipping'
             )
 
     # Jira: сканируем проиндексированные документы на ссылки, затем индексируем задачи.
