@@ -10,10 +10,12 @@ from morag.sources.base import Chunk, Document
 
 logger = logging.getLogger(__name__)
 
-_LLM_PARAMS = GenerationParams(
-    temperature=0.0, top_p=1.0, top_k=0,
-    frequency_penalty=0.0, presence_penalty=0.0, seed=42,
-)
+def _llm_params(enable_thinking: bool | None = None) -> GenerationParams:
+    return GenerationParams(
+        temperature=0.0, top_p=1.0, top_k=0,
+        frequency_penalty=0.0, presence_penalty=0.0, seed=42,
+        enable_thinking=enable_thinking,
+    )
 
 _SUMMARY_PROMPT_NO_PARENT = """\
 Кратко опиши содержание документа — о чём он, какую задачу решает или что описывает. \
@@ -112,6 +114,16 @@ class SparseEmbeddingProcessor(ChunkProcessor):
         chunk.vectors['keywords'] = {'indices': indices, 'values': values}
         return chunk
 
+    def process_batch(self, chunks: list[Chunk], document: Document) -> list[Chunk]:
+        """Батчевый sparse-эмбеддинг всех чанков документа за один вызов."""
+        if not chunks:
+            return chunks
+        texts = [c.text for c in chunks]
+        results = self._embedder.embed_batch(texts)
+        for chunk, (indices, values) in zip(chunks, results):
+            chunk.vectors['keywords'] = {'indices': indices, 'values': values}
+        return chunks
+
 
 class DocSummaryProcessor(DocumentProcessor):
     """Генерирует контекстуальное саммари документа и сохраняет в payload['doc_summary'].
@@ -128,12 +140,14 @@ class DocSummaryProcessor(DocumentProcessor):
         max_tokens: int = 128,
         token_counter: TokenCounter | None = None,
         context_window: int = 32768,
+        enable_thinking: bool | None = None,
     ) -> None:
         self._client = llm_client
         self._doc_repo = doc_repo
         self._max_tokens = max_tokens
         self._token_counter = token_counter or TiktokenCounter()
         self._context_window = context_window
+        self._params = _llm_params(enable_thinking)
         self._overhead_no_parent = self._token_counter.count(
             _SUMMARY_PROMPT_NO_PARENT.format(doc_text='')
         )
@@ -169,7 +183,7 @@ class DocSummaryProcessor(DocumentProcessor):
 
         messages = [{'role': 'user', 'content': prompt}]
         try:
-            summary = await self._client.complete(messages, params=_LLM_PARAMS, max_tokens=self._max_tokens)
+            summary = await self._client.complete(messages, params=self._params, max_tokens=self._max_tokens)
             document.payload['doc_summary'] = summary.strip()
             logger.info('DocSummaryProcessor: %s (%d chars)', document.id, len(summary))
         except Exception:

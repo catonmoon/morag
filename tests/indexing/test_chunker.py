@@ -119,11 +119,11 @@ class TestLLMChunker:
         assert len(system_message['content']) > 0
 
     async def test_passes_deterministic_params(self, chunker, mock_client):
-        from morag.indexing.chunker import _LLM_PARAMS
+        from morag.indexing.chunker import _llm_params
         mock_client.complete_json.return_value = {'chunks': ['ok']}
         await chunker.chunk('Текст')
         _, kwargs = mock_client.complete_json.call_args
-        assert kwargs.get('params') == _LLM_PARAMS
+        assert kwargs.get('params') == _llm_params()
 
 
 # ---------------------------------------------------------------------------

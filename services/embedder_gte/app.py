@@ -28,6 +28,10 @@ class EncodeRequest(BaseModel):
     text: str
 
 
+class EncodeBatchRequest(BaseModel):
+    texts: List[str]
+
+
 class EncodeResponse(BaseModel):
     token_weights: List[Dict[str, float]]
 
@@ -97,3 +101,9 @@ def health():
 def encode(req: EncodeRequest):
     token_weights = _encoder.encode(req.text)
     return EncodeResponse(token_weights=[token_weights])
+
+
+@app.post('/encode_batch', response_model=EncodeResponse)
+def encode_batch(req: EncodeBatchRequest):
+    token_weights = [_encoder.encode(text) for text in req.texts]
+    return EncodeResponse(token_weights=token_weights)
