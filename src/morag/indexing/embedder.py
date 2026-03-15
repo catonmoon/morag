@@ -100,14 +100,31 @@ class HttpFridaEmbedder(Embedder):
         resp.raise_for_status()
         return resp.json()['data'][0]['embedding']
 
+    def _do_call_batch(self, texts: list[str]) -> list[list[float]]:
+        resp = self._client.post('/v1/embeddings', json={'input': texts})
+        resp.raise_for_status()
+        data = resp.json()['data']
+        data.sort(key=lambda d: d['index'])
+        return [d['embedding'] for d in data]
+
     def _call(self, text: str) -> list[float]:
         return self._retry.call_sync(lambda: self._do_call(text))
+
+    def _call_batch(self, texts: list[str]) -> list[list[float]]:
+        return self._retry.call_sync(lambda: self._do_call_batch(texts))
 
     def embed(self, text: str) -> list[float]:
         return self._call(_DOCUMENT_PREFIX + text)
 
     def embed_query(self, text: str) -> list[float]:
         return self._call(_QUERY_PREFIX + text)
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        logger.info('HttpFridaEmbedder: embed_batch %d text(s)', len(texts))
+        prefixed = [_DOCUMENT_PREFIX + t for t in texts]
+        return self._call_batch(prefixed)
 
     @property
     def dim(self) -> int:
@@ -129,6 +146,14 @@ class SparseEmbedder(ABC):
     def embed_query(self, text: str) -> tuple[list[int], list[float]]:
         """Sparse-вектор для поискового запроса."""
         ...
+
+    def embed_batch(self, texts: list[str]) -> list[tuple[list[int], list[float]]]:
+        """Батчевый sparse-эмбеддинг для хранения документов.
+
+        По умолчанию вызывает embed() по одному. Подклассы могут
+        переопределить для более эффективной батчевой обработки.
+        """
+        return [self.embed(t) for t in texts]
 
 
 def _word_to_index(word: str) -> int:
@@ -262,10 +287,8 @@ class HttpGteSparseEmbedder(SparseEmbedder):
         self._retry = retry_policy or RetryPolicy(max_retries=0)
         logger.info('HttpGteSparseEmbedder → %s', base_url)
 
-    def _do_call(self, text: str) -> tuple[list[int], list[float]]:
-        resp = self._client.post('/encode', json={'text': text})
-        resp.raise_for_status()
-        token_weights: dict[str, float] = resp.json()['token_weights'][0]
+    @staticmethod
+    def _to_sparse(token_weights: dict[str, float]) -> tuple[list[int], list[float]]:
         index_weight: dict[int, float] = {}
         for word, weight in token_weights.items():
             i = _word_to_index(word)
@@ -275,11 +298,32 @@ class HttpGteSparseEmbedder(SparseEmbedder):
                 index_weight[i] = weight
         return list(index_weight.keys()), list(index_weight.values())
 
+    def _do_call(self, text: str) -> tuple[list[int], list[float]]:
+        resp = self._client.post('/encode', json={'text': text})
+        resp.raise_for_status()
+        token_weights: dict[str, float] = resp.json()['token_weights'][0]
+        return self._to_sparse(token_weights)
+
+    def _do_call_batch(self, texts: list[str]) -> list[tuple[list[int], list[float]]]:
+        resp = self._client.post('/encode_batch', json={'texts': texts})
+        resp.raise_for_status()
+        all_weights: list[dict[str, float]] = resp.json()['token_weights']
+        return [self._to_sparse(tw) for tw in all_weights]
+
     def _call(self, text: str) -> tuple[list[int], list[float]]:
         return self._retry.call_sync(lambda: self._do_call(text))
+
+    def _call_batch(self, texts: list[str]) -> list[tuple[list[int], list[float]]]:
+        return self._retry.call_sync(lambda: self._do_call_batch(texts))
 
     def embed(self, text: str) -> tuple[list[int], list[float]]:
         return self._call(text)
 
     def embed_query(self, text: str) -> tuple[list[int], list[float]]:
         return self._call(text)
+
+    def embed_batch(self, texts: list[str]) -> list[tuple[list[int], list[float]]]:
+        if not texts:
+            return []
+        logger.info('HttpGteSparseEmbedder: embed_batch %d text(s)', len(texts))
+        return self._call_batch(texts)

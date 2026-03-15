@@ -19,10 +19,12 @@ from morag.llm.client import GenerationParams
 
 logger = logging.getLogger(__name__)
 
-_LLM_PARAMS = GenerationParams(
-    temperature=0.0, top_p=1.0, top_k=0,
-    frequency_penalty=0.0, presence_penalty=0.0, seed=42,
-)
+def _llm_params(enable_thinking: bool | None = None) -> GenerationParams:
+    return GenerationParams(
+        temperature=0.0, top_p=1.0, top_k=0,
+        frequency_penalty=0.0, presence_penalty=0.0, seed=42,
+        enable_thinking=enable_thinking,
+    )
 
 _CHUNKS_SCHEMA = {
     'type': 'object',
@@ -208,6 +210,7 @@ class LLMChunker(Chunker):
         fallback_token_limit: int = _FALLBACK_TOKEN_LIMIT,
         halving_retries: int = 0,
         fallback_enabled: bool = False,
+        enable_thinking: bool | None = None,
     ) -> None:
         self._client = client
         self._max_retries = max_retries
@@ -216,6 +219,7 @@ class LLMChunker(Chunker):
         self._fallback_token_limit = fallback_token_limit
         self._halving_retries = halving_retries
         self._fallback_enabled = fallback_enabled
+        self._params = _llm_params(enable_thinking)
 
     async def chunk(self, block: str) -> list[str]:
         return await self._chunk_with_halving(block, halving_left=self._halving_retries)
@@ -348,7 +352,7 @@ class LLMChunker(Chunker):
         try:
             data = await self._client.complete_json(
                 messages, schema=_CHUNKS_SCHEMA,
-                schema_name='chunks', params=_LLM_PARAMS,
+                schema_name='chunks', params=self._params,
             )
         except ValueError:
             logger.warning(

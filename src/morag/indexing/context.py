@@ -8,10 +8,12 @@ from morag.llm.client import GenerationParams
 
 logger = logging.getLogger(__name__)
 
-_LLM_PARAMS = GenerationParams(
-    temperature=0.0, top_p=1.0, top_k=0,
-    frequency_penalty=0.0, presence_penalty=0.0, seed=42,
-)
+def _llm_params(enable_thinking: bool | None = None) -> GenerationParams:
+    return GenerationParams(
+        temperature=0.0, top_p=1.0, top_k=0,
+        frequency_penalty=0.0, presence_penalty=0.0, seed=42,
+        enable_thinking=enable_thinking,
+    )
 
 _PROMPT_TEMPLATE = """\
 Ты — ассистент, который помогает дать контекст смысловым фрагментам документов.
@@ -65,11 +67,13 @@ class LLMContextGenerator(ContextGenerator):
         token_counter: TokenCounter | None = None,
         context_window: int = 32768,
         max_output_tokens: int | None = None,
+        enable_thinking: bool | None = None,
     ) -> None:
         self._client = client
         self._token_counter = token_counter or TiktokenCounter()
         self._context_window = context_window
         self._max_output_tokens = max_output_tokens
+        self._params = _llm_params(enable_thinking)
         self._prompt_overhead = self._token_counter.count(
             _PROMPT_TEMPLATE.format(doc_text='', chunk_text='')
         )
@@ -98,7 +102,7 @@ class LLMContextGenerator(ContextGenerator):
         prompt = _PROMPT_TEMPLATE.format(doc_text=doc_text, chunk_text=chunk_text)
         messages = [{'role': 'user', 'content': prompt}]
         try:
-            result = await self._client.complete(messages, params=_LLM_PARAMS, max_tokens=self._max_output_tokens)
+            result = await self._client.complete(messages, params=self._params, max_tokens=self._max_output_tokens)
             logger.info(
                 'LLMContextGenerator: generated context (%d chars) for chunk (%d chars)',
                 len(result), len(chunk_text),

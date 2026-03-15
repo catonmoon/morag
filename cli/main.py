@@ -215,6 +215,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             embed_fn=embedder.embed,
             halving_retries=config.indexing.chunker.halving_retries,
             fallback_enabled=config.indexing.chunker.fallback,
+            enable_thinking=config.llm.enable_thinking,
         )
     else:
         chunker = PassthroughChunker()
@@ -224,6 +225,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             token_counter=token_counter,
             context_window=config.llm.context_window,
             max_output_tokens=config.indexing.context.max_tokens,
+            enable_thinking=config.llm.enable_thinking,
         ) if config.indexing.context.mode == 'llm' else NoopContextGenerator()
     )
     sparse_embedder = _make_sparse_embedder(config.indexing.sparse_embedder)
@@ -236,6 +238,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             max_tokens=config.indexing.doc_summary.max_tokens,
             token_counter=token_counter,
             context_window=config.llm.context_window,
+            enable_thinking=config.llm.enable_thinking,
         ))
 
     chunk_processors = [
