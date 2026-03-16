@@ -403,11 +403,13 @@ class SemanticChunker(Chunker):
         counter: TokenCounter,
         min_tokens: int = 50,
         max_tokens: int = 250,
+        accept_pair: bool = False,
     ) -> None:
         self._embed_fn = embed_fn
         self._counter = counter
         self._min_tokens = min_tokens
         self._max_tokens = max_tokens
+        self._accept_pair = accept_pair
 
     async def chunk(self, block: str) -> list[str]:
         sentences = split_into_semantic_units(
@@ -461,7 +463,8 @@ class SemanticChunker(Chunker):
                 continue
 
             # Для каждого левого кандидата — правые кандидаты
-            pairs: list[tuple[int, str, str]] = []  # (left_end, left_text, right_text)
+            # (left_end, right_end, left_text, right_text)
+            pairs: list[tuple[int, int, str, str]] = []
 
             for left_end in left_ends:
                 right_ends = self._candidate_ends(sentence_tokens, left_end, forward=True)
@@ -469,14 +472,14 @@ class SemanticChunker(Chunker):
                     for right_end in right_ends:
                         left_text = ' '.join(sentences[pos:left_end])
                         right_text = ' '.join(sentences[left_end:right_end])
-                        pairs.append((left_end, left_text, right_text))
+                        pairs.append((left_end, right_end, left_text, right_text))
                 else:
                     # Остаток < min_tokens — берём что есть как правый кандидат
                     remaining = sentences[left_end:]
                     if remaining:
                         left_text = ' '.join(sentences[pos:left_end])
                         right_text = ' '.join(remaining)
-                        pairs.append((left_end, left_text, right_text))
+                        pairs.append((left_end, len(sentences), left_text, right_text))
 
             if not pairs:
                 end = left_ends[0]
@@ -485,24 +488,30 @@ class SemanticChunker(Chunker):
                 continue
 
             # Батчевый embed всех уникальных текстов
-            unique_texts = list({t for _, lt, rt in pairs for t in (lt, rt)})
+            unique_texts = list({t for _, _, lt, rt in pairs for t in (lt, rt)})
             embeddings = self._embed_fn(unique_texts)
             text_to_emb = dict(zip(unique_texts, embeddings))
 
             # Выбрать пару с максимальным cosine distance
             best_dist = -1.0
             best_left_end = left_ends[0]
+            best_right_end = left_ends[0]
 
-            for left_end, left_text, right_text in pairs:
+            for left_end, right_end, left_text, right_text in pairs:
                 dist = self._cosine_distance(
                     text_to_emb[left_text], text_to_emb[right_text],
                 )
                 if dist > best_dist:
                     best_dist = dist
                     best_left_end = left_end
+                    best_right_end = right_end
 
             chunks.append(' '.join(sentences[pos:best_left_end]))
-            pos = best_left_end
+            if self._accept_pair:
+                chunks.append(' '.join(sentences[best_left_end:best_right_end]))
+                pos = best_right_end
+            else:
+                pos = best_left_end
 
         result = chunks if chunks else [block]
 
