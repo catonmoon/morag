@@ -209,6 +209,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             counter=token_counter,
             min_tokens=config.indexing.chunker.min_tokens,
             max_tokens=config.indexing.chunker.max_tokens,
+            accept_pair=config.indexing.chunker.accept_pair,
         )
     elif chunker_mode == 'llm':
         chunker = LLMChunker(
@@ -238,6 +239,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             llm_client=llm_client,
             max_tokens=config.indexing.doc_title.max_tokens,
             scan_tokens=config.indexing.doc_title.scan_tokens,
+            scan_pages=config.indexing.doc_title.scan_pages,
             token_counter=token_counter,
             context_window=config.llm.context_window,
             enable_thinking=config.llm.enable_thinking,

@@ -52,8 +52,13 @@ class FridaEmbedder(Embedder):
     """
 
     def __init__(self, model_name: str = 'ai-forever/FRIDA') -> None:
+        import os
+        import torch
         from sentence_transformers import SentenceTransformer
-        logger.info('Loading embedding model: %s', model_name)
+        num_cpus = os.cpu_count() or 1
+        torch.set_num_threads(num_cpus)
+        torch.set_num_interop_threads(num_cpus)
+        logger.info('Loading embedding model: %s (threads=%d)', model_name, num_cpus)
         self._model = SentenceTransformer(model_name)
         self._dim = self._model.get_sentence_embedding_dimension()
         logger.info('Embedding model loaded, dim=%d', self._dim)

@@ -213,11 +213,17 @@ _TITLE_PROMPT = """\
 """
 
 
+_SCAN_PAGES_RE = re.compile(r'<!-- page:\d+ -->')
+
+
 class DocTitleProcessor(DocumentProcessor):
     """Определяет название документа через LLM и сохраняет в payload['title'].
 
-    Просматривает первые scan_tokens токенов документа, отправляет в LLM
-    для определения названия. Структурные документы и документы без текста пропускаются.
+    Два режима определения фрагмента для анализа:
+    - scan_pages: если задано и в тексте есть маркеры <!-- page:N -->,
+      берёт первые N страниц (текст до маркера страницы N+1).
+    - scan_tokens: fallback — первые N токенов от начала документа.
+    Структурные документы и документы без текста пропускаются.
     """
 
     def __init__(
@@ -225,6 +231,7 @@ class DocTitleProcessor(DocumentProcessor):
         llm_client: LLMClient,
         max_tokens: int = 64,
         scan_tokens: int = 32768,
+        scan_pages: int | None = None,
         token_counter: TokenCounter | None = None,
         context_window: int = 32768,
         enable_thinking: bool | None = None,
@@ -232,6 +239,7 @@ class DocTitleProcessor(DocumentProcessor):
         self._client = llm_client
         self._max_tokens = max_tokens
         self._scan_tokens = scan_tokens
+        self._scan_pages = scan_pages
         self._token_counter = token_counter or TiktokenCounter()
         self._context_window = context_window
         self._params = _llm_params(enable_thinking)
@@ -239,19 +247,44 @@ class DocTitleProcessor(DocumentProcessor):
             _TITLE_PROMPT.format(doc_text='')
         )
 
+    @staticmethod
+    def _extract_pages(text: str, n_pages: int) -> str | None:
+        """Извлечь первые n_pages страниц по маркерам <!-- page:N -->."""
+        markers = list(_SCAN_PAGES_RE.finditer(text))
+        if not markers:
+            return None
+        # Берём текст от начала до маркера страницы n_pages+1
+        if len(markers) > n_pages:
+            return text[:markers[n_pages].start()].rstrip()
+        return text
+
     async def process(self, document: Document) -> Document:
         if document.structural or not document.text.strip():
             return document
 
-        scan_limit = min(
-            self._scan_tokens,
-            self._context_window - self._prompt_overhead - self._max_tokens,
-        )
-        if scan_limit <= 0:
+        # Попробовать взять первые N страниц
+        doc_text: str | None = None
+        if self._scan_pages is not None:
+            doc_text = self._extract_pages(document.text, self._scan_pages)
+
+        # Fallback на scan_tokens
+        if doc_text is None:
+            scan_limit = min(
+                self._scan_tokens,
+                self._context_window - self._prompt_overhead - self._max_tokens,
+            )
+            if scan_limit <= 0:
+                logger.warning('DocTitleProcessor: no room for doc text, skipping %s', document.id)
+                return document
+            doc_text = self._token_counter.truncate(document.text, scan_limit)
+
+        # Обрезать по контекстному окну в любом случае
+        max_doc_tokens = self._context_window - self._prompt_overhead - self._max_tokens
+        if max_doc_tokens <= 0:
             logger.warning('DocTitleProcessor: no room for doc text, skipping %s', document.id)
             return document
+        doc_text = self._token_counter.truncate(doc_text, max_doc_tokens)
 
-        doc_text = self._token_counter.truncate(document.text, scan_limit)
         prompt = _TITLE_PROMPT.format(doc_text=doc_text)
         messages = [{'role': 'user', 'content': prompt}]
         try:
@@ -259,6 +292,7 @@ class DocTitleProcessor(DocumentProcessor):
                 messages, params=self._params, max_tokens=self._max_tokens,
             )
             document.payload['title'] = title.strip()
+            document.path = [title.strip()]
             logger.info('DocTitleProcessor: %s → %s', document.id, title.strip())
         except Exception:
             logger.warning(
@@ -277,6 +311,9 @@ class PageMarkerProcessor(ChunkProcessor):
 
     Сохраняет список страниц в chunk.payload['pages'] и удаляет маркеры из текста,
     чтобы они не попали в эмбеддинги. Должен выполняться до embedding-процессоров.
+
+    При батчевой обработке отслеживает «текущую страницу»: если чанк не содержит
+    маркера, он наследует последнюю известную страницу от предыдущих чанков.
     """
 
     def process(self, chunk: Chunk, document: Document) -> Chunk:
@@ -285,6 +322,19 @@ class PageMarkerProcessor(ChunkProcessor):
             chunk.payload['pages'] = sorted({int(m) for m in markers})
         chunk.text = _PAGE_MARKER_RE.sub('', chunk.text)
         return chunk
+
+    def process_batch(self, chunks: list[Chunk], document: Document) -> list[Chunk]:
+        last_page: int | None = None
+        for chunk in chunks:
+            markers = _PAGE_MARKER_RE.findall(chunk.text)
+            if markers:
+                pages = sorted({int(m) for m in markers})
+                chunk.payload['pages'] = pages
+                last_page = pages[-1]
+            elif last_page is not None:
+                chunk.payload['pages'] = [last_page]
+            chunk.text = _PAGE_MARKER_RE.sub('', chunk.text)
+        return chunks
 
 
 class MetadataProcessor(ChunkProcessor):

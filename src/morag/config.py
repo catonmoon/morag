@@ -61,6 +61,7 @@ class RetryConfig(BaseModel):
 class DocTitleConfig(BaseModel):
     max_tokens: int | None = None  # лимит токенов ответа LLM; None — генерация названия отключена
     scan_tokens: int = 32768       # глубина просмотра документа (токены от начала)
+    scan_pages: int | None = None  # альтернатива: взять первые N страниц (если есть маркеры)
 
 
 class DocSummaryConfig(BaseModel):
@@ -109,6 +110,7 @@ class ChunkerConfig(BaseModel):
     max_tokens: int = 250                # макс. размер чанка в токенах (semantic)
     halving_retries: int = 0             # деления блока пополам при таймауте LLM; 0 = выключено
     fallback: bool = False               # семантический fallback; False = при неудаче документ пропускается
+    accept_pair: bool = False            # принимать оба чанка пары (left+right) за одну итерацию (2x быстрее)
 
 
 class ContextConfig(BaseModel):
