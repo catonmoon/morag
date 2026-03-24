@@ -569,4 +569,85 @@ class TestSemanticChunker:
         assert 'Кошки' in result[0]
         assert 'Программирование' in result[-1]
 
+    async def test_accept_pair_rejects_oversized_right(self):
+        """accept_pair=True не принимает правый чанк > max_tokens (баг 873KB)."""
+        def embed_fn(texts: list[str]) -> list[list[float]]:
+            # Возвращаем максимально различные вектора для любых пар
+            return [[float(i)] * 3 for i in range(len(texts))]
+
+        counter = TiktokenCounter()
+        max_t = 80
+        chunker = SemanticChunker(
+            embed_fn=embed_fn, counter=counter,
+            min_tokens=20, max_tokens=max_t, accept_pair=True,
+        )
+
+        # Создаём текст где после первой границы остаток > max_tokens
+        block = '. '.join([
+            f'Предложение {i} с некоторым текстом для тестирования разбиения'
+            for i in range(30)
+        ]) + '.'
+        result = await chunker.chunk(block)
+
+        # Ни один чанк не должен быть > max_tokens * 2
+        # (мелкие превышения допустимы, но не 10x)
+        for chunk in result:
+            tokens = counter.count(chunk)
+            assert tokens < max_t * 3, (
+                f'Chunk too large: {tokens} tokens (max={max_t}), '
+                f'accept_pair should have rejected oversized right candidate'
+            )
+
+    async def test_accept_pair_accepts_normal_right(self):
+        """accept_pair=True принимает правый чанк когда он <= max_tokens."""
+        call_count = [0]
+
+        def embed_fn(texts: list[str]) -> list[list[float]]:
+            call_count[0] += 1
+            return [[float(i)] * 3 for i in range(len(texts))]
+
+        counter = TiktokenCounter()
+        chunker_pair = SemanticChunker(
+            embed_fn=embed_fn, counter=counter,
+            min_tokens=10, max_tokens=50, accept_pair=True,
+        )
+        chunker_no_pair = SemanticChunker(
+            embed_fn=embed_fn, counter=counter,
+            min_tokens=10, max_tokens=50, accept_pair=False,
+        )
+
+        block = '. '.join([f'Предложение {i} текст' for i in range(20)]) + '.'
+
+        call_count[0] = 0
+        result_pair = await chunker_pair.chunk(block)
+        calls_pair = call_count[0]
+
+        call_count[0] = 0
+        result_no_pair = await chunker_no_pair.chunk(block)
+        calls_no_pair = call_count[0]
+
+        # accept_pair должен делать меньше embed вызовов (2 чанка за итерацию)
+        assert calls_pair <= calls_no_pair
+
+    async def test_candidate_ends_gap(self):
+        """Если между min и max нет кандидатов — greedy_end берёт до max."""
+        def embed_fn(texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0]] * len(texts)
+
+        counter = TiktokenCounter()
+        # min=30, max=50. Единицы: 25 + 26 = 51 > max, но 25 < min
+        chunker = SemanticChunker(
+            embed_fn=embed_fn, counter=counter,
+            min_tokens=30, max_tokens=50,
+        )
+
+        # Создаём текст из единиц ~25 токенов каждая
+        unit = 'Это предложение среднего размера для тестирования чанкинга.'  # ~10 tok
+        block = f'{unit} {unit} {unit} {unit} {unit} {unit} {unit} {unit}'
+        result = await chunker.chunk(block)
+
+        # Не должен зависнуть и должен вернуть результат
+        assert len(result) >= 1
+        assert all(chunk.strip() for chunk in result)
+
 

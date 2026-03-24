@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from abc import ABC, abstractmethod
 from typing import Callable
@@ -39,54 +40,54 @@ _CHUNKS_SCHEMA = {
 }
 
 _SYSTEM_PROMPT = """\
-Ты — анализатор технической документации для RAG-системы.
-Твоя задача — разбить переданный текст на смысловые чанки для семантического поиска.
-Чанк — это минимальная самостоятельная единица знания, которая имеет смысл без чтения соседних чанков.
+You are a technical documentation analyzer for a RAG system.
+Your task is to split the provided text into semantic chunks for semantic search.
+A chunk is the smallest self-contained unit of knowledge that makes sense without reading neighboring chunks.
 
-Хороший чанк должен:
-- Описывать одну тему или один аспект темы
-- Быть понятным сам по себе
-- Содержать завершённую мысль
-- Быть полезным для поиска и ответа на вопрос
-- Быть записан в формате Markdown
-- Сохранять исходное форматирование Markdown где это возможно
-- Обязательно сохранять все ссылки без изменений (URL и Markdown-ссылки)
+A good chunk should:
+- Cover one topic or one aspect of a topic
+- Be understandable on its own
+- Contain a complete thought
+- Be useful for search and answering questions
+- Be formatted in Markdown
+- Preserve original Markdown formatting where possible
+- Preserve all links exactly as they are (URLs and Markdown links)
 
-Разбивай текст по смыслу, а не по размеру.
-Не дроби текст без необходимости: если несколько абзацев описывают одну тему — это один чанк.
+Split by meaning, not by size.
+Do not over-split: if several paragraphs describe one topic, they form a single chunk.
 
-Разделяй текст если:
-- начинается новая функция или возможность
-- начинается новый алгоритм
-- начинается новый процесс
-- меняется тема
-- начинается новый раздел документации
+Split the text when:
+- A new feature or capability begins
+- A new algorithm begins
+- A new process begins
+- The topic changes
+- A new documentation section begins
 
-Каждый чанк должен содержать достаточно контекста чтобы быть понятным отдельно.
+Each chunk must contain enough context to be understandable on its own.
 
-Входной текст может быть:
-- частью документа
-- целым разделом документа
-- целым документом
+The input text may be:
+- Part of a document
+- An entire section of a document
+- An entire document
 
-Если входной текст уже выглядит как один логически завершённый блок (например список или ):
-- Верни один чанк равный входному тексту
-- Не дели его дальше
+If the input text already looks like a single logically complete block (e.g. a list):
+- Return one chunk equal to the input text
+- Do not split it further
 
 =====================
-РАБОТА С ТАБЛИЦАМИ
+TABLE HANDLING
 =====================
 
-Если во входном тексте есть таблица:
-- Преобразуй каждую строку таблицы (кроме строки заголовков) в отдельное осмысленное предложение
-- Каждая строка таблицы должна стать отдельным чанком
-- Предложение должно полностью передавать смысл строки
-- Предложение должно быть понятно без просмотра таблицы
-- Используй названия столбцов как смысловые части предложения
-- Используй естественные предложения на русском языке
-- Не перечисляй значения через пробелы или запятые
-- Если в таблице присутствуют ссылки — обязательно сохрани их в Markdown-виде
-- Допускается объединять несколько предложений от нескольких строк в один чанк
+If the input text contains a table:
+- Convert each table row (except the header row) into a meaningful sentence
+- Each table row should become a separate chunk
+- The sentence must fully convey the meaning of the row
+- The sentence must be understandable without viewing the table
+- Use column names as semantic parts of the sentence
+- Use natural sentences in the language of the original document
+- Do not list values separated by spaces or commas
+- If the table contains links, preserve them in Markdown format
+- It is acceptable to combine sentences from multiple rows into one chunk
 
 Пример преобразования таблицы:
 Вход:
@@ -119,31 +120,31 @@ _SYSTEM_PROMPT = """\
 }
 
 =====================
-НЕ ВКЛЮЧАЙ
+EXCLUDE
 =====================
-- оглавление
-- навигацию
-- повторяющиеся элементы
-- номера страниц
-- шаблонные подписи
+- Table of contents
+- Navigation elements
+- Repeated elements
+- Page numbers
+- Boilerplate signatures
 
 =====================
-ВАЖНО (для всего кроме таблиц)
+IMPORTANT (for everything except tables)
 =====================
-НЕ пересказывай текст.
-НЕ интерпретируй текст.
-НЕ сокращай текст.
-НЕ добавляй новый текст.
+DO NOT paraphrase the text.
+DO NOT interpret the text.
+DO NOT shorten the text.
+DO NOT add new text.
 
-Каждый чанк должен быть точной копией соответствующего участка исходного текста (кроме таблиц).
-Все Markdown-элементы, кроме таблиц, должны сохраняться:
-- ссылки
-- списки
-- код
-- заголовки
-- форматирование
+Each chunk must be an exact copy of the corresponding section of the source text (except tables).
+All Markdown elements except tables must be preserved:
+- Links
+- Lists
+- Code
+- Headings
+- Formatting
 
-Отвечай на языке оригинального документа.
+Respond in the same language as the original document.
 """
 
 
@@ -487,9 +488,10 @@ class SemanticChunker(Chunker):
                 pos = end
                 continue
 
-            # Батчевый embed всех уникальных текстов
+            # Батчевый embed всех уникальных текстов (в потоке, чтобы не блокировать event loop)
             unique_texts = list({t for _, _, lt, rt in pairs for t in (lt, rt)})
-            embeddings = self._embed_fn(unique_texts)
+            loop = asyncio.get_event_loop()
+            embeddings = await loop.run_in_executor(None, self._embed_fn, unique_texts)
             text_to_emb = dict(zip(unique_texts, embeddings))
 
             # Выбрать пару с максимальным cosine distance
@@ -508,8 +510,12 @@ class SemanticChunker(Chunker):
 
             chunks.append(' '.join(sentences[pos:best_left_end]))
             if self._accept_pair:
-                chunks.append(' '.join(sentences[best_left_end:best_right_end]))
-                pos = best_right_end
+                right_tokens = sum(sentence_tokens[best_left_end:best_right_end])
+                if right_tokens <= self._max_tokens:
+                    chunks.append(' '.join(sentences[best_left_end:best_right_end]))
+                    pos = best_right_end
+                else:
+                    pos = best_left_end
             else:
                 pos = best_left_end
 

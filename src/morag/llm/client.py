@@ -3,9 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
+from aiolimiter import AsyncLimiter
 from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
@@ -33,6 +36,19 @@ def _strip_thinking(text: str) -> str:
     return _THINKING_RE.sub('', text)
 
 
+def _extract_content(message) -> str:
+    """Извлечь текст из ответа, с fallback на reasoning (OpenRouter)."""
+    content = message.content or ''
+    if content:
+        return _strip_thinking(content)
+    # OpenRouter: content=null, весь текст в reasoning
+    reasoning = getattr(message, 'reasoning', None)
+    if reasoning:
+        logger.debug('LLM content is empty, falling back to reasoning field')
+        return _strip_thinking(reasoning)
+    return ''
+
+
 def _build_extra_body(params: GenerationParams) -> dict | None:
     """Собрать extra_body для нестандартных параметров (top_k, repetition_penalty, thinking)."""
     extra: dict = {}
@@ -41,7 +57,10 @@ def _build_extra_body(params: GenerationParams) -> dict | None:
     if params.repetition_penalty is not None:
         extra['repetition_penalty'] = params.repetition_penalty
     if params.enable_thinking is not None:
+        # vLLM / Ollama
         extra['chat_template_kwargs'] = {'enable_thinking': params.enable_thinking}
+        # OpenRouter
+        extra['reasoning'] = {'enabled': params.enable_thinking}
     return extra or None
 
 
@@ -72,6 +91,7 @@ class LLMClient:
         max_retries: int = 3,
         model_wait_seconds: int = 0,
         model_wait_retries: int = 0,
+        max_rpm: int | None = None,
     ) -> None:
         self._client = AsyncOpenAI(
             base_url=base_url, api_key=api_key,
@@ -80,9 +100,25 @@ class LLMClient:
         self._model = model
         self._model_wait_seconds = model_wait_seconds
         self._model_wait_retries = model_wait_retries
+        self._rate_limiter = AsyncLimiter(max_rpm, 60) if max_rpm else None
+
+    @asynccontextmanager
+    async def _rate_limit(self):
+        """Acquire rate limiter if configured, otherwise no-op."""
+        if self._rate_limiter:
+            t0 = asyncio.get_event_loop().time()
+            async with self._rate_limiter:
+                waited = asyncio.get_event_loop().time() - t0
+                if waited > 0.1:
+                    logger.info('Rate limiter: waited %.1fs for token', waited)
+                yield
+        else:
+            yield
 
     async def _create(self, **kwargs):
-        """Обёртка над chat.completions.create с model-wait логикой.
+        """Обёртка над chat.completions.create с rate limiting и model-wait логикой.
+
+        Rate limiting: если задан max_rpm, ожидает свободный слот перед запросом.
 
         Обнаруживает два сигнала недоступности модели:
         1. response.choices is None — сервер вернул 200, но пустое тело (перезагрузка)
@@ -93,7 +129,8 @@ class LLMClient:
         """
         # Первая попытка (без ожидания)
         try:
-            response = await self._client.chat.completions.create(**kwargs)
+            async with self._rate_limit():
+                response = await self._client.chat.completions.create(**kwargs)
             if response.choices is None:
                 raise _ModelUnavailableError('Empty response from server (choices is None)')
             return response
@@ -108,16 +145,19 @@ class LLMClient:
                 raise
             last_exc = exc
 
-        # Цикл ожидания перезагрузки модели
+        # Цикл ожидания перезагрузки модели (с jitter для предотвращения thundering herd)
         for wait_attempt in range(1, self._model_wait_retries + 1):
+            jitter = random.uniform(0, self._model_wait_seconds * 0.5)
+            wait_with_jitter = self._model_wait_seconds + jitter
             logger.warning(
-                'LLMClient: model unavailable, waiting %ds (attempt %d/%d)...',
-                self._model_wait_seconds, wait_attempt, self._model_wait_retries,
+                'LLMClient: model unavailable, waiting %.1fs (attempt %d/%d)...',
+                wait_with_jitter, wait_attempt, self._model_wait_retries,
             )
-            await asyncio.sleep(self._model_wait_seconds)
+            await asyncio.sleep(wait_with_jitter)
 
             try:
-                response = await self._client.chat.completions.create(**kwargs)
+                async with self._rate_limit():
+                    response = await self._client.chat.completions.create(**kwargs)
                 if response.choices is None:
                     raise _ModelUnavailableError('Empty response from server (choices is None)')
                 return response
@@ -131,6 +171,16 @@ class LLMClient:
                 "'NoneType' object has no attribute 'choices'"
             ) from last_exc
         raise last_exc
+
+    @staticmethod
+    def _penalty_kwargs(params: GenerationParams) -> dict:
+        """Добавить penalty-параметры только если отличаются от дефолта (0.0)."""
+        kwargs: dict = {}
+        if params.frequency_penalty != 0.0:
+            kwargs['frequency_penalty'] = params.frequency_penalty
+        if params.presence_penalty != 0.0:
+            kwargs['presence_penalty'] = params.presence_penalty
+        return kwargs
 
     async def complete(
         self,
@@ -146,8 +196,7 @@ class LLMClient:
             messages=messages,
             temperature=params.temperature,
             top_p=params.top_p,
-            frequency_penalty=params.frequency_penalty,
-            presence_penalty=params.presence_penalty,
+            **self._penalty_kwargs(params),
         )
         if params.seed is not None:
             kwargs['seed'] = params.seed
@@ -157,7 +206,7 @@ class LLMClient:
         if max_tokens is not None:
             kwargs['max_tokens'] = max_tokens
         response = await self._create(**kwargs)
-        return _strip_thinking(response.choices[0].message.content or '')
+        return _extract_content(response.choices[0].message)
 
     async def complete_vision(
         self,
@@ -190,8 +239,7 @@ class LLMClient:
             model=self._model,
             messages=messages,
             temperature=params.temperature,
-            frequency_penalty=params.frequency_penalty,
-            presence_penalty=params.presence_penalty,
+            **self._penalty_kwargs(params),
         )
         if params.seed is not None:
             kwargs['seed'] = params.seed
@@ -201,7 +249,7 @@ class LLMClient:
         if max_tokens is not None:
             kwargs['max_tokens'] = max_tokens
         response = await self._create(**kwargs)
-        return _strip_thinking(response.choices[0].message.content or '')
+        return _extract_content(response.choices[0].message)
 
     async def complete_json(
         self,
@@ -226,8 +274,7 @@ class LLMClient:
             },
             temperature=params.temperature,
             top_p=params.top_p,
-            frequency_penalty=params.frequency_penalty,
-            presence_penalty=params.presence_penalty,
+            **self._penalty_kwargs(params),
         )
         if params.seed is not None:
             kwargs['seed'] = params.seed
@@ -235,7 +282,7 @@ class LLMClient:
         if extra_body:
             kwargs['extra_body'] = extra_body
         response = await self._create(**kwargs)
-        content = _strip_thinking(response.choices[0].message.content or '{}')
+        content = _extract_content(response.choices[0].message) or '{}'
         logger.debug('LLM raw response: %s', content)
         try:
             return json.loads(content)

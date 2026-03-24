@@ -2,12 +2,38 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
+import time
 from abc import ABC, abstractmethod
-from collections import defaultdict
+from collections import defaultdict, deque
 
 from morag.llm.retry import RetryPolicy
 
 logger = logging.getLogger(__name__)
+
+
+class SyncRateLimiter:
+    """Синхронный sliding window rate limiter для HTTP embedders."""
+
+    def __init__(self, max_rpm: int) -> None:
+        self._max = max_rpm
+        self._window = 60.0
+        self._timestamps: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                while self._timestamps and now - self._timestamps[0] >= self._window:
+                    self._timestamps.popleft()
+                if len(self._timestamps) < self._max:
+                    self._timestamps.append(now)
+                    return
+                sleep_for = self._window - (now - self._timestamps[0])
+            logger.info('SyncRateLimiter: waiting %.1fs (%d/%d in window)', sleep_for, self._max, self._max)
+            time.sleep(sleep_for)
+
 
 _DOCUMENT_PREFIX = 'search_document: '
 _QUERY_PREFIX = 'search_query: '
@@ -93,19 +119,25 @@ class HttpFridaEmbedder(Embedder):
     """
 
     def __init__(self, base_url: str, dim: int, timeout: int = 30,
-                 retry_policy: RetryPolicy | None = None) -> None:
+                 retry_policy: RetryPolicy | None = None,
+                 max_rpm: int | None = None) -> None:
         import httpx
         self._client = httpx.Client(base_url=base_url, timeout=timeout)
         self._dim = dim
         self._retry = retry_policy or RetryPolicy(max_retries=0)
-        logger.info('HttpFridaEmbedder → %s (dim=%d)', base_url, dim)
+        self._rate_limiter = SyncRateLimiter(max_rpm) if max_rpm else None
+        logger.info('HttpFridaEmbedder → %s (dim=%d, max_rpm=%s)', base_url, dim, max_rpm)
 
     def _do_call(self, text: str) -> list[float]:
+        if self._rate_limiter:
+            self._rate_limiter.acquire()
         resp = self._client.post('/v1/embeddings', json={'input': text})
         resp.raise_for_status()
         return resp.json()['data'][0]['embedding']
 
     def _do_call_batch(self, texts: list[str]) -> list[list[float]]:
+        if self._rate_limiter:
+            self._rate_limiter.acquire()
         resp = self._client.post('/v1/embeddings', json={'input': texts})
         resp.raise_for_status()
         data = resp.json()['data']
@@ -286,11 +318,13 @@ class HttpGteSparseEmbedder(SparseEmbedder):
     """
 
     def __init__(self, base_url: str, timeout: int = 30,
-                 retry_policy: RetryPolicy | None = None) -> None:
+                 retry_policy: RetryPolicy | None = None,
+                 max_rpm: int | None = None) -> None:
         import httpx
         self._client = httpx.Client(base_url=base_url, timeout=timeout)
         self._retry = retry_policy or RetryPolicy(max_retries=0)
-        logger.info('HttpGteSparseEmbedder → %s', base_url)
+        self._rate_limiter = SyncRateLimiter(max_rpm) if max_rpm else None
+        logger.info('HttpGteSparseEmbedder → %s (max_rpm=%s)', base_url, max_rpm)
 
     @staticmethod
     def _to_sparse(token_weights: dict[str, float]) -> tuple[list[int], list[float]]:
@@ -304,12 +338,16 @@ class HttpGteSparseEmbedder(SparseEmbedder):
         return list(index_weight.keys()), list(index_weight.values())
 
     def _do_call(self, text: str) -> tuple[list[int], list[float]]:
+        if self._rate_limiter:
+            self._rate_limiter.acquire()
         resp = self._client.post('/encode', json={'text': text})
         resp.raise_for_status()
         token_weights: dict[str, float] = resp.json()['token_weights'][0]
         return self._to_sparse(token_weights)
 
     def _do_call_batch(self, texts: list[str]) -> list[tuple[list[int], list[float]]]:
+        if self._rate_limiter:
+            self._rate_limiter.acquire()
         resp = self._client.post('/encode_batch', json={'texts': texts})
         resp.raise_for_status()
         all_weights: list[dict[str, float]] = resp.json()['token_weights']

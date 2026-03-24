@@ -68,5 +68,8 @@ def frida_vectors_config(dim: int) -> dict[str, VectorParams]:
 
 
 def gte_sparse_vectors_config() -> dict[str, SparseVectorParams]:
-    """Конфиг sparse-векторов для коллекции чанков с GTE-эмбеддингами."""
-    return {'keywords': SparseVectorParams()}
+    """Конфиг sparse-векторов для коллекции чанков с GTE-эмбеддингами и BM25."""
+    return {
+        'keywords': SparseVectorParams(),
+        'bm25': SparseVectorParams(),
+    }

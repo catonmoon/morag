@@ -15,18 +15,18 @@ services:
       retries: 10
       start_period: 5s
 
-  docling:
-    image: quay.io/docling-project/docling-serve
-    ports:
-      - "5001:5001"
-    command: docling-serve run --host 0.0.0.0 --port 5001 --workers 1 --timeout-keep-alive 600
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 120s
+#  docling:
+#    image: quay.io/docling-project/docling-serve
+#    ports:
+#      - "5001:5001"
+#    command: docling-serve run --host 0.0.0.0 --port 5001 --workers 1 --timeout-keep-alive 600
+#    restart: unless-stopped
+#    healthcheck:
+#      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+#      interval: 10s
+#      timeout: 5s
+#      retries: 10
+#      start_period: 120s
 
   # morag-indexer:
   #   build:
@@ -69,7 +69,6 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '2'
           memory: 4G
     restart: unless-stopped
     healthcheck:

@@ -2,13 +2,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from morag.llm.client import LLMClient
+from morag.llm.client import GenerationParams, LLMClient
 
 
-def make_completion(content: str):
+def make_completion(content: str, reasoning: str | None = None):
     """Build a fake ChatCompletion response object."""
     message = MagicMock()
     message.content = content
+    message.reasoning = reasoning
     choice = MagicMock()
     choice.message = message
     completion = MagicMock()
@@ -145,7 +146,10 @@ class TestModelWait:
             assert result == 'Hello!'
             assert call_count == 3
             assert mock_sleep.call_count == 2
-            mock_sleep.assert_called_with(10)
+            # С jitter: sleep вызывается с wait_seconds + random(0, wait*0.5)
+            for call in mock_sleep.call_args_list:
+                wait_val = call[0][0]
+                assert 10 <= wait_val <= 15  # 10 + jitter(0, 5)
 
     async def test_waits_on_empty_response(self):
         """Wait срабатывает при пустом ответе (choices is None)."""
@@ -315,3 +319,50 @@ class TestModelWait:
 
             assert result == {'key': 'value'}
             assert call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Penalty kwargs (Grok compatibility)
+# ---------------------------------------------------------------------------
+
+class TestPenaltyKwargs:
+    def test_zero_penalties_empty(self):
+        result = LLMClient._penalty_kwargs(GenerationParams())
+        assert result == {}
+
+    def test_nonzero_frequency(self):
+        params = GenerationParams(frequency_penalty=0.5)
+        result = LLMClient._penalty_kwargs(params)
+        assert result == {'frequency_penalty': 0.5}
+
+    def test_nonzero_presence(self):
+        params = GenerationParams(presence_penalty=0.3)
+        result = LLMClient._penalty_kwargs(params)
+        assert result == {'presence_penalty': 0.3}
+
+    def test_both_nonzero(self):
+        params = GenerationParams(frequency_penalty=0.5, presence_penalty=0.3)
+        result = LLMClient._penalty_kwargs(params)
+        assert result == {'frequency_penalty': 0.5, 'presence_penalty': 0.3}
+
+    def test_zero_not_included(self):
+        params = GenerationParams(frequency_penalty=0.0, presence_penalty=0.0)
+        result = LLMClient._penalty_kwargs(params)
+        assert 'frequency_penalty' not in result
+        assert 'presence_penalty' not in result
+
+
+# ---------------------------------------------------------------------------
+# Rate limiter
+# ---------------------------------------------------------------------------
+
+class TestRateLimiter:
+    def test_no_limiter_by_default(self):
+        with patch('morag.llm.client.AsyncOpenAI'):
+            client = LLMClient(base_url='http://test', model='test')
+            assert client._rate_limiter is None
+
+    def test_limiter_created_with_max_rpm(self):
+        with patch('morag.llm.client.AsyncOpenAI'):
+            client = LLMClient(base_url='http://test', model='test', max_rpm=60)
+            assert client._rate_limiter is not None
