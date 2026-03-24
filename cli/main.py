@@ -11,6 +11,7 @@ import sys
 from qdrant_client import AsyncQdrantClient
 
 from morag.config import Config, DenseEmbedderConfig, PdfConfig, RetryConfig, SparseEmbedderConfig, load_config
+from morag.indexing.bm25 import build_bm25_index
 from morag.indexing.chunker import LLMChunker, PassthroughChunker, SemanticChunker
 from morag.indexing.context import LLMContextGenerator, NoopContextGenerator
 from morag.indexing.embedder import (
@@ -26,6 +27,7 @@ from morag.indexing.processors import (
     DenseEmbeddingProcessor,
     DocSummaryProcessor,
     DocTitleProcessor,
+    LegalDocSummaryProcessor,
     MetadataProcessor,
     PageMarkerProcessor,
     SparseEmbeddingProcessor,
@@ -68,13 +70,19 @@ def _make_retry(cfg: RetryConfig) -> RetryPolicy:
 
 def _make_dense_embedder(cfg: DenseEmbedderConfig) -> Embedder:
     if cfg.base_url is not None:
-        return HttpFridaEmbedder(cfg.base_url, cfg.dim, cfg.timeout, retry_policy=_make_retry(cfg.retry))
+        return HttpFridaEmbedder(
+            cfg.base_url, cfg.dim, cfg.timeout,
+            retry_policy=_make_retry(cfg.retry), max_rpm=cfg.max_rpm,
+        )
     return FridaEmbedder(cfg.model)
 
 
 def _make_sparse_embedder(cfg: SparseEmbedderConfig) -> SparseEmbedder:
     if cfg.base_url is not None:
-        return HttpGteSparseEmbedder(cfg.base_url, cfg.timeout, retry_policy=_make_retry(cfg.retry))
+        return HttpGteSparseEmbedder(
+            cfg.base_url, cfg.timeout,
+            retry_policy=_make_retry(cfg.retry), max_rpm=cfg.max_rpm,
+        )
     return GteSparseEmbedder(cfg.model, device=cfg.device)
 
 
@@ -162,6 +170,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         api_key=config.llm.api_key,
         timeout=config.llm.timeout,
         max_retries=config.llm.retry.max_retries,
+        max_rpm=config.llm.max_rpm,
         model_wait_seconds=config.llm.model_wait_seconds,
         model_wait_retries=config.llm.model_wait_retries,
     )
@@ -174,6 +183,9 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             api_key=config.llm_vision.api_key,
             timeout=config.llm_vision.timeout,
             max_retries=config.llm_vision.retry.max_retries,
+            max_rpm=config.llm_vision.max_rpm,
+            model_wait_seconds=config.llm_vision.model_wait_seconds,
+            model_wait_retries=config.llm_vision.model_wait_retries,
         )
         logger.info('Vision LLM: %s @ %s', config.llm_vision.model, config.llm_vision.base_url)
 
@@ -229,6 +241,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             context_window=config.llm.context_window,
             max_output_tokens=config.indexing.context.max_tokens,
             enable_thinking=config.llm.enable_thinking,
+            window_tokens=config.indexing.context.window_tokens,
         ) if config.indexing.context.mode == 'llm' else NoopContextGenerator()
     )
     sparse_embedder = _make_sparse_embedder(config.indexing.sparse_embedder)
@@ -245,7 +258,15 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             enable_thinking=config.llm.enable_thinking,
         ))
     if config.indexing.doc_summary.max_tokens is not None:
-        doc_processors.append(DocSummaryProcessor(
+        summary_classes = {
+            'default': DocSummaryProcessor,
+            'legal': LegalDocSummaryProcessor,
+        }
+        summary_mode = config.indexing.doc_summary.mode
+        summary_cls = summary_classes.get(summary_mode)
+        if summary_cls is None:
+            raise ValueError(f'Unknown doc_summary mode: {summary_mode!r}')
+        doc_processors.append(summary_cls(
             llm_client=llm_client,
             doc_repo=doc_repo,
             max_tokens=config.indexing.doc_summary.max_tokens,
@@ -287,6 +308,8 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         token_counter=token_counter,
         concurrency=config.indexing.concurrency,
         skip_presplit=skip_presplit,
+        passthrough_threshold=config.indexing.chunker.passthrough_threshold,
+        embed_batch_size=config.indexing.embed_batch_size,
     )
 
     logger.info(
@@ -341,6 +364,9 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             await pipeline.run(jira_source)
         else:
             logger.info('No Jira issues found in indexed documents, skipping Jira indexing')
+
+    # Post-indexing: BM25 sparse vectors
+    await build_bm25_index(client, config.qdrant.collection_chunks)
 
     await client.close()
 

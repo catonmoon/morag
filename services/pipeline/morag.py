@@ -19,6 +19,153 @@ from pydantic import BaseModel
 
 _MD5_MOD = 4_294_967_295  # DO NOT CHANGE — ломает индекс
 
+# ── i18n prompts ──────────────────────────────────────────────────────────────
+
+_WEEKDAYS = {
+    'ru': ['понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье'],
+    'en': ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'],
+}
+
+_SYSTEM_PROMPT = {
+    'ru': (
+        'Ты – RAG система, которая отвечает на вопрос пользователя, '
+        'с использованием чанков текста из страниц Confluence в формате markdown.\n'
+        'Ниже будет представлена следующая информация, для каждого чанка:\n'
+        '1. Путь, который представляет иерархию заголовков страниц откуда был получен чанк.\n'
+        '2. Контекст который дает саммари страницы, из которой взят чанк.\n'
+        '3. Текст чанка.\n'
+        '4. Дата и время актуальности чанка.\n'
+        'Используя наиболее релевантные данные, ответь на вопрос пользователя '
+        'c **оформлением в markdown**.\n'
+        'Чанков может и не быть, в этом случае попроси пользователя уточнить запрос.\n'
+        '**Запрещено говорить пользователю о существовании чанков. '
+        'Важна только информация которая в них содержится! '
+        'Ссылки на источники в формате [N] допустимы.**\n'
+        'Если релевантной информации недостаточно, то задай уточняющие вопросы пользователю.\n'
+        'Не придумывай и не додумывай, руководствуйся только информацией из чанков!\n'
+        'При формировании ответа обращай внимание на дату и время актуальности информации. '
+        'Отдавай предпочтение более свежей информации в чанках.\n'
+        'В конце выдай пользователю ссылки для самостоятельного уточнения информации '
+        '(только на основании чанков, если они есть).\n'
+        'Если в ответе есть диаграмма, переделай ее в нотацию mermaid!\n'
+        'Важно: Диаграммы и схемы включай в ответ только если об этом попросит пользователь!\n\n'
+        'Еще информация, которая может тебе понадобиться (говори только если об этом спрашивают):\n'
+        'Тебя создали в Машинном отделении (МО).\n'
+        'Твое имя – Мораг, а если спросят почему, то отшучивайся.\n'
+        'Текущая дата и время: {current_datetime}\n'
+        'Текущий день недели: {current_weekday}\n'
+        'Имя текущего пользователя: {user_name}'
+    ),
+    'en': (
+        'You are a RAG system that answers the user\'s question '
+        'using text chunks from documents in markdown format.\n'
+        'Below you will find the following information for each chunk:\n'
+        '1. Path — the hierarchy of document headings the chunk originates from.\n'
+        '2. Context — a summary of the document the chunk belongs to.\n'
+        '3. The chunk text itself.\n'
+        '4. The date and time indicating when the information was last updated.\n'
+        'Using the most relevant data, answer the user\'s question '
+        'with **markdown formatting**.\n'
+        'There may be no chunks at all — in that case ask the user to clarify.\n'
+        '**Never mention the existence of chunks to the user. '
+        'Only the information they contain matters! '
+        'References in [N] format are allowed.**\n'
+        'If there is not enough relevant information, ask the user clarifying questions.\n'
+        'Do not invent or assume — rely only on information from the chunks!\n'
+        'When composing an answer, pay attention to the date and time of the information. '
+        'Prefer the most recent information.\n'
+        'At the end, provide the user with links for further reading '
+        '(only based on chunks, if available).\n'
+        'If the answer contains a diagram, convert it to mermaid notation!\n'
+        'Important: Include diagrams and schemas only if the user asks for them!\n\n'
+        'Additional information you may need (mention only if asked):\n'
+        'You were created by the Machine Room team.\n'
+        'Your name is Morag — if asked why, make a joke.\n'
+        'Current date and time: {current_datetime}\n'
+        'Current day of the week: {current_weekday}\n'
+        'User name: {user_name}'
+    ),
+}
+
+_INTENT_PROMPT = {
+    'ru': (
+        'Ты агент с базой знаний документации.\n'
+        'Прочитай диалог и определи: какие конкретные факты, термины или инструкции тебе не хватает,\n'
+        'чтобы дать исчерпывающий ответ пользователю.\n'
+        'Сформулируй 1-3 коротких поисковых запроса — каждый покрывает отдельный аспект вопроса.\n'
+        'Только ключевые термины, без лишних слов.\n\n'
+    ),
+    'en': (
+        'You are an agent with a documentation knowledge base.\n'
+        'Read the dialog and determine: what specific facts, terms or instructions you are missing\n'
+        'to give a comprehensive answer to the user.\n'
+        'Formulate 1-3 short search queries — each covering a separate aspect of the question.\n'
+        'Only key terms, no filler words.\n\n'
+    ),
+}
+
+_FILTER_PROMPT = {
+    'ru': (
+        'Ты фильтр чанков для ответа на вопрос: "{query}"\n\n'
+        'Основной текст чанка:\n{text}\n\n'
+        'Контекст чанка:\n{context}\n\n'
+        'Путь документа: {path}\n\n'
+        'Если чанк содержит информацию, относящуюся к вопросу, верни:\n'
+        '1 | <2-4 слова: краткое пояснение>\n\n'
+        'Если чанк НЕ содержит релевантной информации, верни только:\n'
+        '0\n\n'
+        'ВАЖНО: Только указанный формат, ничего лишнего.'
+    ),
+    'en': (
+        'You are a chunk filter for the question: "{query}"\n\n'
+        'Chunk text:\n{text}\n\n'
+        'Chunk context:\n{context}\n\n'
+        'Document path: {path}\n\n'
+        'If the chunk contains information relevant to the question, return:\n'
+        '1 | <2-4 words: brief explanation>\n\n'
+        'If the chunk does NOT contain relevant information, return only:\n'
+        '0\n\n'
+        'IMPORTANT: Only the specified format, nothing else.'
+    ),
+}
+
+_CONTEXT_LABELS = {
+    'ru': {
+        'header': 'Информация из базы знаний:',
+        'chunk_start': 'Начало чанка',
+        'chunk_end': 'Конец чанка',
+        'path': 'Путь',
+        'doc_summary': 'Обзор документа',
+        'context': 'Контекст',
+        'text': 'Текст',
+        'updated_at': 'Дата актуальности',
+        'citation_instruction': (
+            'При использовании информации из чанков вставляй маркер [N] '
+            'прямо в текст ответа сразу после утверждения, где N — номер чанка-источника. '
+            'Например: "Функция X делает Y [1]." '
+            'Если утверждение основано на нескольких чанках — перечисляй: [1][2].'
+        ),
+        'no_results': 'Не удалось найти релевантную информацию по вашему запросу.',
+    },
+    'en': {
+        'header': 'Information from knowledge base:',
+        'chunk_start': 'Chunk start',
+        'chunk_end': 'Chunk end',
+        'path': 'Path',
+        'doc_summary': 'Document overview',
+        'context': 'Context',
+        'text': 'Text',
+        'updated_at': 'Last updated',
+        'citation_instruction': (
+            'When using information from chunks, insert a [N] marker '
+            'right after the statement in your answer, where N is the source chunk number. '
+            'Example: "Function X does Y [1]." '
+            'If a statement is based on multiple chunks, list them: [1][2].'
+        ),
+        'no_results': 'Could not find relevant information for your query.',
+    },
+}
+
 _LOGO = r"""
     ▄▀▀▀▀▀▀▀▀▄
    █  /\_/\   █      Catonmoon
@@ -60,38 +207,13 @@ class Pipeline:
         INTENT_MODEL: str
         INTENT_API_KEY: str
 
-        SYSTEM_PROMPT: str = (
-            'Ты – RAG система, которая отвечает на вопрос пользователя, '
-            'с использованием чанков текста из страниц Confluence в формате markdown.\n'
-            'Ниже будет представлена следующая информация, для каждого чанка:\n'
-            '1. Путь, который представляет иерархию заголовков страниц откуда был получен чанк.\n'
-            '2. Контекст который дает саммари страницы, из которой взят чанк.\n'
-            '3. Текст чанка.\n'
-            '4. Дата и время актуальности чанка.\n'
-            'Используя наиболее релевантные данные, ответь на вопрос пользователя '
-            'c **оформлением в markdown**.\n'
-            'Чанков может и не быть, в этом случае попроси пользователя уточнить запрос.\n'
-            '**Запрещено говорить пользователю о существовании чанков. '
-            'Важна только информация которая в них содержится! '
-            'Ссылки на источники в формате [N] допустимы.**\n'
-            'Если релевантной информации недостаточно, то задай уточняющие вопросы пользователю.\n'
-            'Не придумывай и не додумывай, руководствуйся только информацией из чанков!\n'
-            'При формировании ответа обращай внимание на дату и время актуальности информации. '
-            'Отдавай предпочтение более свежей информации в чанках.\n'
-            'В конце выдай пользователю ссылки для самостоятельного уточнения информации '
-            '(только на основании чанков, если они есть).\n'
-            'Если в ответе есть диаграмма, переделай ее в нотацию mermaid!\n'
-            'Важно: Диаграммы и схемы включай в ответ только если об этом попросит пользователь!\n\n'
-            'Еще информация, которая может тебе понадобиться (говори только если об этом спрашивают):\n'
-            'Тебя создали в Машинном отделении (МО).\n'
-            'Твое имя – Мораг, а если спросят почему, то отшучивайся.\n'
-            'Текущая дата и время: {current_datetime}\n'
-            'Текущий день недели: {current_weekday}\n'
-            'Имя текущего пользователя: {user_name}'
-        )
+        LANGUAGE: str = 'ru'  # 'ru' | 'en'
 
         CITATION_MAX_CHARS: int = 5000  # лимит символов в citation-превью
         HTTP_TIMEOUT: int = 180  # таймаут HTTP-запросов (секунды)
+        FILTER_EMIT_THINKING: bool = False  # показывать результаты фильтрации в <think>
+        EMIT_STATUS: bool = True   # отправлять status-события в UI
+        EMIT_CITATIONS: bool = True  # отправлять citation-события в UI
 
     def __init__(self):
         print(_LOGO, flush=True)
@@ -122,6 +244,10 @@ class Pipeline:
             INTENT_MODEL=os.getenv('INTENT_MODEL', os.getenv('LLM_MODEL', 'qwen2.5:7b')),
             INTENT_API_KEY=os.getenv('INTENT_API_KEY', os.getenv('LLM_API_KEY', 'ollama')),
             HTTP_TIMEOUT=int(os.getenv('HTTP_TIMEOUT', '180')),
+            LANGUAGE=os.getenv('LANGUAGE', 'ru'),
+            FILTER_EMIT_THINKING=os.getenv('FILTER_EMIT_THINKING', 'false').lower() in ('true', '1', 'yes'),
+            EMIT_STATUS=os.getenv('EMIT_STATUS', 'true').lower() in ('true', '1', 'yes'),
+            EMIT_CITATIONS=os.getenv('EMIT_CITATIONS', 'true').lower() in ('true', '1', 'yes'),
         )
 
     def pipe(
@@ -133,7 +259,8 @@ class Pipeline:
     ) -> Union[str, Generator, Iterator]:
         # 1. Извлечь intent (список поисковых запросов)
         intents = self._extract_intent(messages)
-        yield self._emit_status('🔎', ' | '.join(intents), False)
+        if self.valves.EMIT_STATUS:
+            yield self._emit_status('🔎', ' | '.join(intents), False)
 
         # 2. Гибридный поиск по всем запросам параллельно
         with ThreadPoolExecutor() as executor:
@@ -157,44 +284,54 @@ class Pipeline:
         # 4. Слить контигуальные группы соседей в один чанк для реранкинга
         chunks = self._merge_into_groups(chunks)
 
-        yield self._emit_status('🔍', f'Фильтрую {len(chunks)} чанков...', False)
+        if self.valves.EMIT_STATUS:
+            yield self._emit_status('🔍', f'Фильтрую {len(chunks)} чанков...', False)
 
         # 5. Reranker: бинарный фильтр по merged-чанкам
-        yield '<think>'
+        emit_thinking = self.valves.FILTER_EMIT_THINKING
+        if emit_thinking:
+            yield '<think>'
         result_chunks: list[dict] = []
         for chunk in chunks:
             answer = self._filter_chunk(' | '.join(intents), chunk)
             if not answer.startswith('0'):
                 result_chunks.append(chunk)
-                comment = answer.split('|', 1)[1].strip() if '|' in answer else answer.strip()
-                doc_name = chunk['path'][0].split('/')[-1] if chunk['path'] else chunk['doc_id']
-                yield f'[{doc_name}]: ✔ {comment}\n'
-        yield '</think>'
+                if emit_thinking:
+                    comment = answer.split('|', 1)[1].strip() if '|' in answer else answer.strip()
+                    doc_name = chunk['path'][0].split('/')[-1] if chunk['path'] else chunk['doc_id']
+                    yield f'[{doc_name}]: ✔ {comment}\n'
+        if emit_thinking:
+            yield '</think>'
 
         result_chunks.sort(key=lambda x: (-_parse_ts(x['updated_at']), x['doc_id'], x['order']))
 
+        lang = self.valves.LANGUAGE
+        L = _CONTEXT_LABELS.get(lang, _CONTEXT_LABELS['en'])
         if not result_chunks:
-            yield self._emit_status('❌', 'Релевантных чанков не найдено', True)
-            yield 'Не удалось найти релевантную информацию по вашему запросу.'
+            if self.valves.EMIT_STATUS:
+                yield self._emit_status('❌', 'Релевантных чанков не найдено', True)
+            yield L['no_results']
             return
 
-        yield self._emit_status('✅', f'Найдено {len(result_chunks)} релевантных чанков', True)
+        if self.valves.EMIT_STATUS:
+            yield self._emit_status('✅', f'Найдено {len(result_chunks)} релевантных чанков', True)
 
         # Emit citations (один на чанк, source_id=chunk_id чтобы избежать дедупликации по имени файла)
-        for chunk in result_chunks:
-            doc_name = chunk['path'][0].split('/')[-1] if chunk['path'] else chunk['doc_id']
-            yield self._emit_source(
-                doc_name, chunk['text'][:self.valves.CITATION_MAX_CHARS], chunk.get('url'),
-                source_id=chunk['chunk_id'],
-                pages=chunk.get('pages'),
-            )
+        if self.valves.EMIT_CITATIONS:
+            for chunk in result_chunks:
+                doc_name = chunk['path'][0].split('/')[-1] if chunk['path'] else chunk['doc_id']
+                yield self._emit_source(
+                    doc_name, chunk['text'][:self.valves.CITATION_MAX_CHARS], chunk.get('url'),
+                    source_id=chunk['chunk_id'],
+                    pages=chunk.get('pages'),
+                )
 
         # Достать doc_summary для каждого уникального документа из результатов
         unique_doc_ids = list({c['doc_id'] for c in result_chunks})
         doc_summaries = self._fetch_doc_summaries(unique_doc_ids)
 
         # 5. Стриминг финального ответа
-        context = self._build_context(result_chunks, doc_summaries)
+        context = self._build_context(result_chunks, doc_summaries, lang=lang)
         user_name = ''
         user_info = body.get('__user__', {}) if body else {}
         if isinstance(user_info, dict):
@@ -219,18 +356,12 @@ class Pipeline:
 
     def _extract_intent(self, messages: List[dict]) -> list[str]:
         """Сформулировать 1-3 поисковых запроса по истории диалога."""
+        lang = self.valves.LANGUAGE
         dialog = '\n'.join(
             f"{'User' if m['role'] == 'user' else 'Assistant'}: {m.get('content', '').strip()}"
             for m in messages if m['role'] in ('user', 'assistant')
         )
-        prompt = (
-            'Ты агент с базой знаний документации.\n'
-            'Прочитай диалог и определи: какие конкретные факты, термины или инструкции тебе не хватает,\n'
-            'чтобы дать исчерпывающий ответ пользователю.\n'
-            'Сформулируй 1-3 коротких поисковых запроса — каждый покрывает отдельный аспект вопроса.\n'
-            'Только ключевые термины, без лишних слов.\n\n'
-            f'Диалог:\n{dialog}'
-        )
+        prompt = _INTENT_PROMPT.get(lang, _INTENT_PROMPT['en']) + f'Dialog:\n{dialog}'
         result = self._llm_complete_json(
             self.valves.INTENT_MODEL_URL, self.valves.INTENT_MODEL, self.valves.INTENT_API_KEY,
             [{'role': 'user', 'content': prompt}],
@@ -245,17 +376,11 @@ class Pipeline:
     # ── Reranker ──────────────────────────────────────────────────────────────
 
     def _filter_chunk(self, query: str, chunk: dict) -> str:
+        lang = self.valves.LANGUAGE
         path_display = ' | '.join(chunk['path']) if chunk['path'] else chunk['doc_id']
-        prompt = (
-            f'Ты фильтр чанков для ответа на вопрос: "{query}"\n\n'
-            f'Основной текст чанка:\n{chunk["text"]}\n\n'
-            f'Контекст чанка:\n{chunk["context"]}\n\n'
-            f'Путь документа: {path_display}\n\n'
-            'Если чанк содержит информацию, относящуюся к вопросу, верни:\n'
-            '1 | <2-4 слова: краткое пояснение>\n\n'
-            'Если чанк НЕ содержит релевантной информации, верни только:\n'
-            '0\n\n'
-            'ВАЖНО: Только указанный формат, ничего лишнего.'
+        template = _FILTER_PROMPT.get(lang, _FILTER_PROMPT['en'])
+        prompt = template.format(
+            query=query, text=chunk['text'], context=chunk['context'], path=path_display,
         )
         return self._llm_complete(
             self.valves.FILTER_MODEL_URL, self.valves.FILTER_MODEL, self.valves.FILTER_API_KEY,
@@ -314,12 +439,14 @@ class Pipeline:
         return resp.json()['choices'][0]['message']['content']
 
     def _stream_answer(self, messages: list, context: str, user_name: str = '') -> Generator:
+        lang = self.valves.LANGUAGE
         now = datetime.now(timezone.utc)
-        weekdays_ru = ['понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота', 'воскресенье']
-        prompt_text = self.valves.SYSTEM_PROMPT.format(
+        weekdays = _WEEKDAYS.get(lang, _WEEKDAYS['en'])
+        unknown = 'неизвестен' if lang == 'ru' else 'unknown'
+        prompt_text = _SYSTEM_PROMPT.get(lang, _SYSTEM_PROMPT['en']).format(
             current_datetime=now.strftime('%Y-%m-%d %H:%M:%S UTC'),
-            current_weekday=weekdays_ru[now.weekday()],
-            user_name=user_name or 'неизвестен',
+            current_weekday=weekdays[now.weekday()],
+            user_name=user_name or unknown,
         )
         system_msg = {'role': 'system', 'content': prompt_text}
         augmented = [system_msg] + messages + [{'role': 'user', 'content': context}]
@@ -357,34 +484,31 @@ class Pipeline:
                 continue
 
     @staticmethod
-    def _build_context(chunks: list[dict], doc_summaries: dict[str, str] | None = None) -> str:
+    def _build_context(
+        chunks: list[dict], doc_summaries: dict[str, str] | None = None, lang: str = 'ru',
+    ) -> str:
         doc_summaries = doc_summaries or {}
+        L = _CONTEXT_LABELS.get(lang, _CONTEXT_LABELS['en'])
         parts = []
         for n, c in enumerate(chunks, start=1):
             path_display = ' | '.join(c['path']) if c['path'] else c['doc_id']
             lines = [
-                f'Начало чанка [{n}]',
-                f'Путь: {path_display}',
+                f'{L["chunk_start"]} [{n}]',
+                f'{L["path"]}: {path_display}',
             ]
             if c.get('url'):
                 lines.append(f'URL: {c["url"]}')
             summary = doc_summaries.get(c['doc_id'])
             if summary:
-                lines.append(f'Обзор документа: {summary}')
+                lines.append(f'{L["doc_summary"]}: {summary}')
             lines += [
-                f'Контекст: {c["context"]}',
-                f'Текст: {c["text"]}',
-                f'Дата актуальности: {c["updated_at"]}',
-                f'Конец чанка [{n}]',
+                f'{L["context"]}: {c["context"]}',
+                f'{L["text"]}: {c["text"]}',
+                f'{L["updated_at"]}: {c["updated_at"]}',
+                f'{L["chunk_end"]} [{n}]',
             ]
             parts.append('\n'.join(lines))
-        instruction = (
-            'При использовании информации из чанков вставляй маркер [N] '
-            'прямо в текст ответа сразу после утверждения, где N — номер чанка-источника. '
-            'Например: "Функция X делает Y [1]." '
-            'Если утверждение основано на нескольких чанках — перечисляй: [1][2].'
-        )
-        return 'Информация из базы знаний:\n\n' + '\n\n'.join(parts) + '\n\n' + instruction
+        return L['header'] + '\n\n' + '\n\n'.join(parts) + '\n\n' + L['citation_instruction']
 
     # ── Embeddings ────────────────────────────────────────────────────────────
 

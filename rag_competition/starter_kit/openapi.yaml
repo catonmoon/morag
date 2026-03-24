@@ -1,0 +1,557 @@
+openapi: "3.0.3"
+info:
+  title: "The Agentic RAG Legal Challenge 2026 – Challenge Resources API"
+  version: "1.0.0"
+  description: |
+    API for participants to download competition resources (questions, documents)
+    and to submit answers for evaluation.
+    All endpoints require authentication via an **X-API-Key** header.
+
+servers:
+  - url: /api/v1
+    description: Production / staging base path
+
+tags:
+  - name: The Agentic RAG Legal Challenge 2026
+    description: Challenge resource endpoints (participant-facing)
+
+# ─────────────────────────────────────────────────────────────
+# Security
+# ─────────────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Team API key issued via the platform dashboard.
+
+  # ─────────────────────────────────────────────────────────────
+  # Reusable schemas
+  # ─────────────────────────────────────────────────────────────
+  schemas:
+
+    # ── Enumerations ──────────────────────────────────────────
+    SubmissionPhase:
+      type: string
+      enum: [warmup, final, results]
+      description: Competition phase in which the submission was created.
+
+    SubmissionStatus:
+      type: string
+      enum: [queued, processing, completed, error]
+      description: Processing lifecycle state of the submission.
+
+    SubmissionReviewStatus:
+      type: string
+      enum: [active, disqualified]
+      description: Manual review state set by organisers.
+
+    # ── Metrics ───────────────────────────────────────────────
+    Metrics:
+      type: object
+      required:
+        - deterministic
+        - assistant
+        - grounding
+        - telemetry
+        - ttft_ms
+        - ttft_multiplier
+        - total_score
+      properties:
+        deterministic:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Deterministic accuracy score (0–1).
+        assistant:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: LLM-judged assistant quality score (0–1).
+        grounding:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Grounding / citation quality (0–1).
+        telemetry:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Telemetry availability score (0–1).
+        ttft_ms:
+          type: integer
+          minimum: 0
+          description: Median time-to-first-token in milliseconds.
+        ttft_multiplier:
+          type: number
+          format: float
+          minimum: 0
+          description: TTFT-based speed multiplier applied to the total score.
+        total_score:
+          type: number
+          format: float
+          minimum: 0
+          description: Final weighted composite score.
+
+    # ── Submission answer sub-schemas ─────────────────────────
+    SubmissionAnswerTiming:
+      type: object
+      required: [ttft_ms, tpot_ms, total_time_ms]
+      properties:
+        ttft_ms:
+          type: integer
+          minimum: 0
+          description: Time-to-first-token in milliseconds.
+        tpot_ms:
+          type: integer
+          minimum: 0
+          description: Time-per-output-token in milliseconds.
+        total_time_ms:
+          type: integer
+          minimum: 0
+          description: Total generation time in milliseconds. Must be ≥ ttft_ms.
+
+    SubmissionAnswerRetrievalRef:
+      type: object
+      required: [doc_id]
+      properties:
+        doc_id:
+          type: string
+          minLength: 1
+          description: Document identifier.
+        page_numbers:
+          type: array
+          items:
+            type: integer
+          default: []
+          description: Page numbers of the retrieved chunk within the document (1-based indexing).
+      additionalProperties: true
+
+    SubmissionAnswerRetrieval:
+      type: object
+      properties:
+        retrieved_chunk_pages:
+          type: array
+          items:
+            $ref: '#/components/schemas/SubmissionAnswerRetrievalRef'
+          default: []
+          description: Retrieved document chunk references.
+
+    SubmissionAnswerUsage:
+      type: object
+      required: [input_tokens, output_tokens]
+      properties:
+        input_tokens:
+          type: integer
+          minimum: 0
+          description: Number of prompt / input tokens consumed.
+        output_tokens:
+          type: integer
+          minimum: 0
+          description: Number of completion / output tokens generated.
+
+    SubmissionAnswerTelemetry:
+      type: object
+      required: [timing, retrieval, usage]
+      properties:
+        timing:
+          $ref: '#/components/schemas/SubmissionAnswerTiming'
+        retrieval:
+          $ref: '#/components/schemas/SubmissionAnswerRetrieval'
+        usage:
+          $ref: '#/components/schemas/SubmissionAnswerUsage'
+        model_name:
+          type: string
+          nullable: true
+          maxLength: 128
+          description: Name / identifier of the model used to generate this answer.
+
+    SubmissionAnswerItem:
+      type: object
+      required: [question_id, answer, telemetry]
+      properties:
+        question_id:
+          type: string
+          minLength: 1
+          description: ID of the question being answered (must match the questions file).
+        answer:
+          nullable: true
+          oneOf:
+            - type: string
+            - type: integer
+            - type: number
+            - type: boolean
+            - type: array
+              items:
+                type: string
+          description: Model's answer to the question. May be null if the model abstained.
+        telemetry:
+          $ref: '#/components/schemas/SubmissionAnswerTelemetry'
+
+    SubmissionEnqueueCreate:
+      type: object
+      required: [answers]
+      description: |
+        JSON payload uploaded as a file.  
+        **Do NOT include a `version` field** — version is assigned automatically by the server.
+      properties:
+        architecture_summary:
+          type: string
+          nullable: true
+          maxLength: 500
+          description: Optional free-text description of the team's system architecture.
+        answers:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/SubmissionAnswerItem'
+
+    # ── Response schemas ──────────────────────────────────────
+    SubmissionAccepted:
+      type: object
+      required: [uuid, status, phase, version, created_at, payload_sha256]
+      properties:
+        uuid:
+          type: string
+          format: uuid
+          description: Server-assigned UUID for the submission.
+        status:
+          $ref: '#/components/schemas/SubmissionStatus'
+        phase:
+          $ref: '#/components/schemas/SubmissionPhase'
+        version:
+          type: string
+          description: Server-assigned sequential version string within the phase.
+        created_at:
+          type: string
+          format: date-time
+        payload_sha256:
+          type: string
+          description: SHA-256 hex digest of the stored JSON payload.
+
+    SubmissionStatusResponse:
+      type: object
+      required: [uuid, phase, version, status, review_status]
+      properties:
+        uuid:
+          type: string
+          format: uuid
+        phase:
+          $ref: '#/components/schemas/SubmissionPhase'
+        version:
+          type: string
+        status:
+          $ref: '#/components/schemas/SubmissionStatus'
+        review_status:
+          $ref: '#/components/schemas/SubmissionReviewStatus'
+        review_comment:
+          type: string
+          nullable: true
+          description: Human-readable comment from the review panel.
+
+    # ── Generic error ─────────────────────────────────────────
+    HTTPError:
+      type: object
+      properties:
+        detail:
+          description: Human-readable error message or structured validation errors.
+          oneOf:
+            - type: string
+            - type: object
+              additionalProperties: true
+
+# ─────────────────────────────────────────────────────────────
+# Global security (can be overridden per-operation)
+# ─────────────────────────────────────────────────────────────
+security:
+  - ApiKeyAuth: []
+
+# ─────────────────────────────────────────────────────────────
+# Paths
+# ─────────────────────────────────────────────────────────────
+paths:
+
+  # ── GET /questions ────────────────────────────────────────
+  /questions:
+    get:
+      operationId: get_questions_file
+      summary: Download questions file
+      description: |
+        Returns the competition questions as a JSON file (pull model).  
+        Auth: API key (participant only).
+      tags:
+        - The Agentic RAG Legal Challenge 2026
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Questions JSON file attachment.
+          headers:
+            Content-Disposition:
+              description: Forces browser/client download with a friendly filename.
+              schema:
+                type: string
+                example: 'attachment; filename="The Agentic RAG Legal Challenge 2026 - questions.json"'
+          content:
+            application/json:
+              schema:
+                type: object
+                description: Questions dataset (structure defined by the competition).
+                additionalProperties: true
+        "401":
+          description: API key missing or invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+              example:
+                detail: "API key is required"
+        "403":
+          description: Team is suspended.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+              example:
+                detail: "Team is suspended"
+        "404":
+          description: Questions file not found on the server.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+              example:
+                detail: "Questions file not found"
+
+  # ── GET /documents ────────────────────────────────────────
+  /documents:
+    get:
+      operationId: get_documents_file
+      summary: Download documents archive
+      description: |
+        Returns the documents dataset as a ZIP archive (pull model).  
+        Auth: API key (participant only).
+      tags:
+        - The Agentic RAG Legal Challenge 2026
+      security:
+        - ApiKeyAuth: []
+      responses:
+        "200":
+          description: Documents ZIP archive attachment.
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+                example: 'attachment; filename="The Agentic RAG Legal Challenge 2026 - documents.zip"'
+          content:
+            application/zip:
+              schema:
+                type: string
+                format: binary
+        "401":
+          description: API key missing or invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        "403":
+          description: Team is suspended.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        "404":
+          description: Documents archive not found on the server.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+              example:
+                detail: "Documents file not found"
+
+  # ── POST /submissions ─────────────────────────────────────
+  /submissions:
+    post:
+      operationId: create_submission
+      summary: Submit answers
+      description: |
+        Upload a JSON file (as multipart/form-data) containing answers and telemetry
+        for the current competition phase **plus** a ZIP archive with your code.
+
+        **File format rules:**
+        - Must be valid UTF-8 JSON.
+        - Root object must match the `SubmissionEnqueueCreate` schema.
+        - Must **NOT** include a `version` field — it is assigned automatically.
+
+        **Phase rules:**
+        - Submissions are rejected when the phase is `results`.
+        - Each phase enforces a per-team submission limit (configurable by admins).
+
+        Auth: API key (participant only).
+      tags:
+        - The Agentic RAG Legal Challenge 2026
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, code_archive]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: |
+                    UTF-8 encoded JSON file whose contents match `SubmissionEnqueueCreate`.
+                    Do **not** include a `version` field.
+                code_archive:
+                  type: string
+                  format: binary
+                  description: ZIP archive with the submission code (max 25 MB).
+            encoding:
+              file:
+                contentType: application/json
+              code_archive:
+                contentType: application/zip
+      responses:
+        "202":
+          description: Submission accepted and queued for evaluation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmissionAccepted'
+              example:
+                uuid: "550e8400-e29b-41d4-a716-446655440000"
+                status: "queued"
+                phase: "warmup"
+                version: "1"
+                created_at: "2026-02-25T12:00:00Z"
+                payload_sha256: "e3b0c44298fc1c149afb..."
+        "401":
+          description: API key missing or invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        "403":
+          description: |
+            Submissions closed (competition is in `results` phase) **or**
+            submission limit for the current phase has been reached.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+              examples:
+                closed:
+                  value: {detail: "Submissions are closed"}
+                limit:
+                  value: {detail: "Submission limit reached for phase warmup"}
+        "404":
+          description: Team not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        "409":
+          description: Version allocation conflict — safe to retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        "422":
+          description: |
+            Malformed request — file is not UTF-8, is not valid JSON,
+            is not a JSON object, includes a forbidden `version` field,
+            or fails schema validation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+              examples:
+                not_utf8:
+                  value: {detail: "Uploaded file must be UTF-8 JSON"}
+                invalid_json:
+                  value: {detail: "Invalid JSON file: ..."}
+                not_object:
+                  value: {detail: "Uploaded JSON must be an object with architecture_summary and answers"}
+                version_provided:
+                  value: {detail: "Field 'version' must not be provided. It is assigned automatically by server."}
+                schema_error:
+                  value:
+                    detail:
+                      errors:
+                        - type: "missing"
+                          loc: ["answers"]
+                          msg: "Field required"
+        "500":
+          description: Internal server error (payload storage or queue failure).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+
+  # ── GET /submissions/{submission_uuid}/status ─────────────
+  /submissions/{submission_uuid}/status:
+    get:
+      operationId: get_submission_status
+      summary: Get submission status
+      description: |
+        Returns the current processing status and evaluation metrics for a specific submission.  
+        Teams may only query their own submissions.  
+        Auth: API key (participant only).
+      tags:
+        - The Agentic RAG Legal Challenge 2026
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: submission_uuid
+          in: path
+          required: true
+          description: UUID of the submission (returned by `POST /submissions`).
+          schema:
+            type: string
+            format: uuid
+          example: "550e8400-e29b-41d4-a716-446655440000"
+      responses:
+        "200":
+          description: Submission status and evaluation metrics.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SubmissionStatusResponse'
+              example:
+                uuid: "550e8400-e29b-41d4-a716-446655440000"
+                phase: "warmup"
+                version: "1"
+                status: "completed"
+                review_status: "active"
+                review_comment: null
+        "401":
+          description: API key missing or invalid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+        "403":
+          description: The submission belongs to a different team.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+              example:
+                detail: "Access denied"
+        "404":
+          description: No submission found with the given UUID.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPError'
+              example:
+                detail: "Submission not found"

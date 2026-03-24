@@ -66,6 +66,7 @@ class DocTitleConfig(BaseModel):
 
 class DocSummaryConfig(BaseModel):
     max_tokens: int | None = None  # лимит токенов ответа LLM; None — генерация саммари отключена
+    mode: str = 'default'  # режим промпта: 'default' (универсальный) или 'legal' (юридические документы)
 
 
 class LLMConfig(BaseModel):
@@ -79,6 +80,7 @@ class LLMConfig(BaseModel):
     model_wait_seconds: int = 0   # ожидание перезагрузки модели (сек); 0 = не ждать
     model_wait_retries: int = 0   # количество попыток ожидания модели
     enable_thinking: bool | None = None  # включить/выключить thinking; None = поведение модели по умолчанию
+    max_rpm: int | None = None    # лимит запросов в минуту; None = без ограничения
 
 
 class DenseEmbedderConfig(BaseModel):
@@ -87,6 +89,7 @@ class DenseEmbedderConfig(BaseModel):
     dim: int | None = None        # обязателен в HTTP-режиме; в local-режиме определяется автоматически
     timeout: int = 30             # таймаут HTTP-запросов (секунды; только в HTTP-режиме)
     retry: RetryConfig = RetryConfig()  # политика повторных попыток (только в HTTP-режиме)
+    max_rpm: int | None = None    # лимит запросов в минуту (только в HTTP-режиме); None = без ограничения
 
     @model_validator(mode='after')
     def _validate_http_dim(self) -> 'DenseEmbedderConfig':
@@ -101,6 +104,7 @@ class SparseEmbedderConfig(BaseModel):
     base_url: str | None = None   # если задан → HTTP-режим; иначе — локальная модель
     timeout: int = 30             # таймаут HTTP-запросов (секунды; только в HTTP-режиме)
     retry: RetryConfig = RetryConfig()  # политика повторных попыток (только в HTTP-режиме)
+    max_rpm: int | None = None    # лимит запросов в минуту (только в HTTP-режиме); None = без ограничения
 
 
 class ChunkerConfig(BaseModel):
@@ -111,16 +115,19 @@ class ChunkerConfig(BaseModel):
     halving_retries: int = 0             # деления блока пополам при таймауте LLM; 0 = выключено
     fallback: bool = False               # семантический fallback; False = при неудаче документ пропускается
     accept_pair: bool = False            # принимать оба чанка пары (left+right) за одну итерацию (2x быстрее)
+    passthrough_threshold: int | None = None  # если документ > N токенов → passthrough вместо semantic; None = отключено
 
 
 class ContextConfig(BaseModel):
     mode: str = 'noop'                   # 'noop' | 'llm'
     max_tokens: int | None = None        # лимит токенов в ответе LLMContextGenerator; None — без ограничения
+    window_tokens: int | None = None     # окно вокруг страницы чанка (токены); None = отправлять весь документ
 
 
 class IndexingConfig(BaseModel):
     chunker: ChunkerConfig = ChunkerConfig()
     context: ContextConfig = ContextConfig()
+    embed_batch_size: int = 64            # размер батча для embed + upsert чанков
     dense_embedder: DenseEmbedderConfig = DenseEmbedderConfig()
     sparse_embedder: SparseEmbedderConfig = SparseEmbedderConfig()
     vision_max_tokens: int = 1024  # лимит токенов ответа Vision LLM (изображения, формулы)

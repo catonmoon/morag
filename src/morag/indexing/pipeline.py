@@ -83,6 +83,8 @@ class IndexingPipeline:
         block_limit: int = _DEFAULT_BLOCK_LIMIT,
         concurrency: int = 1,
         skip_presplit: bool = False,
+        passthrough_threshold: int | None = None,
+        embed_batch_size: int = 64,
     ) -> None:
         self._doc_repo = doc_repo
         self._chunk_repo = chunk_repo
@@ -94,7 +96,9 @@ class IndexingPipeline:
         self._block_limit = block_limit
         self._concurrency = max(1, concurrency)
         self._skip_presplit = skip_presplit
-        if not skip_presplit:
+        self._passthrough_threshold = passthrough_threshold
+        self._embed_batch_size = embed_batch_size
+        if not skip_presplit or passthrough_threshold:
             self._splitter = RecursiveSplitter(
                 self._token_counter,
                 self._block_limit,
@@ -242,16 +246,60 @@ class IndexingPipeline:
             chunk_texts.extend(new_chunks)
         return chunk_texts
 
+    async def _passthrough_chunk(self, document: Document, w: str = '') -> list[str]:
+        """Pre-split на блоки + merge до min_tokens — без SemanticChunker."""
+        blocks = self._splitter.split(document.text)
+        min_tokens = 128
+        max_tokens = self._chunker._max_tokens if hasattr(self._chunker, '_max_tokens') else 256
+
+        # Склеиваем блоки: накапливаем пока < min_tokens,
+        # сбрасываем когда >= min_tokens или следующий блок не влезет
+        merged: list[str] = []
+        current: list[str] = []
+        current_tokens = 0
+        for block in blocks:
+            if not block.strip():
+                continue
+            bt = self._token_counter.count(block)
+            # Если добавление превысит max_tokens и уже набрали min_tokens — сбросить
+            if current_tokens + bt > max_tokens and current_tokens >= min_tokens:
+                merged.append('\n\n'.join(current))
+                current = [block]
+                current_tokens = bt
+            else:
+                # Добавляем: либо не превышает max, либо ещё не набрали min
+                current.append(block)
+                current_tokens += bt
+        if current:
+            if merged and current_tokens < min_tokens:
+                # Последний кусок мелкий — приклеить к предыдущему
+                merged[-1] += '\n\n' + '\n\n'.join(current)
+            else:
+                merged.append('\n\n'.join(current))
+
+        logger.info(
+            '%s  Passthrough: %d block(s) -> %d chunk(s) (min %d, max %d tok)',
+            w, len(blocks), len(merged), min_tokens, max_tokens,
+        )
+        return merged
+
     async def _chunk_document(self, document: Document, w: str = '') -> None:
         """Разбить документ на чанки и сохранить в Qdrant."""
         logger.info('%sChunking: %s', w, document.id)
 
         if self._skip_presplit:
-            # SemanticChunker делает иерархическую нарезку сам
             doc_tokens = self._token_counter.count(document.text)
-            logger.info('%s  Semantic chunking (%d chars, ~%d tokens)...', w, len(document.text), doc_tokens)
-            chunk_texts = await self._chunker.chunk(document.text)
-            logger.info('%s  -> %d chunk(s)', w, len(chunk_texts))
+            # Fallback на passthrough для очень больших документов
+            if self._passthrough_threshold and doc_tokens > self._passthrough_threshold:
+                logger.info(
+                    '%s  Passthrough fallback (%d chars, ~%d tokens > %d threshold)...',
+                    w, len(document.text), doc_tokens, self._passthrough_threshold,
+                )
+                chunk_texts = await self._passthrough_chunk(document, w)
+            else:
+                logger.info('%s  Semantic chunking (%d chars, ~%d tokens)...', w, len(document.text), doc_tokens)
+                chunk_texts = await self._chunker.chunk(document.text)
+                logger.info('%s  -> %d chunk(s)', w, len(chunk_texts))
         else:
             chunk_texts = await self._presplit_and_chunk(document, w)
 
@@ -267,7 +315,8 @@ class IndexingPipeline:
                 '%s  Processing chunk %d/%d (~%d tok): %s...',
                 w, order + 1, total, chunk_tokens, repr(text[:60]),
             )
-            context = await self._context_generator.generate(document.text, text)
+            doc_summary = document.payload.get('doc_summary', '')
+            context = await self._context_generator.generate(document.text, text, doc_summary)
 
             chunk = Chunk(
                 doc_id=document.id,
@@ -281,17 +330,22 @@ class IndexingPipeline:
             )
             chunks.append(chunk)
 
-        # Применяем процессоры батчами — DenseEmbeddingProcessor использует embed_batch
-        for processor in self._chunk_processors:
-            chunks = processor.process_batch(chunks, document)
-
-        for chunk in chunks:
-            vec_summary = ', '.join(
-                f"{k}:dense({len(v)})" if isinstance(v, list)
-                else f"{k}:sparse({len(v['indices'])})"
-                for k, v in chunk.vectors.items()
+        # Применяем процессоры и сохраняем батчами
+        for batch_start in range(0, len(chunks), self._embed_batch_size):
+            batch = chunks[batch_start:batch_start + self._embed_batch_size]
+            for processor in self._chunk_processors:
+                batch = processor.process_batch(batch, document)
+            for chunk in batch:
+                vec_summary = ', '.join(
+                    f"{k}:dense({len(v)})" if isinstance(v, list)
+                    else f"{k}:sparse({len(v['indices'])})"
+                    for k, v in chunk.vectors.items()
+                )
+                logger.info('%s    chunk %d/%d vectors: [%s]', w, chunk.order + 1, total, vec_summary)
+            await self._chunk_repo.upsert_batch(batch)
+            logger.info(
+                '%s  Batch %d-%d/%d saved',
+                w, batch_start + 1, batch_start + len(batch), len(chunks),
             )
-            logger.info('%s    chunk %d/%d vectors: [%s]', w, chunk.order + 1, total, vec_summary)
 
-        await self._chunk_repo.upsert_batch(chunks)
         logger.info('%sChunks saved: %s (%d)', w, document.id, total)

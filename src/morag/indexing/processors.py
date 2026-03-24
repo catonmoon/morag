@@ -19,25 +19,23 @@ def _llm_params(enable_thinking: bool | None = None) -> GenerationParams:
     )
 
 _SUMMARY_PROMPT_NO_PARENT = """\
-Кратко опиши содержание документа — о чём он, какую задачу решает или что описывает. \
-Пиши только саммари, без вводных фраз. \
-Отвечай на языке оригинального документа.
+Briefly describe the document's content — what it is about, what problem it solves, or what it describes. \
+Write only the summary, without introductory phrases. \
+Respond in the same language as the original document.
 
-Документ:
-{doc_text}\
-"""
+Document:
+{doc_text}"""
 
 _SUMMARY_PROMPT_WITH_PARENTS = """\
-Кратко опиши содержание документа с учётом его места в иерархии. \
-Пиши только саммари, без вводных фраз. \
-Отвечай на языке оригинального документа.
+Briefly describe the document's content, considering its place in the hierarchy. \
+Write only the summary, without introductory phrases. \
+Respond in the same language as the original document.
 
-Контекст родительских документов:
+Parent documents context:
 {parent_context}
 
-Документ:
-{doc_text}\
-"""
+Document:
+{doc_text}"""
 
 
 class DocumentProcessor(ABC):
@@ -104,16 +102,23 @@ class DenseEmbeddingProcessor(ChunkProcessor):
 class SparseEmbeddingProcessor(ChunkProcessor):
     """Добавляет sparse-вектор 'keywords' в chunk.vectors.
 
-    Вектор строится из основного текста чанка без контекста —
-    sparse-поиск ориентирован на точное совпадение ключевых слов.
+    Вектор строится из текста чанка + doc_summary документа, чтобы keyword search
+    находил чанки по метаданным из суммари (номер дела, стороны, судья, даты и т.д.).
     Сохраняется в формате {'indices': [...], 'values': [...]}.
     """
 
     def __init__(self, embedder: SparseEmbedder) -> None:
         self._embedder = embedder
 
+    @staticmethod
+    def _sparse_text(chunk: Chunk, document: Document) -> str:
+        doc_summary = document.payload.get('doc_summary', '')
+        if doc_summary:
+            return f'{chunk.text}\n{doc_summary}'
+        return chunk.text
+
     def process(self, chunk: Chunk, document: Document) -> Chunk:
-        indices, values = self._embedder.embed(chunk.text)
+        indices, values = self._embedder.embed(self._sparse_text(chunk, document))
         chunk.vectors['keywords'] = {'indices': indices, 'values': values}
         return chunk
 
@@ -121,7 +126,7 @@ class SparseEmbeddingProcessor(ChunkProcessor):
         """Батчевый sparse-эмбеддинг всех чанков документа за один вызов."""
         if not chunks:
             return chunks
-        texts = [c.text for c in chunks]
+        texts = [self._sparse_text(c, document) for c in chunks]
         results = self._embedder.embed_batch(texts)
         for chunk, (indices, values) in zip(chunks, results):
             chunk.vectors['keywords'] = {'indices': indices, 'values': values}
@@ -134,7 +139,13 @@ class DocSummaryProcessor(DocumentProcessor):
     Саммари учитывает иерархию: если у документа есть родители, их саммари включается
     в промпт как контекст. Родители гарантированно обработаны раньше (BFS-порядок в pipeline).
     Структурные документы и документы без текста пропускаются.
+
+    Подклассы могут переопределить _prompt_no_parent / _prompt_with_parents для
+    кастомных промптов (например LegalDocSummaryProcessor).
     """
+
+    _prompt_no_parent: str = _SUMMARY_PROMPT_NO_PARENT
+    _prompt_with_parents: str = _SUMMARY_PROMPT_WITH_PARENTS
 
     def __init__(
         self,
@@ -152,10 +163,10 @@ class DocSummaryProcessor(DocumentProcessor):
         self._context_window = context_window
         self._params = _llm_params(enable_thinking)
         self._overhead_no_parent = self._token_counter.count(
-            _SUMMARY_PROMPT_NO_PARENT.format(doc_text='')
+            self._prompt_no_parent.format(doc_text='')
         )
         self._overhead_with_parents = self._token_counter.count(
-            _SUMMARY_PROMPT_WITH_PARENTS.format(parent_context='', doc_text='')
+            self._prompt_with_parents.format(parent_context='', doc_text='')
         )
 
     async def process(self, document: Document) -> Document:
@@ -175,14 +186,14 @@ class DocSummaryProcessor(DocumentProcessor):
             parent_tokens = self._token_counter.count(parent_context)
             available = self._context_window - self._overhead_with_parents - parent_tokens - self._max_tokens
             doc_text = self._token_counter.truncate(document.text, max(available, 0))
-            prompt = _SUMMARY_PROMPT_WITH_PARENTS.format(
+            prompt = self._prompt_with_parents.format(
                 parent_context=parent_context,
                 doc_text=doc_text,
             )
         else:
             available = self._context_window - self._overhead_no_parent - self._max_tokens
             doc_text = self._token_counter.truncate(document.text, max(available, 0))
-            prompt = _SUMMARY_PROMPT_NO_PARENT.format(doc_text=doc_text)
+            prompt = self._prompt_no_parent.format(doc_text=doc_text)
 
         messages = [{'role': 'user', 'content': prompt}]
         try:
@@ -198,17 +209,103 @@ class DocSummaryProcessor(DocumentProcessor):
         return document
 
 
+_LEGAL_SUMMARY_PROMPT = """\
+Analyze the following document and produce a structured summary in English.
+
+If this is a COURT CASE / LEGAL ORDER / JUDGMENT, extract:
+- Document type (e.g. Court Order, Judgment, Application, Appeal)
+- Case number (e.g. SCT 295/2025, CFI 057/2025)
+- Court/Tribunal name
+- Date of Issue
+- Judge(s) name(s)
+- Claimant(s) / Applicant(s) — full names
+- Defendant(s) / Respondent(s) — full names
+- Brief outcome (1-2 sentences)
+- Key monetary amounts if any
+
+If this is a LAW / REGULATION / STATUTE, extract:
+- Document type (Law, Regulation, Amendment)
+- Official title and law number (e.g. DIFC Law No. 7 of 2018)
+- Subject matter (1 sentence)
+- Date of enactment / consolidation
+- Key articles mentioned
+
+Format as a structured block, one field per line. Example:
+
+Type: Court Order
+Case: SCT 295/2025
+Court: DIFC Small Claims Tribunal
+Date of Issue: 10 December 2025
+Judge: H.E. Justice Shamlan Al Sawalehi
+Claimant: OLEXA
+Defendant: ODON
+Outcome: Permission to Appeal Application refused. No order as to costs.
+
+Document:
+{doc_text}"""
+
+_LEGAL_SUMMARY_PROMPT_WITH_PARENTS = """\
+Analyze the following document and produce a structured summary in English. \
+Consider the parent documents context for additional information.
+
+If this is a COURT CASE / LEGAL ORDER / JUDGMENT, extract:
+- Document type (e.g. Court Order, Judgment, Application, Appeal)
+- Case number (e.g. SCT 295/2025, CFI 057/2025)
+- Court/Tribunal name
+- Date of Issue
+- Judge(s) name(s)
+- Claimant(s) / Applicant(s) — full names
+- Defendant(s) / Respondent(s) — full names
+- Brief outcome (1-2 sentences)
+- Key monetary amounts if any
+
+If this is a LAW / REGULATION / STATUTE, extract:
+- Document type (Law, Regulation, Amendment)
+- Official title and law number (e.g. DIFC Law No. 7 of 2018)
+- Subject matter (1 sentence)
+- Date of enactment / consolidation
+- Key articles mentioned
+
+Format as a structured block, one field per line. Example:
+
+Type: Court Order
+Case: SCT 295/2025
+Court: DIFC Small Claims Tribunal
+Date of Issue: 10 December 2025
+Judge: H.E. Justice Shamlan Al Sawalehi
+Claimant: OLEXA
+Defendant: ODON
+Outcome: Permission to Appeal Application refused. No order as to costs.
+
+Parent documents context:
+{parent_context}
+
+Document:
+{doc_text}"""
+
+
+class LegalDocSummaryProcessor(DocSummaryProcessor):
+    """Извлекает структурированные метаданные из юридических документов.
+
+    Для судебных актов: тип, номер дела, суд, дата, судья, стороны, исход, суммы.
+    Для законов: тип, название, номер, предмет, дата, ключевые статьи.
+    """
+
+    _prompt_no_parent: str = _LEGAL_SUMMARY_PROMPT
+    _prompt_with_parents: str = _LEGAL_SUMMARY_PROMPT_WITH_PARENTS
+
+
 _TITLE_PROMPT = """\
-Определи название документа по его содержимому. \
-Если в тексте есть явный заголовок или титульная страница — используй его. \
-Если явного заголовка нет — сформулируй короткое название, отражающее суть документа.
+Determine the document title from its content. \
+If the text contains an explicit title or title page, use it. \
+If there is no explicit title, compose a short title that reflects the document's subject.
 
-Требования:
-- Верни ТОЛЬКО название, без кавычек, без пояснений, без вводных фраз.
-- Название должно быть на языке оригинального документа.
-- Название должно быть кратким (до 10 слов).
+Requirements:
+- Return ONLY the title, without quotes, explanations, or introductory phrases.
+- The title must be in the same language as the original document.
+- The title must be concise (up to 10 words).
 
-Документ:
+Document:
 {doc_text}\
 """
 
