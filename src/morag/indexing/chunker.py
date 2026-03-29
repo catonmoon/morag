@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
+import re
 from abc import ABC, abstractmethod
 from typing import Callable
 
@@ -12,8 +14,12 @@ from morag.indexing.splitter import (
     MarkdownHeaderSplitter,
     RecursiveSplitter,
     SemanticSplitter,
+    TableRowSplitter,
+    _split_by_headers,
+    _top_level_blocks,
     pack_blocks,
     split_into_semantic_units,
+    split_sentences,
 )
 from morag.indexing.token_counter import TokenCounter
 from morag.llm.client import GenerationParams
@@ -574,3 +580,673 @@ class SemanticChunker(Chunker):
         norm = np.linalg.norm(va) * np.linalg.norm(vb)
         similarity = float(np.dot(va, vb) / (norm + 1e-8))
         return 1.0 - similarity
+
+
+# ---------------------------------------------------------------------------
+# HybridChunker
+# ---------------------------------------------------------------------------
+
+_DIAGRAM_LANGS = frozenset({'plantuml', 'mermaid', 'ditaa'})
+_FENCE_OPEN_RE = re.compile(r'^(`{3,})\s*(.*)')
+_PAGE_MARKER_RE = re.compile(r'<!-- page:(\d+) -->\n?')
+
+
+def _merge_pages(a: list[int], b: list[int]) -> list[int]:
+    """Объединить два списка страниц, сохранив уникальность и порядок."""
+    return sorted(set(a) | set(b))
+
+
+@dataclasses.dataclass
+class _Block:
+    """Атомарный блок документа после структурного разбора."""
+    text: str
+    block_type: str   # heading | paragraph | table | fence | diagram | list
+    tokens: int
+    pages: list[int] = dataclasses.field(default_factory=list)
+    char_offset: int = 0  # позиция начала блока в оригинальном тексте документа
+
+
+@dataclasses.dataclass
+class ChunkResult:
+    """Результат чанкинга: текст + метаданные позиционирования."""
+    text: str
+    pages: list[int] = dataclasses.field(default_factory=list)
+    char_offset: int = 0  # позиция начала чанка в оригинальном тексте документа
+
+
+class HybridChunker(Chunker):
+    """Структурный чанкер: CommonMark AST → greedy packing → oversized handling → post-merge.
+
+    Три стадии:
+    1. _parse_blocks  — разбор документа на типизированные блоки
+    2. _greedy_fill   — жадное наполнение чанков (магнитные заголовки, oversized handling)
+    3. _post_merge    — склейка мелких чанков (< min_tokens) с соседями
+    """
+
+    # Стратегии по умолчанию для каждого типа блока
+    _DEFAULT_STRATEGIES = {
+        'table': 'transform',
+        'list': 'split',
+        'paragraph': 'split',
+        'fence': 'asis',
+        'diagram': 'asis',
+        'heading': 'asis',
+    }
+
+    def __init__(
+        self,
+        counter: TokenCounter,
+        min_tokens: int = 50,
+        max_tokens: int = 250,
+        oversized_strategies: dict[str, str] | None = None,
+        embed_fn: Callable[[list[str]], list[list[float]]] | None = None,
+        llm_chunker: LLMChunker | None = None,
+    ) -> None:
+        self._counter = counter
+        self._min_tokens = min_tokens
+        self._max_tokens = max_tokens
+        self._strategies = {**self._DEFAULT_STRATEGIES, **(oversized_strategies or {})}
+        self._embed_fn = embed_fn
+        self._llm_chunker = llm_chunker
+        self._table_splitter = TableRowSplitter(counter, max_tokens)
+
+    async def chunk(self, text: str) -> list[str]:
+        result = await self._run_pipeline(text, paged=False)
+        return [r.text for r in result]
+
+    async def chunk_with_metadata(
+        self, text: str, *, paged: bool = False,
+    ) -> list[ChunkResult]:
+        """Разбить текст на чанки с метаданными (pages, char_offset).
+
+        Args:
+            text: полный текст документа (может содержать маркеры <!-- page:N -->).
+            paged: документ страничный (PDF, DOCX). Если True — извлекаем маркеры
+                   и валидируем что каждый чанк получил pages. Если False — маркеры
+                   не ищем, pages будут пустыми.
+
+        Каждый чанк получает char_offset — позицию в оригинальном тексте документа.
+        """
+        return await self._run_pipeline(text, paged=paged)
+
+    async def _run_pipeline(
+        self, text: str, *, paged: bool = False,
+    ) -> list[ChunkResult]:
+        """Общий пайплайн: parse → greedy fill → post-merge."""
+        blocks = self._parse_blocks(text, paged=paged)
+        raw_chunks = await self._greedy_fill(blocks)
+        chunks = self._post_merge(raw_chunks)
+
+        if paged:
+            missing = sum(1 for c in chunks if not c.pages)
+            if missing:
+                logger.warning(
+                    'HybridChunker: paged document has %d/%d chunk(s) without pages',
+                    missing, len(chunks),
+                )
+
+        logger.info(
+            'HybridChunker: %d block(s) → %d raw chunk(s) → %d final chunk(s)',
+            len(blocks), len(raw_chunks), len(chunks),
+        )
+        return chunks
+
+    # ------------------------------------------------------------------
+    # Stage 1: Parse blocks
+    # ------------------------------------------------------------------
+
+    def _parse_blocks(self, text: str, *, paged: bool = False) -> list[_Block]:
+        """Разбор документа на типизированные блоки через CommonMark AST.
+
+        Если paged=True: маркеры <!-- page:N --> извлекаются, каждый блок получает
+        pages. Блоки без маркеров наследуют последнюю известную страницу.
+        Если paged=False: маркеры не ищем, pages остаются пустыми.
+
+        Каждый блок получает char_offset — позицию в оригинальном тексте.
+        """
+        sections = _split_by_headers(text)
+        blocks: list[_Block] = []
+        current_page: int | None = None
+        search_start = 0  # позиция поиска в оригинальном тексте
+
+        for section in sections:
+            section_stripped = section.strip()
+            if not section_stripped:
+                continue
+
+            # Находим позицию секции в оригинальном тексте
+            section_offset = text.find(section_stripped, search_start)
+            if section_offset < 0:
+                section_offset = search_start
+            search_start = section_offset + len(section_stripped)
+
+            source_lines = section_stripped.split('\n')
+            ast_blocks = _top_level_blocks(section_stripped)
+
+            if not ast_blocks:
+                if section_stripped:
+                    if paged:
+                        clean, pages, current_page = self._extract_pages(
+                            section_stripped, current_page,
+                        )
+                    else:
+                        clean, pages = section_stripped, []
+                    if clean.strip():
+                        blocks.append(_Block(
+                            text=clean.strip(),
+                            block_type='paragraph',
+                            tokens=self._counter.count(clean.strip()),
+                            pages=pages,
+                            char_offset=section_offset,
+                        ))
+                continue
+
+            for token_type, start, end in ast_blocks:
+                block_text = '\n'.join(source_lines[start:end]).strip()
+                if not block_text:
+                    continue
+                # Offset блока = offset секции + offset строки внутри секции
+                line_offset = sum(
+                    len(source_lines[ln]) + 1 for ln in range(start)
+                )
+                block_offset = section_offset + line_offset
+
+                if paged:
+                    clean, pages, current_page = self._extract_pages(
+                        block_text, current_page,
+                    )
+                else:
+                    clean, pages = block_text, []
+                if not clean.strip():
+                    continue
+                block_type = self._classify_block(token_type, clean.strip())
+                blocks.append(_Block(
+                    text=clean.strip(),
+                    block_type=block_type,
+                    tokens=self._counter.count(clean.strip()),
+                    pages=pages,
+                    char_offset=block_offset,
+                ))
+
+        return blocks
+
+    @staticmethod
+    def _extract_pages(
+        text: str, current_page: int | None,
+    ) -> tuple[str, list[int], int | None]:
+        """Извлечь маркеры страниц из текста блока.
+
+        Возвращает (очищенный текст, список страниц, обновлённый current_page).
+        """
+        markers = _PAGE_MARKER_RE.findall(text)
+        clean = _PAGE_MARKER_RE.sub('', text)
+
+        if markers:
+            page_nums = sorted({int(m) for m in markers})
+            current_page = page_nums[-1]
+            return clean, page_nums, current_page
+
+        if current_page is not None:
+            return clean, [current_page], current_page
+
+        return clean, [], current_page
+
+    @staticmethod
+    def _classify_block(token_type: str, text: str) -> str:
+        """Определить тип блока по типу CommonMark-токена."""
+        if token_type == 'heading_open':
+            return 'heading'
+        if token_type == 'table_open':
+            return 'table'
+        if token_type == 'fence' or token_type == 'code_block':
+            m = _FENCE_OPEN_RE.match(text)
+            if m:
+                lang = m.group(2).strip().lower()
+                if lang in _DIAGRAM_LANGS:
+                    return 'diagram'
+            return 'fence'
+        if token_type in ('bullet_list_open', 'ordered_list_open'):
+            return 'list'
+        return 'paragraph'
+
+    # ------------------------------------------------------------------
+    # Stage 2: Greedy fill
+    # ------------------------------------------------------------------
+
+    async def _greedy_fill(self, blocks: list[_Block]) -> list[ChunkResult]:
+        """Жадное наполнение чанков из блоков."""
+        if not blocks:
+            return []
+
+        chunks: list[ChunkResult] = []
+        current_parts: list[str] = []
+        current_pages: list[int] = []
+        current_offset: int = 0
+        # Offset последнего добавленного блока — нужен для магнитного заголовка
+        last_block_offset: int = 0
+
+        for block in blocks:
+            combined_tokens = self._count_combined(current_parts, block.text)
+
+            if combined_tokens <= self._max_tokens:
+                if not current_parts:
+                    current_offset = block.char_offset
+                current_parts.append(block.text)
+                current_pages = _merge_pages(current_pages, block.pages)
+                last_block_offset = block.char_offset
+            elif block.tokens <= self._max_tokens:
+                heading_offset = self._flush_chunk(
+                    chunks, current_parts, current_pages,
+                    current_offset, last_block_offset,
+                )
+                if heading_offset is not None:
+                    current_offset = heading_offset
+                else:
+                    current_offset = block.char_offset
+                current_parts.append(block.text)
+                current_pages = list(block.pages)
+                last_block_offset = block.char_offset
+            else:
+                self._flush_chunk(
+                    chunks, current_parts, current_pages,
+                    current_offset, last_block_offset,
+                )
+                oversized_chunks = await self._split_oversized(block)
+                chunks.extend(oversized_chunks)
+                current_parts = []
+                current_pages = []
+                current_offset = 0
+                last_block_offset = 0
+
+        if current_parts:
+            chunks.append(ChunkResult(
+                text='\n\n'.join(current_parts),
+                pages=current_pages,
+                char_offset=current_offset,
+            ))
+
+        return chunks
+
+    def _count_combined(self, current_parts: list[str], new_text: str) -> int:
+        """Подсчитать токены объединённого текста (с разделителями)."""
+        if not current_parts:
+            return self._counter.count(new_text)
+        combined = '\n\n'.join(current_parts) + '\n\n' + new_text
+        return self._counter.count(combined)
+
+    def _flush_chunk(
+        self,
+        chunks: list[ChunkResult],
+        parts: list[str],
+        pages: list[int],
+        char_offset: int,
+        last_block_offset: int = 0,
+    ) -> int | None:
+        """Закрыть текущий чанк с проверкой магнитного заголовка.
+
+        Возвращает char_offset вытолкнутого heading (для следующего чанка)
+        или None если heading не выталкивался.
+        """
+        if not parts:
+            return None
+
+        last = parts[-1]
+        last_is_heading = self._looks_like_heading(last)
+
+        if last_is_heading and len(parts) > 1:
+            heading = parts.pop()
+            chunks.append(ChunkResult(
+                text='\n\n'.join(parts),
+                pages=list(pages),
+                char_offset=char_offset,
+            ))
+            parts.clear()
+            parts.append(heading)
+            return last_block_offset  # offset heading для следующего чанка
+        else:
+            chunks.append(ChunkResult(
+                text='\n\n'.join(parts),
+                pages=list(pages),
+                char_offset=char_offset,
+            ))
+            parts.clear()
+            return None
+
+    @staticmethod
+    def _looks_like_heading(text: str) -> bool:
+        """Проверить, является ли текст Markdown-заголовком."""
+        stripped = text.strip()
+        return bool(stripped) and stripped.splitlines()[0].lstrip().startswith('#')
+
+    # ------------------------------------------------------------------
+    # Stage 2b: Oversized handling
+    # ------------------------------------------------------------------
+
+    async def _split_oversized(self, block: _Block) -> list[ChunkResult]:
+        """Разбить oversized блок по стратегии для его типа.
+
+        Стратегии: asis, split, embed, transform, llm.
+        Все куски наследуют pages и offset блока.
+        """
+        strategy = self._strategies.get(block.block_type, 'asis')
+        logger.info(
+            'HybridChunker: oversized %s block (%d tokens), strategy=%s',
+            block.block_type, block.tokens, strategy,
+        )
+        texts = await self._apply_oversized_strategy(block, strategy)
+        return [
+            ChunkResult(text=t, pages=list(block.pages), char_offset=block.char_offset)
+            for t in texts
+        ]
+
+    async def _apply_oversized_strategy(
+        self, block: _Block, strategy: str,
+    ) -> list[str]:
+        """Применить стратегию к oversized блоку.
+
+        asis      — вернуть как есть
+        split     — структурное разбиение (предложения / элементы / строки)
+        embed     — SemanticChunker (embedding-based границы)
+        transform — преобразовать формат + рекурсия (depth=1)
+        llm       — LLM преобразует + рекурсия
+        """
+        if strategy == 'asis':
+            return [block.text]
+
+        if strategy == 'split':
+            return await self._split_structural(block)
+
+        if strategy == 'embed':
+            if self._embed_fn is not None:
+                semantic = SemanticChunker(
+                    embed_fn=self._embed_fn,
+                    counter=self._counter,
+                    min_tokens=self._min_tokens,
+                    max_tokens=self._max_tokens,
+                )
+                return await semantic.chunk(block.text)
+            logger.warning('HybridChunker: embed strategy but no embed_fn, falling back to split')
+            return await self._split_structural(block)
+
+        if strategy == 'transform':
+            transformed = self._transform_block(block)
+            if transformed != block.text:
+                # Рекурсия depth=1: чанкируем трансформированный текст
+                return await self.chunk(transformed)
+            return [block.text]
+
+        if strategy == 'llm':
+            if self._llm_chunker is not None:
+                return await self._llm_chunker.chunk(block.text)
+            logger.warning('HybridChunker: llm strategy but no llm_chunker, falling back to split')
+            return await self._split_structural(block)
+
+        logger.warning('HybridChunker: unknown strategy %r, returning as-is', strategy)
+        return [block.text]
+
+    async def _split_structural(self, block: _Block) -> list[str]:
+        """Структурное разбиение по типу блока."""
+        if block.block_type == 'list':
+            return await self._split_oversized_list(block.text)
+        if block.block_type == 'paragraph':
+            return self._split_by_sentences(block.text)
+        if block.block_type == 'table':
+            return self._split_table_by_rows(block.text)
+        if block.block_type == 'fence':
+            return self._split_oversized_code(block.text)
+        return [block.text]
+
+    def _split_by_sentences(self, text: str) -> list[str]:
+        """Текст → предложения → жадная упаковка."""
+        sentences = split_sentences(text)
+        if len(sentences) <= 1:
+            return [text]
+        chunks: list[str] = []
+        current: list[str] = []
+        current_tokens = 0
+        for sentence in sentences:
+            sent_tokens = self._counter.count(sentence)
+            if current_tokens + sent_tokens > self._max_tokens and current:
+                chunks.append(' '.join(current))
+                current = [sentence]
+                current_tokens = sent_tokens
+            else:
+                current.append(sentence)
+                current_tokens += sent_tokens
+        if current:
+            chunks.append(' '.join(current))
+        return chunks
+
+    def _split_table_by_rows(self, text: str) -> list[str]:
+        """Таблица → строки с шапкой."""
+        if self._table_splitter.can_split(text):
+            parts = self._table_splitter.split(text)
+            if len(parts) > 1:
+                return parts
+        return [text]
+
+    def _transform_block(self, block: _Block) -> str:
+        """Преобразовать формат блока для последующего чанкинга.
+
+        table → key-value текст (заголовки колонок: значения ячеек)
+        Остальные типы — без изменений.
+        """
+        if block.block_type == 'table':
+            return self._transform_table_to_text(block.text)
+        return block.text
+
+    @staticmethod
+    def _transform_table_to_text(text: str) -> str:
+        """Конвертировать таблицу в key-value markdown.
+
+        | Name | Age | Role |        →  **Name:** Alice
+        |------|-----|------|            **Age:** 30
+        | Alice| 30  | Dev  |           **Role:** Dev
+        """
+        lines = text.strip().split('\n')
+        if len(lines) < 3:
+            return text
+
+        # Парсим шапку
+        header_line = lines[0]
+        headers = [h.strip() for h in header_line.strip('|').split('|')]
+
+        # Пропускаем separator
+        data_start = 1
+        for i, line in enumerate(lines[1:], 1):
+            if re.match(r'^\s*\|[\s\-:|]+\|\s*$', line):
+                data_start = i + 1
+                break
+
+        # Конвертируем строки: каждая ячейка → заголовок h4 + содержимое
+        result_parts: list[str] = []
+        for line in lines[data_start:]:
+            if not line.strip().startswith('|'):
+                continue
+            cells = [c.strip() for c in line.strip('|').split('|')]
+            row_parts: list[str] = []
+            for j, cell in enumerate(cells):
+                if j < len(headers) and cell.strip():
+                    key = headers[j].strip('* ')
+                    if key:
+                        row_parts.append(f'#### {key}\n\n{cell}')
+            if row_parts:
+                result_parts.append('\n\n'.join(row_parts))
+
+        if not result_parts:
+            return text
+
+        return '\n\n---\n\n'.join(result_parts)
+
+    _LIST_ITEM_RE = re.compile(r'^(\s*[-*+]|\s*\d+[.)]\s)', re.MULTILINE)
+
+    async def _split_oversized_list(self, text: str) -> list[str]:
+        """Список → элементы → жадная упаковка. Oversized элемент → стратегия paragraph."""
+        # Разбиваем по элементам списка: каждый начинается с `- `, `* `, `1. ` и т.д.
+        items: list[str] = []
+        matches = list(self._LIST_ITEM_RE.finditer(text))
+
+        if len(matches) <= 1:
+            return [text]
+
+        for i, m in enumerate(matches):
+            start = m.start()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            item = text[start:end].rstrip()
+            if item:
+                items.append(item)
+
+        if not items:
+            return [text]
+
+        # Жадная упаковка элементов; oversized элемент разбивается по предложениям
+        chunks: list[str] = []
+        current: list[str] = []
+        current_tokens = 0
+
+        for item in items:
+            item_tokens = self._counter.count(item)
+            if item_tokens > self._max_tokens:
+                # Oversized элемент — сбросить текущий и применить стратегию paragraph
+                if current:
+                    chunks.append('\n'.join(current))
+                    current = []
+                    current_tokens = 0
+                para_strategy = self._strategies.get('paragraph', 'split')
+                item_block = _Block(text=item, block_type='paragraph', tokens=item_tokens)
+                item_chunks = await self._apply_oversized_strategy(item_block, para_strategy)
+                chunks.extend(item_chunks)
+            elif current_tokens + item_tokens > self._max_tokens and current:
+                chunks.append('\n'.join(current))
+                current = [item]
+                current_tokens = item_tokens
+            else:
+                current.append(item)
+                current_tokens += item_tokens
+
+        if current:
+            chunks.append('\n'.join(current))
+
+        return chunks if chunks else [text]
+
+    def _split_oversized_code(self, text: str) -> list[str]:
+        """Code fence → нарезка по строкам с re-wrap fence markers."""
+        lines = text.split('\n')
+        # Извлекаем открывающий и закрывающий fence
+        open_fence = ''
+        close_fence = '```'
+
+        if lines and lines[0].strip().startswith('```'):
+            open_fence = lines[0]
+            m = _FENCE_OPEN_RE.match(lines[0])
+            if m:
+                close_fence = m.group(1)
+            # Убираем открывающий fence
+            lines = lines[1:]
+
+        if lines and lines[-1].strip().startswith('`'):
+            lines = lines[:-1]
+
+        # Жадная упаковка строк
+        fence_overhead = self._counter.count(open_fence + '\n' + close_fence)
+        effective_limit = max(1, self._max_tokens - fence_overhead)
+
+        chunks: list[str] = []
+        current_lines: list[str] = []
+        current_tokens = 0
+
+        for line in lines:
+            line_tokens = self._counter.count(line)
+            if current_tokens + line_tokens > effective_limit and current_lines:
+                body = '\n'.join(current_lines)
+                chunks.append(f'{open_fence}\n{body}\n{close_fence}')
+                current_lines = [line]
+                current_tokens = line_tokens
+            else:
+                current_lines.append(line)
+                current_tokens += line_tokens
+
+        if current_lines:
+            body = '\n'.join(current_lines)
+            chunks.append(f'{open_fence}\n{body}\n{close_fence}')
+
+        return chunks if chunks else [text]
+
+
+    # ------------------------------------------------------------------
+    # Stage 3: Post-merge
+    # ------------------------------------------------------------------
+
+    def _post_merge(self, chunks: list[ChunkResult]) -> list[ChunkResult]:
+        """Склейка мелких чанков (< min_tokens) с соседями."""
+        if len(chunks) <= 1:
+            return chunks
+
+        token_counts = [self._counter.count(c.text) for c in chunks]
+        merged: list[ChunkResult] = []
+        merged_tokens: list[int] = []
+        skip: set[int] = set()
+
+        for i in range(len(chunks)):
+            if i in skip:
+                continue
+
+            ci = chunks[i]
+
+            if token_counts[i] >= self._min_tokens:
+                merged.append(ci)
+                merged_tokens.append(token_counts[i])
+                continue
+
+            # Последний чанк документа — допустим < min_tokens
+            if i == len(chunks) - 1:
+                if merged:
+                    prev = merged[-1]
+                    combined = prev.text + '\n\n' + ci.text
+                    combined_tok = self._counter.count(combined)
+                    if combined_tok <= self._max_tokens:
+                        merged[-1] = ChunkResult(
+                            text=combined,
+                            pages=_merge_pages(prev.pages, ci.pages),
+                            char_offset=prev.char_offset,
+                        )
+                        merged_tokens[-1] = combined_tok
+                        continue
+                merged.append(ci)
+                merged_tokens.append(token_counts[i])
+                continue
+
+            # Попробовать склеить с предыдущим
+            if merged:
+                prev = merged[-1]
+                combined_prev = prev.text + '\n\n' + ci.text
+                combined_prev_tok = self._counter.count(combined_prev)
+                if combined_prev_tok <= self._max_tokens:
+                    merged[-1] = ChunkResult(
+                        text=combined_prev,
+                        pages=_merge_pages(prev.pages, ci.pages),
+                        char_offset=prev.char_offset,
+                    )
+                    merged_tokens[-1] = combined_prev_tok
+                    continue
+
+            # Попробовать склеить со следующим
+            if i + 1 < len(chunks) and i + 1 not in skip:
+                nxt = chunks[i + 1]
+                combined_next = ci.text + '\n\n' + nxt.text
+                combined_next_tok = self._counter.count(combined_next)
+                if combined_next_tok <= self._max_tokens:
+                    merged.append(ChunkResult(
+                        text=combined_next,
+                        pages=_merge_pages(ci.pages, nxt.pages),
+                        char_offset=ci.char_offset,
+                    ))
+                    merged_tokens.append(combined_next_tok)
+                    skip.add(i + 1)
+                    continue
+
+            # Ни с кем не склеить — оставляем as-is
+            merged.append(ci)
+            merged_tokens.append(token_counts[i])
+
+        return merged

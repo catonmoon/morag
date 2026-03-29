@@ -6,7 +6,7 @@ RAG-система для локальных Markdown-файлов, Confluence �
 
 - **Гибридный поиск** — sparse + dense векторы с RRF-fusion
 - **Локальные LLM** — любой OpenAI-совместимый эндпойнт (Ollama, LM Studio, облако)
-- **Умное чанкование** — семантический чанкер на эмбеддингах, цепочка сплиттеров, опциональный LLM-чанкер
+- **Умное чанкование** — структурный hybrid-чанкер (CommonMark AST, магнитные заголовки, oversized handling), семантический на эмбеддингах, опциональный LLM-чанкер
 - **Контекстуализация** — LLM-summary для каждого чанка + иерархическое doc_summary
 - **Идемпотентность и full sync** — пропуск неизменённых документов, каскадное удаление устаревших
 - **Daemon-режим** — cron-расписание, параллельная индексация, retry с backoff
@@ -69,7 +69,7 @@ Source.get_metadata() → full sync → BFS по parent_doc_ids
     → Chunker → ContextGenerator → ChunkProcessor → chunks.upsert()
 ```
 
-Режимы чанкинга: `semantic` (default, на эмбеддингах), `passthrough`, `llm`. Контекст: `noop` или `llm`.
+Режимы чанкинга: `hybrid` (default, структурный — CommonMark AST + greedy packing), `semantic` (на эмбеддингах), `passthrough`, `llm`. Контекст: `noop` или `llm`.
 ### Источники данных
 
 | Источник | `source_type` |

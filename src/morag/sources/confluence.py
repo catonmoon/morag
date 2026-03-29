@@ -4,6 +4,7 @@ import asyncio
 import base64
 import logging
 import mimetypes
+import re
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
 
@@ -237,11 +238,15 @@ class ConfluenceSource(Source):
 
         _clean_jira_macros(soup)
         _remove_vendor_ui_blocks(soup)
+        _unwrap_lists_in_table_cells(soup)
 
         if self._vision_client:
             await self._replace_images_with_descriptions(soup, page_id)
 
-        return markdownify(str(soup), heading_style='ATX', bullets='-').strip()
+        md = markdownify(str(soup), heading_style='ATX', bullets='-').strip()
+        # Нормализация inline-списков, но не внутри строк таблиц
+        md = _fix_inline_lists(md)
+        return md
 
     async def _replace_images_with_descriptions(self, soup: BeautifulSoup, page_id: str) -> None:
         """Скачать изображения и заменить <img> тегами с описанием от vision LLM."""
@@ -364,14 +369,70 @@ def _remove_vendor_ui_blocks(soup: BeautifulSoup) -> None:
         el.decompose()
 
 
+_INLINE_LIST_RE = re.compile(r' - (?=[A-ZА-ЯЁa-zа-яё\[\(«\*])')
+
+
+def _fix_inline_lists(md: str) -> str:
+    """Нормализовать inline-списки, не трогая строки таблиц.
+
+    markdownify склеивает <li> в одну строку: `text - item1 - item2`.
+    Фиксим на `text\\n- item1\\n- item2`, но только вне markdown-таблиц.
+    """
+    lines = md.split('\n')
+    result = []
+    for line in lines:
+        if line.strip().startswith('|'):
+            result.append(line)  # строка таблицы — не трогаем
+        else:
+            result.append(_INLINE_LIST_RE.sub('\n- ', line))
+    return '\n'.join(result)
+
+
+def _unwrap_lists_in_table_cells(soup: BeautifulSoup) -> None:
+    """Заменить <ul>/<ol> внутри <td> на <br>-разделённые строки с маркерами.
+
+    markdownify склеивает <li> в одну строку внутри <td>, теряя структуру списка.
+    Решение: до markdownify заменяем HTML-списки на текст с переносами.
+    """
+    for td in soup.find_all('td'):
+        for list_tag in td.find_all(['ul', 'ol']):
+            items = list_tag.find_all('li', recursive=False)
+            if not items:
+                continue
+            is_ordered = list_tag.name == 'ol'
+            fragments = []
+            for i, li in enumerate(items):
+                # Рекурсивно обработать вложенные списки
+                for nested in li.find_all(['ul', 'ol']):
+                    nested_items = nested.find_all('li', recursive=False)
+                    for ni in nested_items:
+                        fragments.append(f'  - {ni.get_text(strip=True)}')
+                    nested.decompose()
+                prefix = f'{i + 1}. ' if is_ordered else '- '
+                fragments.append(f'{prefix}{li.get_text(strip=True)}')
+            # Заменяем список на <br>-разделённый текст
+            new_content = soup.new_tag('span')
+            for j, frag in enumerate(fragments):
+                if j > 0:
+                    new_content.append(soup.new_tag('br'))
+                new_content.append(frag)
+            list_tag.replace_with(new_content)
+
+
 def _html_to_markdown(html: str) -> str:
-    """Конвертировать HTML в Markdown (без обработки изображений)."""
+    """Конвертировать HTML в Markdown (без обработки изображений).
+
+    Постпроцессинг: markdownify склеивает списки внутри ячеек таблиц в одну строку
+    (` - item1 - item2`). Нормализуем обратно в `\\n- item1\\n- item2`.
+    """
     if not html:
         return ''
     soup = BeautifulSoup(html, 'html.parser')
     for tag in soup.find_all(['script', 'style']):
         tag.decompose()
-    return markdownify(str(soup), heading_style='ATX', bullets='-').strip()
+    md = markdownify(str(soup), heading_style='ATX', bullets='-').strip()
+    md = _fix_inline_lists(md)
+    return md
 
 
 def _guess_media_type(src: str) -> str:

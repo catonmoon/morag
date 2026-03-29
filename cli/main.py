@@ -12,7 +12,7 @@ from qdrant_client import AsyncQdrantClient
 
 from morag.config import Config, DenseEmbedderConfig, PdfConfig, RetryConfig, SparseEmbedderConfig, load_config
 from morag.indexing.bm25 import build_bm25_index
-from morag.indexing.chunker import LLMChunker, PassthroughChunker, SemanticChunker
+from morag.indexing.chunker import HybridChunker, LLMChunker, PassthroughChunker, SemanticChunker
 from morag.indexing.context import LLMContextGenerator, NoopContextGenerator
 from morag.indexing.embedder import (
     Embedder,
@@ -32,7 +32,7 @@ from morag.indexing.processors import (
     PageMarkerProcessor,
     SparseEmbeddingProcessor,
 )
-from morag.indexing.token_counter import TiktokenCounter
+from morag.indexing.token_counter import HuggingFaceTokenCounter, TiktokenCounter
 from morag.llm.client import GenerationParams, LLMClient
 from morag.llm.retry import RetryPolicy
 from morag.sources.confluence import ConfluenceSource
@@ -142,7 +142,10 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
     config = load_config(config_path)
 
     logger.info('Connecting to Qdrant %s:%d', config.qdrant.host, config.qdrant.port)
-    client = AsyncQdrantClient(host=config.qdrant.host, port=config.qdrant.port)
+    client = AsyncQdrantClient(
+            host=config.qdrant.host, port=config.qdrant.port,
+            timeout=60, pool_size=max(10, config.indexing.concurrency * 4),
+        )
 
     if reset:
         existing = {c.name for c in (await client.get_collections()).collections}
@@ -213,12 +216,14 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         logger.error('No sources configured in config.yml')
         return
 
-    token_counter = TiktokenCounter()
+    llm_counter = TiktokenCounter()  # для LLM context window, doc_summary, doc_title
+    embed_counter = HuggingFaceTokenCounter(config.indexing.dense_embedder.model)  # для чанкинга
+    logger.info('Token counters: llm=TikToken, embed=HuggingFace(%s)', config.indexing.dense_embedder.model)
     chunker_mode = config.indexing.chunker.mode
     if chunker_mode == 'semantic':
         chunker = SemanticChunker(
             embed_fn=embedder.embed_batch,
-            counter=token_counter,
+            counter=embed_counter,  # FRIDA tokenizer для точного подсчёта
             min_tokens=config.indexing.chunker.min_tokens,
             max_tokens=config.indexing.chunker.max_tokens,
             accept_pair=config.indexing.chunker.accept_pair,
@@ -226,22 +231,54 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
     elif chunker_mode == 'llm':
         chunker = LLMChunker(
             llm_client,
-            token_counter=token_counter,
+            token_counter=llm_counter,
             embed_fn=embedder.embed,
             halving_retries=config.indexing.chunker.halving_retries,
             fallback_enabled=config.indexing.chunker.fallback,
             enable_thinking=config.llm.enable_thinking,
+        )
+    elif chunker_mode == 'hybrid':
+        oversized_cfg = config.indexing.chunker.oversized
+        oversized_strategies = {
+            'table': oversized_cfg.table,
+            'list': oversized_cfg.list,
+            'paragraph': oversized_cfg.paragraph,
+            'fence': oversized_cfg.fence,
+            'diagram': oversized_cfg.diagram,
+        }
+        # LLM chunker нужен если хотя бы одна стратегия = llm
+        llm_chunker_for_hybrid = None
+        if 'llm' in oversized_strategies.values():
+            llm_chunker_for_hybrid = LLMChunker(
+                llm_client,
+                token_counter=llm_counter,
+                embed_fn=embedder.embed,
+                halving_retries=config.indexing.chunker.halving_retries,
+                fallback_enabled=config.indexing.chunker.fallback,
+                enable_thinking=config.llm.enable_thinking,
+            )
+        # Embed fn нужен если хотя бы одна стратегия = embed
+        embed_fn = embedder.embed_batch if 'embed' in oversized_strategies.values() else None
+        chunker = HybridChunker(
+            counter=embed_counter,  # FRIDA tokenizer для точного подсчёта
+            min_tokens=config.indexing.chunker.min_tokens,
+            max_tokens=config.indexing.chunker.max_tokens,
+            oversized_strategies=oversized_strategies,
+            embed_fn=embed_fn,
+            llm_chunker=llm_chunker_for_hybrid,
         )
     else:
         chunker = PassthroughChunker()
     context_generator = (
         LLMContextGenerator(
             llm_client,
-            token_counter=token_counter,
+            token_counter=llm_counter,
+            embed_counter=embed_counter,
             context_window=config.llm.context_window,
             max_output_tokens=config.indexing.context.max_tokens,
             enable_thinking=config.llm.enable_thinking,
             window_tokens=config.indexing.context.window_tokens,
+            chunk_max_tokens=config.indexing.context.chunk_max_tokens,
         ) if config.indexing.context.mode == 'llm' else NoopContextGenerator()
     )
     sparse_embedder = _make_sparse_embedder(config.indexing.sparse_embedder)
@@ -253,7 +290,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             max_tokens=config.indexing.doc_title.max_tokens,
             scan_tokens=config.indexing.doc_title.scan_tokens,
             scan_pages=config.indexing.doc_title.scan_pages,
-            token_counter=token_counter,
+            token_counter=llm_counter,
             context_window=config.llm.context_window,
             enable_thinking=config.llm.enable_thinking,
         ))
@@ -270,7 +307,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             llm_client=llm_client,
             doc_repo=doc_repo,
             max_tokens=config.indexing.doc_summary.max_tokens,
-            token_counter=token_counter,
+            token_counter=llm_counter,
             context_window=config.llm.context_window,
             enable_thinking=config.llm.enable_thinking,
         ))
@@ -285,7 +322,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
     # В LLM-режиме блок + ответ LLM должны влезть в контекстное окно.
     # Ответ ≈ такого же размера как вход, поэтому безопасный лимит: (context_window - overhead) / 2.
     _LLM_PROMPT_OVERHEAD = 512  # токенов на системный промпт + запас
-    skip_presplit = chunker_mode == 'semantic'
+    skip_presplit = chunker_mode in ('semantic', 'hybrid')
     if chunker_mode == 'llm':
         llm_safe_limit = (config.llm.context_window - _LLM_PROMPT_OVERHEAD) // 2
         block_limit = min(config.indexing.chunker.block_limit, llm_safe_limit)
@@ -305,7 +342,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         context_generator=context_generator,
         chunk_processors=chunk_processors,
         block_limit=block_limit,
-        token_counter=token_counter,
+        token_counter=llm_counter,
         concurrency=config.indexing.concurrency,
         skip_presplit=skip_presplit,
         passthrough_threshold=config.indexing.chunker.passthrough_threshold,
@@ -416,7 +453,10 @@ async def cmd_query(config_path: str, question: str, top_k: int) -> None:
     config = load_config(config_path)
 
     logger.info('Connecting to Qdrant %s:%d', config.qdrant.host, config.qdrant.port)
-    client = AsyncQdrantClient(host=config.qdrant.host, port=config.qdrant.port)
+    client = AsyncQdrantClient(
+            host=config.qdrant.host, port=config.qdrant.port,
+            timeout=60, pool_size=max(10, config.indexing.concurrency * 4),
+        )
 
     embedder = _make_dense_embedder(config.indexing.dense_embedder)
     sparse_embedder = _make_sparse_embedder(config.indexing.sparse_embedder)

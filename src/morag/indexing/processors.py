@@ -355,8 +355,16 @@ class DocTitleProcessor(DocumentProcessor):
             return text[:markers[n_pages].start()].rstrip()
         return text
 
+    # Source types где title уже задан людьми (Confluence page tree, Jira tasks)
+    _SKIP_SOURCE_TYPES = frozenset({'confluence', 'attached_jira'})
+
     async def process(self, document: Document) -> Document:
         if document.structural or not document.text.strip():
+            return document
+
+        if document.source_type in self._SKIP_SOURCE_TYPES:
+            logger.debug('DocTitleProcessor: skipping %s (source_type=%s, title from source)',
+                         document.id, document.source_type)
             return document
 
         # Попробовать взять первые N страниц

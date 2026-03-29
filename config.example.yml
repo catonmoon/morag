@@ -90,15 +90,24 @@ pdf:
 
 indexing:
   chunker:
-    mode: semantic                # semantic | passthrough | llm
-    min_tokens: 32                # мин. размер чанка (semantic)
-    max_tokens: 256               # макс. размер чанка (semantic)
+    mode: hybrid                  # hybrid | semantic | passthrough | llm
+    min_tokens: 32                # мин. размер чанка (hybrid/semantic)
+    max_tokens: 256               # макс. размер чанка (hybrid/semantic)
+    # oversized:                  # стратегии для oversized блоков по типу (hybrid)
+    #   table: transform          # строка → key-value текст → рекурсия (default: transform)
+    #   list: split               # по элементам списка (default: split)
+    #   paragraph: split          # по предложениям (default: split)
+    #   fence: asis               # код как есть (default: asis)
+    #   diagram: asis             # диаграмма как есть (default: asis)
+    #   # варианты: asis | split | embed | transform | llm
     # block_limit: 32000         # лимит токенов для pre-split блока (в llm-режиме ограничивается: min(block_limit, (context_window - 512) / 2))
     # halving_retries: 3         # деления блока пополам при таймауте LLM (0 = выключено)
     # fallback: false            # семантический fallback при исчерпании всех попыток
   context:
     mode: llm                    # noop | llm
-    max_tokens: 256              # лимит токенов в ответе LLMContextGenerator; не задано — без ограничения
+    chunk_max_tokens: 512        # макс. токенов на чанк (text + context + path); context адаптивный: chunk_max - text - path_overhead
+    # max_tokens: 256            # явный лимит ответа LLM (перекрывает адаптивный); не задано — адаптивный от chunk_max_tokens
+    # window_tokens: 2048        # окно текста вокруг позиции чанка (токены); не задано — весь документ
 
   # Dense-эмбеддер (FRIDA)
   # По умолчанию: локальная модель (загружается напрямую через sentence-transformers)

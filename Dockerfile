@@ -15,8 +15,9 @@ RUN pip install --no-cache-dir --timeout 300 --retries 5 -r requirements.txt
 # Скачать tiktoken-энкодинг во время сборки, чтобы не делать это при запуске
 RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
 
-# Скачать FRIDA во время сборки
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('ai-forever/FRIDA')"
+# Скачать FRIDA (модель + токенизатор) во время сборки
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('ai-forever/FRIDA')" && \
+    python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('ai-forever/FRIDA')"
 
 # Скачать GTE sparse во время сборки
 RUN python -c "from transformers import AutoTokenizer, AutoModelForTokenClassification; \

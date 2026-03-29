@@ -22,6 +22,7 @@ class Document:
     created_at: datetime | None = None        # дата создания документа
     parent_doc_ids: list[str] = field(default_factory=list)  # doc_id родительских документов (для каскадного удаления)
     structural: bool = False                               # структурный (навигационный) документ без полезного тела; не чанкуется
+    paged: bool = False                                    # страничный документ (PDF, DOCX, PPTX); чанки обязаны иметь pages
     payload: dict = field(default_factory=dict)  # метаданные от DocumentProcessor-ов
 
 

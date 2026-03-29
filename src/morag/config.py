@@ -107,21 +107,40 @@ class SparseEmbedderConfig(BaseModel):
     max_rpm: int | None = None    # лимит запросов в минуту (только в HTTP-режиме); None = без ограничения
 
 
+class OversizedConfig(BaseModel):
+    """Стратегии обработки oversized блоков по типам (hybrid chunker).
+
+    Каждый тип блока > max_tokens обрабатывается своей стратегией:
+    - asis: оставить как есть (один большой чанк)
+    - split: структурное разбиение (предложения / элементы / строки)
+    - embed: SemanticChunker (embedding-based границы)
+    - transform: преобразовать формат + рекурсия через чанкинг
+    - llm: LLM преобразует/разобьёт + рекурсия
+    """
+    table: str = 'transform'        # строка → key-value текст → рекурсия
+    list: str = 'split'             # по элементам списка
+    paragraph: str = 'split'        # по предложениям
+    fence: str = 'asis'             # код как есть
+    diagram: str = 'asis'           # диаграмма как есть
+
+
 class ChunkerConfig(BaseModel):
-    mode: str = 'semantic'               # 'semantic' | 'passthrough' | 'llm'
+    mode: str = 'hybrid'                # 'hybrid' | 'semantic' | 'passthrough' | 'llm'
     block_limit: int = 32000             # лимит токенов для pre-split блока (llm/passthrough)
-    min_tokens: int = 50                 # мин. размер чанка в токенах (semantic)
-    max_tokens: int = 250                # макс. размер чанка в токенах (semantic)
+    min_tokens: int = 50                 # мин. размер чанка в токенах (semantic/hybrid)
+    max_tokens: int = 250                # макс. размер чанка в токенах (semantic/hybrid)
     halving_retries: int = 0             # деления блока пополам при таймауте LLM; 0 = выключено
     fallback: bool = False               # семантический fallback; False = при неудаче документ пропускается
     accept_pair: bool = False            # принимать оба чанка пары (left+right) за одну итерацию (2x быстрее)
     passthrough_threshold: int | None = None  # если документ > N токенов → passthrough вместо semantic; None = отключено
+    oversized: OversizedConfig = OversizedConfig()  # стратегии по типу блока (hybrid)
 
 
 class ContextConfig(BaseModel):
     mode: str = 'noop'                   # 'noop' | 'llm'
-    max_tokens: int | None = None        # лимит токенов в ответе LLMContextGenerator; None — без ограничения
-    window_tokens: int | None = None     # окно вокруг страницы чанка (токены); None = отправлять весь документ
+    max_tokens: int | None = None        # лимит токенов в ответе; None — без ограничения (или адаптивно если embedder_max_tokens)
+    window_tokens: int | None = None     # окно вокруг позиции чанка (токены); None = отправлять весь документ
+    chunk_max_tokens: int = 512            # макс. токенов на чанк (text + context + path); адаптивный context = chunk_max - text - path_overhead
 
 
 class IndexingConfig(BaseModel):

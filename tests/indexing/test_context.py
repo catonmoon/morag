@@ -98,12 +98,12 @@ class TestLLMContextGenerator:
     async def test_window_tokens(self, mock_client):
         mock_client.complete.return_value = 'ok'
         gen = LLMContextGenerator(mock_client, window_tokens=100)
-        doc = '<!-- page:1 -->\nFirst page.\n<!-- page:2 -->\nSecond page.\n<!-- page:3 -->\nThird page.'
-        chunk = '<!-- page:2 -->\nSecond page.'
-        await gen.generate(doc, chunk)
+        doc = 'First page.\n\nSecond page.\n\nThird page.'
+        chunk = 'Second page.'
+        offset = doc.index('Second page.')
+        await gen.generate(doc, chunk, char_offset=offset)
         messages = mock_client.complete.call_args[0][0]
         prompt = messages[0]['content']
-        # Окно должно содержать текст вокруг page:2
         assert 'Second page' in prompt
 
 
@@ -112,41 +112,72 @@ class TestLLMContextGenerator:
 # ---------------------------------------------------------------------------
 
 class TestExtractWindow:
-    def test_page_found(self):
+    def test_offset_found(self):
         counter = TiktokenCounter()
-        doc = '<!-- page:1 -->\nFirst.\n<!-- page:2 -->\nSecond.\n<!-- page:3 -->\nThird.'
-        chunk = '<!-- page:2 -->\nSecond.'
-        result = _extract_window(doc, chunk, 1000, counter)
+        doc = 'First.\n\nSecond.\n\nThird.'
+        offset = doc.index('Second.')
+        result = _extract_window(doc, offset, 1000, counter)
         assert 'Second' in result
 
-    def test_no_page_marker_in_chunk(self):
+    def test_zero_offset_returns_from_start(self):
         counter = TiktokenCounter()
-        doc = '<!-- page:1 -->\nFirst.\n<!-- page:2 -->\nSecond.'
-        chunk = 'No page marker here.'
-        result = _extract_window(doc, chunk, 1000, counter)
-        # Fallback: truncate от начала
+        doc = 'First.\n\nSecond.\n\nThird.'
+        result = _extract_window(doc, 0, 1000, counter)
         assert 'First' in result
 
     def test_window_smaller_than_doc(self):
         counter = TiktokenCounter()
-        pages = [f'<!-- page:{i} -->\n' + f'Page {i} content. ' * 50 for i in range(1, 11)]
-        doc = '\n'.join(pages)
-        chunk = '<!-- page:5 -->\nPage 5 content.'
-        result = _extract_window(doc, chunk, 100, counter)
-        # Должен содержать page 5 но не весь документ
+        pages = [f'Page {i} content. ' * 50 for i in range(1, 11)]
+        doc = '\n\n'.join(pages)
+        offset = doc.index('Page 5')
+        result = _extract_window(doc, offset, 100, counter)
         assert len(result) < len(doc)
         assert 'Page 5' in result
 
     def test_window_larger_than_doc(self):
         counter = TiktokenCounter()
-        doc = '<!-- page:1 -->\nShort doc.'
-        chunk = '<!-- page:1 -->\nShort doc.'
-        result = _extract_window(doc, chunk, 10000, counter)
+        doc = 'Short doc.'
+        result = _extract_window(doc, 0, 10000, counter)
         assert result == doc
 
-    def test_no_pages_in_doc(self):
+    def test_offset_near_end(self):
         counter = TiktokenCounter()
-        doc = 'Document without any page markers.'
-        chunk = 'Some chunk text.'
-        result = _extract_window(doc, chunk, 100, counter)
-        assert result  # Не пустой
+        doc = 'A. ' * 100 + 'TARGET. ' + 'B. ' * 10
+        offset = doc.index('TARGET.')
+        result = _extract_window(doc, offset, 50, counter)
+        assert 'TARGET' in result
+
+    def test_window_centered_around_offset(self):
+        """Окно примерно центрировано вокруг offset."""
+        counter = TiktokenCounter()
+        before = 'Before. ' * 50
+        target = 'TARGET_TEXT. '
+        after = 'After. ' * 50
+        doc = before + target + after
+        offset = doc.index('TARGET_TEXT')
+        result = _extract_window(doc, offset, 40, counter)
+        assert 'TARGET_TEXT' in result
+        # Должен содержать и текст до, и текст после
+        assert 'Before' in result
+        assert 'After' in result
+
+    def test_offset_at_very_start(self):
+        """Offset 0 — окно начинается с начала документа."""
+        counter = TiktokenCounter()
+        doc = 'Start. ' * 100
+        result = _extract_window(doc, 0, 20, counter)
+        assert result.startswith('Start')
+
+    def test_offset_beyond_doc_length(self):
+        """Offset за пределами документа — не падает."""
+        counter = TiktokenCounter()
+        doc = 'Short doc.'
+        result = _extract_window(doc, 9999, 100, counter)
+        assert result  # не пустой
+
+    def test_negative_offset_treated_as_zero(self):
+        """Отрицательный offset — как 0."""
+        counter = TiktokenCounter()
+        doc = 'Some text here.'
+        result = _extract_window(doc, -5, 100, counter)
+        assert 'Some text' in result

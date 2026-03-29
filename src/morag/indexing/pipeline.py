@@ -287,15 +287,23 @@ class IndexingPipeline:
         """Разбить документ на чанки и сохранить в Qdrant."""
         logger.info('%sChunking: %s', w, document.id)
 
+        # Чанкинг: chunk_with_metadata (hybrid) или обычный chunk
+        chunk_results: list | None = None  # list[ChunkResult] если hybrid
+
         if self._skip_presplit:
             doc_tokens = self._token_counter.count(document.text)
-            # Fallback на passthrough для очень больших документов
             if self._passthrough_threshold and doc_tokens > self._passthrough_threshold:
                 logger.info(
                     '%s  Passthrough fallback (%d chars, ~%d tokens > %d threshold)...',
                     w, len(document.text), doc_tokens, self._passthrough_threshold,
                 )
                 chunk_texts = await self._passthrough_chunk(document, w)
+            elif hasattr(self._chunker, 'chunk_with_metadata'):
+                logger.info('%s  Hybrid chunking (%d chars, ~%d tokens)...', w, len(document.text), doc_tokens)
+                chunk_results = await self._chunker.chunk_with_metadata(
+                    document.text, paged=document.paged,
+                )
+                logger.info('%s  -> %d chunk(s)', w, len(chunk_results))
             else:
                 logger.info('%s  Semantic chunking (%d chars, ~%d tokens)...', w, len(document.text), doc_tokens)
                 chunk_texts = await self._chunker.chunk(document.text)
@@ -303,20 +311,27 @@ class IndexingPipeline:
         else:
             chunk_texts = await self._presplit_and_chunk(document, w)
 
+        # Нормализуем: если нет chunk_results, создаём из текстов
+        if chunk_results is None:
+            from morag.indexing.chunker import ChunkResult
+            chunk_results = [ChunkResult(text=t) for t in chunk_texts]
 
-        total = len(chunk_texts)
+        total = len(chunk_results)
         logger.info('%s  Total chunks: %d', w, total)
 
         # Собираем Chunk-объекты с order/total, генерируем context
         chunks: list[Chunk] = []
-        for order, text in enumerate(chunk_texts):
-            chunk_tokens = self._token_counter.count(text)
+        for order, cr in enumerate(chunk_results):
+            chunk_tokens = self._token_counter.count(cr.text)
             logger.info(
                 '%s  Processing chunk %d/%d (~%d tok): %s...',
-                w, order + 1, total, chunk_tokens, repr(text[:60]),
+                w, order + 1, total, chunk_tokens, repr(cr.text[:60]),
             )
             doc_summary = document.payload.get('doc_summary', '')
-            context = await self._context_generator.generate(document.text, text, doc_summary)
+            context = await self._context_generator.generate(
+                document.text, cr.text, doc_summary,
+                char_offset=cr.char_offset, path=document.path,
+            )
 
             chunk = Chunk(
                 doc_id=document.id,
@@ -324,10 +339,13 @@ class IndexingPipeline:
                 source_type=document.source_type,
                 order=order,
                 total=total,
-                text=text,
+                text=cr.text,
                 context=context,
                 updated_at=document.updated_at,
             )
+            chunk.payload['char_offset'] = cr.char_offset
+            if cr.pages:
+                chunk.payload['pages'] = cr.pages
             chunks.append(chunk)
 
         # Применяем процессоры и сохраняем батчами

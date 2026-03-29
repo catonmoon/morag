@@ -67,6 +67,7 @@ class PdfSource(Source):
             size=stat.st_size,
             url=path.as_uri(),
             parent_doc_ids=self._parent_doc_ids(path),
+            paged=True,
         )
 
     def _parent_doc_ids(self, path: Path) -> list[str]:
@@ -91,6 +92,7 @@ class PdfSource(Source):
                 size=stat.st_size,
                 url=path.as_uri(),
                 parent_doc_ids=self._parent_doc_ids(path),
+                paged=True,
             )
         except OSError:
             return None

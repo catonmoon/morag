@@ -167,6 +167,7 @@ class ConfluencePdfSource(Source):
                 size=len(pdf_bytes),
                 url=url,
                 parent_doc_ids=[page_id],
+                paged=True,
             )
         except Exception:
             logger.exception('Failed to load PDF attachment %s', doc_id)
@@ -227,6 +228,7 @@ class ConfluencePdfSource(Source):
                 source_type='attached_pdf',
                 size=0,
                 parent_doc_ids=[page_id],
+                paged=True,
             ))
 
         return stubs
