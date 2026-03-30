@@ -24,7 +24,7 @@ sources:
   #   url: https://your-company.atlassian.net   # тот же хост, что и Confluence (или отдельный Jira)
   #   username: your-email@example.com
   #   api_token: your-api-token                 # Atlassian Cloud
-  #   # password: your-password                 # on-premise
+  #   # password: your-paисследуй тот гигпокаssword                 # on-premise
   #   # timeout: 180                            # таймаут HTTP-запросов (секунды; по умолчанию 180)
 
 qdrant:

@@ -882,27 +882,29 @@ class HybridChunker(Chunker):
         char_offset: int,
         last_block_offset: int = 0,
     ) -> int | None:
-        """Закрыть текущий чанк с проверкой магнитного заголовка.
+        """Закрыть текущий чанк с проверкой магнитных заголовков.
 
-        Возвращает char_offset вытолкнутого heading (для следующего чанка)
-        или None если heading не выталкивался.
+        Выталкивает все trailing headings — они пойдут в начало следующего чанка.
+        Возвращает char_offset первого вытолкнутого heading или None.
         """
         if not parts:
             return None
 
-        last = parts[-1]
-        last_is_heading = self._looks_like_heading(last)
+        # Собираем все trailing headings
+        trailing: list[str] = []
+        while len(parts) > 1 and self._looks_like_heading(parts[-1]):
+            trailing.append(parts.pop())
+        trailing.reverse()  # восстановить порядок
 
-        if last_is_heading and len(parts) > 1:
-            heading = parts.pop()
+        if trailing:
             chunks.append(ChunkResult(
                 text='\n\n'.join(parts),
                 pages=list(pages),
                 char_offset=char_offset,
             ))
             parts.clear()
-            parts.append(heading)
-            return last_block_offset  # offset heading для следующего чанка
+            parts.extend(trailing)
+            return last_block_offset
         else:
             chunks.append(ChunkResult(
                 text='\n\n'.join(parts),
@@ -1047,9 +1049,21 @@ class HybridChunker(Chunker):
         if len(lines) < 3:
             return text
 
-        # Парсим шапку
+        # Парсим шапку: ищем первую строку с непустыми ячейками (>1 непустой)
         header_line = lines[0]
         headers = [h.strip() for h in header_line.strip('|').split('|')]
+
+        # Если шапка пустая (merged cell / заголовок группы) — ищем реальные заголовки дальше
+        non_empty = [h for h in headers if h.strip('* ')]
+        if len(non_empty) <= 1:
+            for candidate_line in lines[1:]:
+                if re.match(r'^\s*\|[\s\-:|]+\|\s*$', candidate_line):
+                    continue  # separator
+                candidate_headers = [h.strip() for h in candidate_line.strip('|').split('|')]
+                candidate_non_empty = [h for h in candidate_headers if h.strip('* ')]
+                if len(candidate_non_empty) >= 2:
+                    headers = candidate_headers
+                    break
 
         # Пропускаем separator
         data_start = 1
@@ -1064,6 +1078,12 @@ class HybridChunker(Chunker):
             if not line.strip().startswith('|'):
                 continue
             cells = [c.strip() for c in line.strip('|').split('|')]
+            # Пропускаем строки совпадающие с заголовком или полностью пустые
+            cells_stripped = [c.strip('* ') for c in cells]
+            if cells_stripped == [h.strip('* ') for h in headers]:
+                continue
+            if not any(c.strip() for c in cells):
+                continue
             row_parts: list[str] = []
             for j, cell in enumerate(cells):
                 if j < len(headers) and cell.strip():
@@ -1216,8 +1236,8 @@ class HybridChunker(Chunker):
                 merged_tokens.append(token_counts[i])
                 continue
 
-            # Попробовать склеить с предыдущим
-            if merged:
+            # Попробовать склеить с предыдущим (но не heading — он должен идти к следующему)
+            if merged and not self._looks_like_heading(ci.text):
                 prev = merged[-1]
                 combined_prev = prev.text + '\n\n' + ci.text
                 combined_prev_tok = self._counter.count(combined_prev)
@@ -1230,22 +1250,23 @@ class HybridChunker(Chunker):
                     merged_tokens[-1] = combined_prev_tok
                     continue
 
-            # Попробовать склеить со следующим
+            # Склеить со следующим — принудительно даже если > max_tokens.
+            # Мелкий чанк (< min_tokens) между двумя oversized лучше приклеить,
+            # чем оставить одиноким заголовком или обрывком.
             if i + 1 < len(chunks) and i + 1 not in skip:
                 nxt = chunks[i + 1]
                 combined_next = ci.text + '\n\n' + nxt.text
                 combined_next_tok = self._counter.count(combined_next)
-                if combined_next_tok <= self._max_tokens:
-                    merged.append(ChunkResult(
-                        text=combined_next,
-                        pages=_merge_pages(ci.pages, nxt.pages),
-                        char_offset=ci.char_offset,
-                    ))
-                    merged_tokens.append(combined_next_tok)
-                    skip.add(i + 1)
-                    continue
+                merged.append(ChunkResult(
+                    text=combined_next,
+                    pages=_merge_pages(ci.pages, nxt.pages),
+                    char_offset=ci.char_offset,
+                ))
+                merged_tokens.append(combined_next_tok)
+                skip.add(i + 1)
+                continue
 
-            # Ни с кем не склеить — оставляем as-is
+            # Последний чанк, ни с кем не склеить — оставляем as-is
             merged.append(ci)
             merged_tokens.append(token_counts[i])
 

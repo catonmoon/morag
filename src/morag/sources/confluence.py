@@ -237,7 +237,9 @@ class ConfluenceSource(Source):
         logger.debug('Page %s HTML (before cleanup):\n%s', page_id, soup)
 
         _clean_jira_macros(soup)
+        _remove_ui_macros(soup)
         _remove_vendor_ui_blocks(soup)
+        _convert_checkboxes(soup)
         _unwrap_lists_in_table_cells(soup)
 
         if self._vision_client:
@@ -346,6 +348,22 @@ def _clean_jira_macros(soup: BeautifulSoup) -> None:
             macro.decompose()
 
 
+_UI_MACRO_NAMES = frozenset({
+    'calendar',       # Team Calendars — JavaScript UI, не данные
+    'listlabels',     # список меток — навигационный виджет
+})
+
+
+def _remove_ui_macros(soup: BeautifulSoup) -> None:
+    """Удалить Confluence UI-макросы которые не содержат полезного контента.
+
+    Calendar, listlabels и др. рендерятся как JavaScript-виджеты,
+    в HTML оставляют мусорные UI-элементы (tour steps, error messages).
+    """
+    for macro in soup.find_all(attrs={'data-macro-name': lambda n: n and n in _UI_MACRO_NAMES}):
+        macro.decompose()
+
+
 def _remove_vendor_ui_blocks(soup: BeautifulSoup) -> None:
     """Удалить блоки UI-артефактов плагинов по ссылкам на домены вендоров.
 
@@ -386,6 +404,30 @@ def _fix_inline_lists(md: str) -> str:
         else:
             result.append(_INLINE_LIST_RE.sub('\n- ', line))
     return '\n'.join(result)
+
+
+def _convert_checkboxes(soup: BeautifulSoup) -> None:
+    """Конвертировать Confluence чекбоксы в markdown формат [x] / [ ].
+
+    Confluence хранит состояние чекбокса в `<li class="checked">`.
+    markdownify теряет class → оба варианта становятся `- text`.
+    Фикс: вставляем `[x]` или `[ ]` в начало текста li до markdownify.
+    """
+    for ul in soup.find_all(['ul', 'ol']):
+        has_checked = any('checked' in (li.get('class') or []) for li in ul.find_all('li', recursive=False))
+        if not has_checked:
+            continue
+        for li in ul.find_all('li', recursive=False):
+            is_checked = 'checked' in (li.get('class') or [])
+            marker = '[x] ' if is_checked else '[ ] '
+            if li.string:
+                li.string = marker + li.string
+            elif li.contents:
+                first = li.contents[0]
+                if isinstance(first, str):
+                    li.contents[0].replace_with(marker + first)
+                else:
+                    li.insert(0, marker)
 
 
 def _unwrap_lists_in_table_cells(soup: BeautifulSoup) -> None:

@@ -16,6 +16,10 @@ RAG-система для локальных Markdown-файлов, Confluence �
 - **PDF и Vision LLM** — конвертация PDF через Vision LLM или docling-serve, описание изображений
 - **Русский язык** — FRIDA + GTE-multilingual, razdel для сегментации предложений
 
+## Публикации
+- [habr: Юридическое поле экспериментов для RAG](https://habr.com/ru/articles/1014690/)
+- [linkded.in: A Legal Proving Ground for RAG Experiments](https://www.linkedin.com/pulse/legal-proving-ground-rag-experiments-ivan-komarov-lwocf/)
+
 ## Стек
 
 | Компонент | Технология |

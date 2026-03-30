@@ -196,15 +196,9 @@ class DocSummaryProcessor(DocumentProcessor):
             prompt = self._prompt_no_parent.format(doc_text=doc_text)
 
         messages = [{'role': 'user', 'content': prompt}]
-        try:
-            summary = await self._client.complete(messages, params=self._params, max_tokens=self._max_tokens)
-            document.payload['doc_summary'] = summary.strip()
-            logger.info('DocSummaryProcessor: %s (%d chars)', document.id, len(summary))
-        except Exception:
-            logger.warning(
-                'DocSummaryProcessor: LLM call failed for %s, summary skipped',
-                document.id, exc_info=True,
-            )
+        summary = await self._client.complete(messages, params=self._params, max_tokens=self._max_tokens)
+        document.payload['doc_summary'] = summary.strip()
+        logger.info('DocSummaryProcessor: %s (%d chars)', document.id, len(summary))
 
         return document
 
