@@ -117,12 +117,14 @@ class JiraSource(Source):
         updated_at = _parse_jira_date(fields.get('updated', ''))
         path = [f'{dp}/{issue_key}' for dp in doc_paths]
 
+        summary = fields.get('summary', '')
         return Document(
             id=issue_key,
             path=path,
             text='',
             updated_at=updated_at,
             source_type='attached_jira',
+            title=issue_key,
             size=0,
             url=f'{self._base_url}/browse/{issue_key}',
             parent_doc_ids=self._parent_ids_map.get(issue_key, []),
@@ -164,6 +166,7 @@ class JiraSource(Source):
             text=text,
             updated_at=updated_at,
             source_type='attached_jira',
+            title=issue_key,
             size=len(text.encode('utf-8')),
             url=f'{self._base_url}/browse/{issue_key}',
             creator=reporter,

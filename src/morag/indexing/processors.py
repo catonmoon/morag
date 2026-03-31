@@ -390,7 +390,7 @@ class DocTitleProcessor(DocumentProcessor):
             title = await self._client.complete(
                 messages, params=self._params, max_tokens=self._max_tokens,
             )
-            document.payload['title'] = title.strip()
+            document.title = title.strip()
             document.path = [title.strip()]
             logger.info('DocTitleProcessor: %s → %s', document.id, title.strip())
         except Exception:

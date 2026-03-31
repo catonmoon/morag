@@ -30,7 +30,7 @@ def _doc_id_to_point_id(doc_id: str) -> str:
 
 def _payload_to_document(payload: dict) -> Document:
     """Восстановить Document из Qdrant payload."""
-    core_keys = {'id', 'path', 'text', 'updated_at', 'source_type', 'size', 'url', 'indexed_at', 'creator', 'created_at', 'parent_doc_ids', 'structural'}
+    core_keys = {'id', 'path', 'text', 'updated_at', 'source_type', 'size', 'title', 'url', 'indexed_at', 'creator', 'created_at', 'parent_doc_ids', 'structural'}
     indexed_at_raw = payload.get('indexed_at')
     created_at_raw = payload.get('created_at')
     # backwards compat: path мог быть строкой в старых данных
@@ -42,6 +42,7 @@ def _payload_to_document(payload: dict) -> Document:
         text=payload['text'],
         updated_at=datetime.fromisoformat(payload['updated_at']),
         source_type=payload['source_type'],
+        title=payload.get('title'),
         size=payload.get('size', 0),
         url=payload.get('url'),
         indexed_at=datetime.fromisoformat(indexed_at_raw) if indexed_at_raw else None,
@@ -88,6 +89,8 @@ class DocRepository:
             'structural': document.structural,
             **document.payload,
         }
+        if document.title is not None:
+            payload['title'] = document.title
         if document.url is not None:
             payload['url'] = document.url
         if document.creator is not None:

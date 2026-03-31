@@ -83,15 +83,12 @@ Requirements:
 
 
 def _node_title(doc: Document, parent: Document | None = None) -> str:
-    """Извлечь название узла, вырезая path родителя."""
+    """Получить название узла: из поля title или fallback на path."""
+    if doc.title:
+        return doc.title
     if not doc.path:
         return doc.id
     full_path = doc.path[0]
-    if parent and parent.path:
-        parent_path = parent.path[0]
-        if full_path.startswith(parent_path + '/'):
-            return full_path[len(parent_path) + 1:]
-    # Корень или нет parent — берём последний сегмент через rfind
     last_slash = full_path.rfind('/')
     return full_path[last_slash + 1:] if last_slash >= 0 else full_path
 

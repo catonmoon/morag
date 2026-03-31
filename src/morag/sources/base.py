@@ -15,6 +15,7 @@ class Document:
     text: str                                  # полный текст в Markdown
     updated_at: datetime                       # дата последнего изменения файла (mtime)
     source_type: str                           # "markdown" | "confluence" | "attached_jira" | "attached_pdf"
+    title: str | None = None                   # название документа (из Confluence / frontmatter / имя файла)
     size: int = 0                              # размер файла в байтах
     url: str | None = None                    # ссылка на источник (для Confluence — URL страницы, для Markdown — None)
     indexed_at: datetime | None = None        # дата индексации (выставляется репозиторием при upsert)
