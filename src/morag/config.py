@@ -143,6 +143,18 @@ class ContextConfig(BaseModel):
     chunk_max_tokens: int = 512            # макс. токенов на чанк (text + context + path); адаптивный context = chunk_max - text - path_overhead
 
 
+class KnowledgeMapConfig(BaseModel):
+    enabled: bool = False                # генерация карты документации после индексации
+    depth: int = 2                       # кол-во уровней в системном промпте
+    max_depth: int | None = None         # макс. глубина обхода дерева; None = до самого дна
+    collection: str = 'knowledge_map'    # коллекция Qdrant для карт
+    prompt_strategy: str = 'fixed'       # 'fixed' (node_max_tokens на узел) | 'weighted' (prompt_budget по потомкам)
+    node_max_tokens: int = 256           # для fixed: лимит токенов на описание каждого узла
+    node_min_tokens: int = 256           # для weighted: минимальный бюджет на узел (защита от обрывов)
+    prompt_budget: int = 8192            # для weighted: общий бюджет токенов на системный промпт
+    enable_thinking: bool = False        # включить thinking-режим LLM; по умолчанию выключен
+
+
 class IndexingConfig(BaseModel):
     chunker: ChunkerConfig = ChunkerConfig()
     context: ContextConfig = ContextConfig()
@@ -154,6 +166,7 @@ class IndexingConfig(BaseModel):
     schedule: str | None = None  # cron-выражение для serve-режима (например '0 */6 * * *')
     doc_title: DocTitleConfig = DocTitleConfig()  # генерация названия документа; max_tokens=None — отключено
     doc_summary: DocSummaryConfig = DocSummaryConfig()  # генерация саммари документов; max_tokens=None — отключено
+    knowledge_map: KnowledgeMapConfig = KnowledgeMapConfig()  # карта документации (ADR-0010)
 
 
 class PdfDoclingConfig(BaseModel):

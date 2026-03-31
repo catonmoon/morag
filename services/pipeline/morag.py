@@ -86,8 +86,10 @@ _SYSTEM_PROMPT = (
     'Используй их для поиска информации.\n\n'
     'Алгоритм работы:\n'
     '1. Проанализируй вопрос и определи, в каких разделах карты документации искать.\n'
-    '2. Используй search(query, section_ids=[...]) для прицельного поиска. '
-    'Передавай id разделов из карты чтобы сузить поиск. '
+    '2. ОБЯЗАТЕЛЬНО используй search() хотя бы один раз перед ответом. '
+    'Никогда не отвечай без поиска — даже если вопрос кажется простым. '
+    'Передавай section_ids из карты чтобы сузить поиск. '
+    'Используй только id разделов верхнего уровня (##), не подразделов (###). '
     'Можно указать несколько разделов. Без section_ids — поиск по всей базе.\n'
     '3. Изучи результаты. Если информации недостаточно — '
     'сделай ещё один поиск с другой формулировкой или в других разделах.\n'
@@ -451,8 +453,8 @@ class Pipeline:
             try:
                 data = json.loads(data_str)
                 delta = data['choices'][0]['delta']
-                # Thinking (reasoning_content)
-                reasoning = delta.get('reasoning_content') or ''
+                # Thinking (reasoning_content или reasoning — зависит от провайдера)
+                reasoning = delta.get('reasoning_content') or delta.get('reasoning') or ''
                 if reasoning:
                     if not in_thinking:
                         yield '<think>'

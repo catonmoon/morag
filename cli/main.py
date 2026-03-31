@@ -169,6 +169,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             token_counter=token_counter,
             context_window=config.llm.context_window,
             max_output_tokens=config.indexing.context.max_tokens,
+            window_tokens=config.indexing.context.window_tokens,
         ) if config.indexing.context.mode == 'llm' else NoopContextGenerator()
     )
     sparse_embedder = _make_sparse_embedder(config.indexing.sparse_embedder)
@@ -275,6 +276,37 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             await pipeline.run(jira_source)
         else:
             logger.info('No Jira issues found in indexed documents, skipping Jira indexing')
+
+    # Post-indexing: BM25 sparse vectors
+    from morag.indexing.bm25 import build_bm25_index
+    logger.info('Building BM25 index...')
+    await build_bm25_index(client, config.qdrant.collection_chunks)
+
+    # Post-indexing: Knowledge Map
+    if config.indexing.knowledge_map.enabled:
+        from morag.indexing.knowledge_map import KnowledgeMapGenerator
+        km_cfg = config.indexing.knowledge_map
+        km_generator = KnowledgeMapGenerator(
+            client=client,
+            llm_client=llm_client,
+            doc_repo=doc_repo,
+            collection=km_cfg.collection,
+            depth=km_cfg.depth,
+            max_depth=km_cfg.max_depth,
+            node_max_tokens=km_cfg.node_max_tokens,
+            node_min_tokens=km_cfg.node_min_tokens,
+            prompt_strategy=km_cfg.prompt_strategy,
+            prompt_budget=km_cfg.prompt_budget,
+            token_counter=token_counter,
+            context_window=config.llm.context_window,
+            enable_thinking=km_cfg.enable_thinking,
+            concurrency=config.indexing.concurrency,
+        )
+        root_ids = set()
+        if config.sources.confluence:
+            root_ids = set(config.sources.confluence.ancestor_ids)
+        logger.info('Generating Knowledge Map (roots=%s)...', root_ids or 'auto')
+        await km_generator.generate(root_ids=root_ids or None)
 
     await client.close()
 

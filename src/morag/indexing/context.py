@@ -8,6 +8,23 @@ from morag.llm.client import GenerationParams
 
 logger = logging.getLogger(__name__)
 
+
+def _extract_window(
+    doc_text: str, char_offset: int, chunk_len: int,
+    window_tokens: int, counter: TokenCounter,
+) -> str:
+    """Извлечь окно текста вокруг позиции чанка по char_offset."""
+    # Грубая оценка: 1 токен ≈ 3 символа для русского текста
+    chars_estimate = window_tokens * 3
+    start = max(0, char_offset - chars_estimate)
+    end = min(len(doc_text), char_offset + chunk_len + chars_estimate)
+    window = doc_text[start:end]
+    # Подрезаем до window_tokens если перебрали
+    token_count = counter.count(window)
+    if token_count > window_tokens:
+        window = counter.truncate(window, window_tokens)
+    return window
+
 _LLM_PARAMS = GenerationParams(
     temperature=0.0, top_p=1.0, top_k=0,
     frequency_penalty=0.0, presence_penalty=0.0, seed=42,
@@ -36,7 +53,10 @@ class ContextGenerator(ABC):
     """Интерфейс генерации контекстуального суммари для чанка."""
 
     @abstractmethod
-    async def generate(self, doc_text: str, chunk_text: str) -> str:
+    async def generate(
+        self, doc_text: str, chunk_text: str, doc_summary: str = '',
+        *, char_offset: int | None = None, path: list[str] | None = None,
+    ) -> str:
         """Сгенерировать суммари чанка в контексте всего документа.
 
         Возвращает строку: краткое содержание документа + роль данного чанка.
@@ -48,7 +68,10 @@ class ContextGenerator(ABC):
 class NoopContextGenerator(ContextGenerator):
     """Не генерирует суммари — возвращает пустую строку."""
 
-    async def generate(self, doc_text: str, chunk_text: str) -> str:
+    async def generate(
+        self, doc_text: str, chunk_text: str, doc_summary: str = '',
+        *, char_offset: int | None = None, path: list[str] | None = None,
+    ) -> str:
         return ''
 
 
@@ -65,16 +88,25 @@ class LLMContextGenerator(ContextGenerator):
         token_counter: TokenCounter | None = None,
         context_window: int = 32768,
         max_output_tokens: int | None = None,
+        window_tokens: int | None = None,
     ) -> None:
         self._client = client
         self._token_counter = token_counter or TiktokenCounter()
         self._context_window = context_window
         self._max_output_tokens = max_output_tokens
+        self._window_tokens = window_tokens
         self._prompt_overhead = self._token_counter.count(
             _PROMPT_TEMPLATE.format(doc_text='', chunk_text='')
         )
 
-    async def generate(self, doc_text: str, chunk_text: str) -> str:
+    async def generate(
+        self, doc_text: str, chunk_text: str, doc_summary: str = '',
+        *, char_offset: int | None = None, path: list[str] | None = None,
+    ) -> str:
+        # Если есть char_offset, извлекаем окно вокруг позиции чанка
+        if char_offset is not None and self._window_tokens is not None:
+            doc_text = _extract_window(doc_text, char_offset, len(chunk_text), self._window_tokens, self._token_counter)
+
         output_reserve = self._max_output_tokens if self._max_output_tokens is not None else 0
         chunk_tokens = self._token_counter.count(chunk_text)
         available_for_doc = self._context_window - self._prompt_overhead - chunk_tokens - output_reserve
