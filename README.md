@@ -1,10 +1,12 @@
 # Morag
 
-RAG-система для локальных Markdown-файлов, Confluence и Jira с поддержкой локальных LLM.
+Агентская RAG-система для локальных Markdown-файлов, Confluence и Jira с поддержкой локальных LLM.
 
 ## Возможности
 
-- **Гибридный поиск** — sparse + dense векторы с RRF-fusion
+- **Агентский ретривал** — LLM с function calling итеративно ищет, фильтрует и уточняет запросы. Сам решает когда информации достаточно
+- **Knowledge Map** — автоматически строит иерархическую карту документации (оглавление) из doc_summary. LLM видит структуру базы знаний и ищет прицельно по разделам
+- **Гибридный поиск** — dense (FRIDA) + sparse (GTE) + BM25 с RRF-fusion
 - **Локальные LLM** — любой OpenAI-совместимый эндпойнт (Ollama, LM Studio, облако)
 - **Умное чанкование** — структурный hybrid-чанкер (CommonMark AST, магнитные заголовки, per-type oversized стратегии с рекурсией). Опционально: семантический на эмбеддингах, LLM-чанкер
 - **Точный подсчёт токенов** — FRIDA tokenizer для чанкинга (embedder-native), TikToken для LLM
@@ -12,7 +14,7 @@ RAG-система для локальных Markdown-файлов, Confluence �
 - **Позиционирование** — char_offset каждого чанка в документе, pages для PDF (paged documents)
 - **Идемпотентность и full sync** — пропуск неизменённых документов, каскадное удаление устаревших
 - **Daemon-режим** — cron-расписание, параллельная индексация, retry с backoff
-- **Цитаты и ссылки** — URL источников в ответах
+- **Цитаты и ссылки** — URL источников в ответах, группировка по документам
 - **PDF и Vision LLM** — конвертация PDF через Vision LLM или docling-serve, описание изображений
 - **Русский язык** — FRIDA + GTE-multilingual, razdel для сегментации предложений
 
@@ -114,14 +116,28 @@ Oversized стратегии (настраиваются в конфиге дл�
 
 Для paged документов (PDF) маркеры `<!-- page:N -->` извлекаются до чанкинга, каждый чанк получает номера страниц.
 
+### Knowledge Map
+
+Автоматически генерируемая иерархическая карта документации. Строится после индексации из doc_summary всех документов. Стратегия `weighted` — бюджет токенов распределяется пропорционально числу потомков раздела. Хранится в Qdrant (`knowledge_map` коллекция).
+
+Используется при ретривале: LLM-агент видит структуру базы знаний в system prompt и может фильтровать поиск по разделам через `section_ids`.
+
 ### Ретривал
 
-Open WebUI Pipeline (`services/pipeline/morag.py`), совместим с любым OpenAI-compatible клиентом.
+Агентский пайплайн (`services/pipeline/morag.py`) с function calling, совместим с Open WebUI и любым OpenAI-compatible клиентом.
 
 ```
-extract_intent → hybrid_search (RRF) → expand_neighbors
-  → merge_groups → reranker (LLM) → fetch_doc_summaries → stream_answer
+user_question → [system prompt + Knowledge Map]
+  → agent loop:
+      LLM выбирает tool → search(query, section_ids) / get_neighbors(doc_id, order)
+        → hybrid_search (dense + sparse + BM25, RRF) → LLM reranker
+      LLM анализирует результаты → ещё поиск или финальный ответ
+  → streaming ответ с thinking
 ```
+
+Tools:
+- `search(query, section_ids)` — гибридный поиск + LLM-фильтрация + опциональное ограничение по разделам
+- `get_neighbors(doc_id, order, window)` — соседние чанки для расширения контекста
 
 ## Docker
 
@@ -144,6 +160,7 @@ poetry run pytest -v --cov
 |---|---|
 | [ADR-0008](docs/adr/0008-hybrid-chunker.md) | HybridChunker как режим чанкинга по умолчанию |
 | [ADR-0009](docs/adr/0009-dual-tokenizer.md) | Два токенизатора — FRIDA для чанкинга, TikToken для LLM |
+| [ADR-0010](docs/adr/0010-knowledge-map.md) | Knowledge Map — иерархическая карта документации для system prompt |
 
 ### Исследования
 
