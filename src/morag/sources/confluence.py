@@ -239,6 +239,7 @@ class ConfluenceSource(Source):
         _clean_jira_macros(soup)
         _remove_ui_macros(soup)
         _remove_vendor_ui_blocks(soup)
+        _remove_buttons(soup)
         _convert_checkboxes(soup)
         _unwrap_lists_in_table_cells(soup)
 
@@ -364,6 +365,12 @@ def _remove_ui_macros(soup: BeautifulSoup) -> None:
         macro.decompose()
 
 
+def _remove_buttons(soup: BeautifulSoup) -> None:
+    """Удалить HTML-кнопки — UI-контролы (Expand/Collapse All и т.п.)."""
+    for btn in soup.find_all('button'):
+        btn.decompose()
+
+
 def _remove_vendor_ui_blocks(soup: BeautifulSoup) -> None:
     """Удалить блоки UI-артефактов плагинов по ссылкам на домены вендоров.
 
@@ -381,6 +388,9 @@ def _remove_vendor_ui_blocks(soup: BeautifulSoup) -> None:
             if parent.name in _BLOCK_STOP_TAGS:
                 break
             if parent.name in _BLOCK_CONTAINER_TAGS:
+                # Не подниматься выше если в parent есть table с данными
+                if parent.find('table'):
+                    break
                 target = parent
         to_remove.add(target)
     for el in to_remove:
