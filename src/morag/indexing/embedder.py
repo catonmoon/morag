@@ -100,7 +100,6 @@ class FridaEmbedder(Embedder):
         ).tolist()
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        logger.info('FridaEmbedder: embed_batch %d text(s)', len(texts))
         prefixed = [_DOCUMENT_PREFIX + t for t in texts]
         return self._model.encode(
             prefixed, normalize_embeddings=False, show_progress_bar=False,
