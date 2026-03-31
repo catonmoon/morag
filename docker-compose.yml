@@ -90,9 +90,9 @@ services:
       - NEIGHBOR_WINDOW=1
       - SPARSE_EMBED_URL=http://embedder-gte:8081
       - DENSE_EMBED_URL=http://host.docker.internal:8092
-      - LLM_URL=https://ai.kth.pro/api
-      - LLM_MODEL=Vision
-      - LLM_API_KEY=REPLACE_WITH_YOUR_API_KEY
+      - LLM_URL=${LLM_URL:-http://host.docker.internal:11434/v1}
+      - LLM_MODEL=${LLM_MODEL:-qwen2.5:7b}
+      - LLM_API_KEY=${LLM_API_KEY:-ollama}
     depends_on:
       qdrant:
         condition: service_healthy
