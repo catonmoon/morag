@@ -108,7 +108,8 @@ _SYSTEM_PROMPT = (
     'в формате [N], где N — номер документа из результатов search. '
     'Например: "Для настройки Docker нужно установить Docker Desktop [1]." '
     'Если информация из нескольких документов — перечисляй: [1][3].\n'
-    '- Отвечай структурированно: используй списки и заголовки, где уместно.'
+    '- Структурируй ответ максимально: заголовки, подзаголовки, нумерованные и маркированные списки, '
+    'таблицы. Разбивай информацию на логические блоки. Избегай сплошного текста.'
 )
 
 class Pipeline:
@@ -370,6 +371,7 @@ class Pipeline:
             'messages': [{'role': 'user', 'content': prompt}],
             'temperature': 0.0,
             'max_tokens': 100,
+            'seed': 42,
             'chat_template_kwargs': {'enable_thinking': False},
         }
         try:
@@ -407,6 +409,7 @@ class Pipeline:
             'tools': _TOOLS,
             'temperature': self.valves.LLM_TEMPERATURE,
             'max_tokens': self.valves.LLM_MAX_TOKENS,
+            'seed': 42,
             'chat_template_kwargs': {'enable_thinking': False},
         }
         resp = requests.post(
@@ -438,6 +441,7 @@ class Pipeline:
             'messages': final_messages,
             'temperature': self.valves.LLM_TEMPERATURE,
             'max_tokens': self.valves.LLM_ANSWER_MAX_TOKENS,
+            'seed': 42,
             'stream': True,
         }
         if not self.valves.ENABLE_THINKING:
