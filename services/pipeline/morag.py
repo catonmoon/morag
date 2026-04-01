@@ -94,8 +94,10 @@ _SYSTEM_PROMPT = (
     '3. Изучи результаты. Если информации недостаточно — '
     'сделай ещё один поиск с другой формулировкой или в других разделах.\n'
     '4. Используй get_neighbors() чтобы увидеть контекст вокруг найденного чанка.\n'
-    '5. Когда собрал достаточно информации — дай развёрнутый ответ.\n\n'
+    '5. Когда собрал достаточно информации — дай ответ.\n\n'
     'Правила ответа:\n'
+    '- Отвечай КРАТКО и по существу. Не пересказывай всё найденное — '
+    'выбери только то, что прямо отвечает на вопрос.\n'
     '- Отвечай ТОЛЬКО на основе найденной информации из базы знаний. '
     'Не додумывай и не дополняй информацией из общих знаний.\n'
     '- Если в базе нет ответа — честно сообщи об этом.\n'
@@ -121,6 +123,7 @@ class Pipeline:
         LLM_API_KEY: str
         LLM_TEMPERATURE: float
         LLM_MAX_TOKENS: int
+        LLM_ANSWER_MAX_TOKENS: int
 
         SEARCH_LIMIT: int
         MAX_ITERATIONS: int
@@ -145,6 +148,7 @@ class Pipeline:
             LLM_API_KEY=os.getenv('LLM_API_KEY', 'ollama'),
             LLM_TEMPERATURE=float(os.getenv('LLM_TEMPERATURE', '0.3')),
             LLM_MAX_TOKENS=int(os.getenv('LLM_MAX_TOKENS', '4096')),
+            LLM_ANSWER_MAX_TOKENS=int(os.getenv('LLM_ANSWER_MAX_TOKENS', '1024')),
 
             SEARCH_LIMIT=int(os.getenv('SEARCH_LIMIT', '50')),
             MAX_ITERATIONS=int(os.getenv('MAX_ITERATIONS', '5')),
@@ -200,7 +204,7 @@ class Pipeline:
                 yield from self._emit_grouped_sources(all_chunks)
                 doc_count = len({c['doc_id'] for c in all_chunks.values()})
                 yield self._emit_status(
-                    '✅', f'Найдено {doc_count} документов за {iteration + 1} шагов', True,
+                    '✅', f'Найдено {_plural(doc_count, "документ", "документа", "документов")} за {_plural(iteration + 1, "шаг", "шага", "шагов")}', True,
                 )
                 # Stream финального ответа (всегда через _stream_final для thinking)
                 agent_messages.append(message)
@@ -231,7 +235,7 @@ class Pipeline:
                     preview = ', '.join(f'"{n}"' for n in doc_names[:2])
                     if len(doc_names) > 2:
                         preview += f' и ещё {len(doc_names) - 2}'
-                    yield self._emit_status('→', f'{len(doc_names)} док.: {preview}', False)
+                    yield self._emit_status('→', f'{_plural(len(doc_names), "документ", "документа", "документов")}: {preview}', False)
 
                 # Собрать чанки
                 for c in chunks:
@@ -248,7 +252,7 @@ class Pipeline:
         yield self._emit_status('⚠️', f'Лимит итераций ({self.valves.MAX_ITERATIONS}), генерирую ответ', False)
         yield from self._emit_grouped_sources(all_chunks)
         doc_count = len({c['doc_id'] for c in all_chunks.values()})
-        yield self._emit_status('✅', f'Найдено {doc_count} документов', True)
+        yield self._emit_status('✅', f'Найдено {_plural(doc_count, "документ", "документа", "документов")}', True)
         yield from self._stream_final(agent_messages)
 
     # ── Tool execution ────────────────────────────────────────────────────────
@@ -306,7 +310,7 @@ class Pipeline:
                 lines.append('')
             parts.append('\n'.join(lines))
 
-        return f'Найдено {len(by_doc)} документов:\n\n' + '\n\n---\n\n'.join(parts), chunks
+        return f'Найдено {_plural(len(by_doc), "документ", "документа", "документов")}:\n\n' + '\n\n---\n\n'.join(parts), chunks
 
     def _tool_get_neighbors(
         self, doc_id: str, order: int, window: int = 2,
@@ -420,14 +424,16 @@ class Pipeline:
             'role': 'user',
             'content': (
                 'Теперь дай финальный ответ на основе всей собранной информации. '
-                'Не вызывай инструменты, отвечай текстом.'
+                'Не вызывай инструменты, отвечай текстом. '
+                'ВАЖНО: ответ должен быть коротким — не более 3-5 абзацев. '
+                'Не пересказывай всё найденное, выдели только главное.'
             ),
         }]
         payload = {
             'model': self.valves.LLM_MODEL,
             'messages': final_messages,
             'temperature': self.valves.LLM_TEMPERATURE,
-            'max_tokens': self.valves.LLM_MAX_TOKENS,
+            'max_tokens': self.valves.LLM_ANSWER_MAX_TOKENS,
             'stream': True,
         }
         if not self.valves.ENABLE_THINKING:
@@ -692,6 +698,18 @@ class Pipeline:
                 },
             }
         }
+
+
+def _plural(n: int, one: str, few: str, many: str) -> str:
+    """Склонение существительного по числу (русский язык)."""
+    if 11 <= n % 100 <= 19:
+        return f'{n} {many}'
+    mod = n % 10
+    if mod == 1:
+        return f'{n} {one}'
+    if 2 <= mod <= 4:
+        return f'{n} {few}'
+    return f'{n} {many}'
 
 
 def _format_tool_status(fn_name: str, fn_args: dict) -> str:

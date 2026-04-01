@@ -120,6 +120,7 @@ class KnowledgeMapGenerator:
         context_window: int = 32768,
         enable_thinking: bool | None = None,
         concurrency: int = 4,
+        exclude_source_types: list[str] | None = None,
     ) -> None:
         self._client = client
         self._llm_client = llm_client
@@ -135,6 +136,7 @@ class KnowledgeMapGenerator:
         self._context_window = context_window
         self._params = _llm_params(enable_thinking)
         self._sem = asyncio.Semaphore(concurrency)
+        self._exclude_source_types = frozenset(exclude_source_types or [])
 
     async def ensure_collection(self) -> None:
         """Создать коллекцию для карт если не существует."""
@@ -158,8 +160,14 @@ class KnowledgeMapGenerator:
         """
         await self.ensure_collection()
 
-        # Собрать все документы из Qdrant
+        # Собрать все документы из Qdrant (без вложений)
         all_docs = await self._load_all_docs()
+        if self._exclude_source_types:
+            before = len(all_docs)
+            all_docs = [d for d in all_docs if d.source_type not in self._exclude_source_types]
+            if before != len(all_docs):
+                logger.info('KnowledgeMap: filtered %d → %d docs (excluded: %s)',
+                            before, len(all_docs), ', '.join(self._exclude_source_types))
         if not all_docs:
             logger.warning('KnowledgeMap: no documents found')
             return {}

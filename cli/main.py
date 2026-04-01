@@ -424,6 +424,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             context_window=config.llm.context_window,
             enable_thinking=km_cfg.enable_thinking,
             concurrency=config.indexing.concurrency,
+            exclude_source_types=km_cfg.exclude_source_types,
         )
         root_ids = set()
         if config.sources.confluence:

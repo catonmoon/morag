@@ -153,6 +153,7 @@ class KnowledgeMapConfig(BaseModel):
     node_min_tokens: int = 256           # для weighted: минимальный бюджет на узел (защита от обрывов)
     prompt_budget: int = 8192            # для weighted: общий бюджет токенов на системный промпт
     enable_thinking: bool = False        # включить thinking-режим LLM; по умолчанию выключен
+    exclude_source_types: list[str] = ['attached_jira', 'attached_pdf']  # не включать в карту
 
 
 class IndexingConfig(BaseModel):
