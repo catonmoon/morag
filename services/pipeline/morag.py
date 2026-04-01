@@ -89,12 +89,15 @@ _SYSTEM_PROMPT = (
     '2. ОБЯЗАТЕЛЬНО используй search() хотя бы один раз перед ответом. '
     'Никогда не отвечай без поиска — даже если вопрос кажется простым. '
     'Передавай section_ids из карты чтобы сузить поиск. '
-    'Используй только id разделов верхнего уровня (##), не подразделов (###). '
-    'Можно указать несколько разделов. Без section_ids — поиск по всей базе.\n'
+    'Первый поиск — по верхнему уровню (##) или без section_ids (вся база). '
+    'Можно указать несколько разделов.\n'
     '3. Изучи результаты. Если информации недостаточно — '
-    'сделай ещё один поиск с другой формулировкой или в других разделах.\n'
+    'сделай ещё один поиск с другой формулировкой. '
+    'При уточняющих поисках можно сужать до подразделов (###).\n'
     '4. Используй get_neighbors() чтобы увидеть контекст вокруг найденного чанка.\n'
-    '5. Когда собрал достаточно информации — дай ответ.\n\n'
+    '5. Лучше сделать 2-3 поиска с разных сторон, чем дать неполный ответ. '
+    'Каждый дополнительный поиск повышает точность и полноту ответа.\n'
+    '6. Когда собрал достаточно информации — дай ответ.\n\n'
     'Правила ответа:\n'
     '- Отвечай КРАТКО и по существу. Не пересказывай всё найденное — '
     'выбери только то, что прямо отвечает на вопрос.\n'
@@ -157,6 +160,7 @@ class Pipeline:
             HTTP_TIMEOUT=int(os.getenv('HTTP_TIMEOUT', '300')),
         )
         self._knowledge_map: str | None = None
+        self._doc_titles: dict[str, str] = {}  # doc_id → title (кеш)
         self._doc_tree: dict[str, list[str]] | None = None  # parent_id → [child_ids]
 
     def pipe(
@@ -220,7 +224,7 @@ class Pipeline:
                 call_id = tool_call['id']
 
                 # Выполнение + статус
-                status_text = _format_tool_status(fn_name, fn_args)
+                status_text = _format_tool_status(fn_name, fn_args, resolve_title=self._get_doc_title)
                 icon = '🔍' if fn_name == 'search' else '📖'
                 yield self._emit_status(icon, status_text, False)
 
@@ -641,6 +645,30 @@ class Pipeline:
             self._knowledge_map = ''
         return self._knowledge_map
 
+    def _get_doc_title(self, doc_id: str) -> str:
+        """Получить title документа из Qdrant (с кешем)."""
+        if doc_id in self._doc_titles:
+            return self._doc_titles[doc_id]
+        payload = {
+            'filter': {'must': [{'key': 'id', 'match': {'value': doc_id}}]},
+            'with_payload': ['title'],
+            'with_vectors': False,
+            'limit': 1,
+        }
+        url = f'{self.valves.QDRANT_URL}/collections/{self.valves.QDRANT_DOCS_COLLECTION}/points/scroll'
+        try:
+            resp = requests.post(url, json=payload, timeout=10)
+            resp.raise_for_status()
+            points = resp.json().get('result', {}).get('points', [])
+            if points:
+                title = points[0]['payload'].get('title', doc_id)
+                self._doc_titles[doc_id] = title
+                return title
+        except Exception:
+            pass
+        self._doc_titles[doc_id] = doc_id
+        return doc_id
+
     # ── Citations ─────────────────────────────────────────────────────────────
 
     def _emit_grouped_sources(self, all_chunks: dict[str, dict]) -> Generator:
@@ -712,12 +740,14 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
     return f'{n} {many}'
 
 
-def _format_tool_status(fn_name: str, fn_args: dict) -> str:
+def _format_tool_status(fn_name: str, fn_args: dict, resolve_title=None) -> str:
+    _title = resolve_title or (lambda x: x)
     if fn_name == 'search':
         query = fn_args.get('query', '')
         section_ids = fn_args.get('section_ids')
         if section_ids:
-            return f'search("{query}" в {", ".join(section_ids)})'
+            names = [_title(sid) for sid in section_ids]
+            return f'search("{query}" в {", ".join(names)})'
         return f'search("{query}")'
     elif fn_name == 'get_neighbors':
         doc_id = fn_args.get('doc_id', '')

@@ -236,7 +236,7 @@ class KnowledgeMapGenerator:
         # Лист или достигли max_depth (если задан) — возвращаем doc_summary
         if not children or (self._max_depth is not None and depth >= self._max_depth):
             summary = doc.payload.get('doc_summary', '')
-            title = doc.payload.get('title', _node_title(doc))
+            title = _node_title(doc)
             return f'{title} (id: {doc.id}): {summary}' if summary else ''
 
         title = _node_title(doc)
@@ -686,11 +686,12 @@ class KnowledgeMapGenerator:
                     text='',  # не нужен текст, только summary
                     updated_at=payload.get('updated_at', ''),
                     source_type=payload.get('source_type', ''),
+                    title=payload.get('title'),
                     parent_doc_ids=payload.get('parent_doc_ids', []),
                     structural=payload.get('structural', False),
                     payload={
                         k: v for k, v in payload.items()
-                        if k in ('doc_summary', 'title')
+                        if k in ('doc_summary',)
                     },
                 ))
             if offset is None:
