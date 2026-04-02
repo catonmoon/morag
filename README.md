@@ -6,7 +6,7 @@
 
 - **Агентский ретривал** — LLM с function calling итеративно ищет, фильтрует и уточняет запросы. Сам решает когда информации достаточно
 - **Knowledge Map** — автоматически строит иерархическую карту документации (оглавление) из doc_summary. LLM видит структуру базы знаний и ищет прицельно по разделам
-- **Гибридный поиск** — dense (FRIDA) + sparse (GTE) + BM25 с RRF-fusion
+- **Гибридный поиск** — dense (FRIDA) + sparse (GTE) + BM25 (Snowball stemming, ru/en стоп-слова) с RRF-fusion
 - **Локальные LLM** — любой OpenAI-совместимый эндпойнт (Ollama, LM Studio, облако)
 - **Умное чанкование** — структурный hybrid-чанкер (CommonMark AST, магнитные заголовки, per-type oversized стратегии с рекурсией). Опционально: семантический на эмбеддингах, LLM-чанкер
 - **Точный подсчёт токенов** — FRIDA tokenizer для чанкинга (embedder-native), TikToken для LLM
@@ -16,7 +16,7 @@
 - **Daemon-режим** — cron-расписание, параллельная индексация, retry с backoff
 - **Цитаты и ссылки** — URL источников в ответах, группировка по документам
 - **PDF и Vision LLM** — конвертация PDF через Vision LLM или docling-serve, описание изображений
-- **Русский язык** — FRIDA + GTE-multilingual, razdel для сегментации предложений
+- **Русский язык** — FRIDA + GTE-multilingual, razdel для сегментации предложений, Snowball stemming для BM25
 
 ## Публикации
 - [habr: Юридическое поле экспериментов для RAG](https://habr.com/ru/articles/1014690/)
