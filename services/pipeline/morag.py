@@ -12,8 +12,11 @@ import os
 import requests
 from typing import Any, Dict, Generator, Iterator, List, Union
 
+from markdown_it import MarkdownIt
 import numpy as np
 from pydantic import BaseModel
+
+_md = MarkdownIt()
 
 _MD5_MOD = 4_294_967_295  # DO NOT CHANGE — ломает индекс
 
@@ -155,7 +158,7 @@ class Pipeline:
             LLM_API_KEY=os.getenv('LLM_API_KEY', 'ollama'),
             LLM_TEMPERATURE=float(os.getenv('LLM_TEMPERATURE', '0.3')),
             LLM_MAX_TOKENS=int(os.getenv('LLM_MAX_TOKENS', '4096')),
-            LLM_ANSWER_MAX_TOKENS=int(os.getenv('LLM_ANSWER_MAX_TOKENS', '1024')),
+            LLM_ANSWER_MAX_TOKENS=int(os.getenv('LLM_ANSWER_MAX_TOKENS', '0')),
 
             SEARCH_LIMIT=int(os.getenv('SEARCH_LIMIT', '50')),
             MAX_ITERATIONS=int(os.getenv('MAX_ITERATIONS', '9')),
@@ -718,7 +721,8 @@ class Pipeline:
     def _emit_source(
         name: str, content: str, url: str | None = None, source_id: str | None = None,
     ) -> dict[str, Any]:
-        metadata: dict[str, Any] = {'source': source_id or name, 'name': name, 'html': False}
+        html_content = _md.render(content)
+        metadata: dict[str, Any] = {'source': source_id or name, 'name': name, 'html': True}
         source: dict[str, Any] = {'name': name}
         if url:
             metadata['url'] = url
@@ -727,7 +731,7 @@ class Pipeline:
             'event': {
                 'type': 'citation',
                 'data': {
-                    'document': [content],
+                    'document': [html_content],
                     'metadata': [metadata],
                     'source': source,
                 },
