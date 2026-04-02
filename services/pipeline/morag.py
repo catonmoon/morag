@@ -768,28 +768,30 @@ def _format_tool_status(fn_name: str, fn_args: dict, resolve_title=None) -> str:
 
 import re
 
+from nltk.corpus import stopwords
+from nltk.stem.snowball import SnowballStemmer
+
 _WORD_RE = re.compile(r'\w+')
-_STOP_WORDS: frozenset[str] = frozenset({
-    'a', 'an', 'the', 'and', 'or', 'but', 'not', 'nor',
-    'is', 'are', 'was', 'were', 'be', 'been', 'being',
-    'have', 'has', 'had', 'do', 'does', 'did',
-    'will', 'would', 'shall', 'should', 'may', 'might', 'can', 'could', 'must',
-    'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'as',
-    'into', 'through', 'during', 'before', 'after',
-    'it', 'its', 'this', 'that', 'these', 'those',
-    'he', 'she', 'they', 'we', 'i', 'you', 'me', 'him', 'her', 'us', 'them',
-    'my', 'your', 'his', 'our', 'their',
-    'what', 'which', 'who', 'whom', 'whose',
-    'if', 'then', 'when', 'where', 'how', 'why',
-    'all', 'each', 'every', 'both', 'few', 'more', 'most', 'some', 'any', 'no',
-    'such', 'only', 'own', 'same', 'so', 'than', 'too', 'very',
-    'just', 'also', 'now', 'here', 'there',
-})
+_CYRILLIC_RE = re.compile(r'[а-яё]')
+
+_STOP_WORDS: frozenset[str] = frozenset(
+    stopwords.words('russian') + stopwords.words('english')
+)
+
+_stemmer_ru = SnowballStemmer('russian')
+_stemmer_en = SnowballStemmer('english')
+
+
+def _stem(word: str) -> str:
+    """Стемминг с автоопределением языка по кириллице."""
+    if _CYRILLIC_RE.search(word):
+        return _stemmer_ru.stem(word)
+    return _stemmer_en.stem(word)
 
 
 def _bm25_query_vector(text: str) -> tuple[list, list]:
-    """Построить BM25 query vector: слова → MD5 хэши, веса = 1.0."""
-    words = [w for w in _WORD_RE.findall(text.lower()) if w not in _STOP_WORDS]
+    """Построить BM25 query vector: слова → стемминг → MD5 хэши, веса = 1.0."""
+    words = [_stem(w) for w in _WORD_RE.findall(text.lower()) if w not in _STOP_WORDS]
     if not words:
         return [], []
     seen: dict[int, float] = {}

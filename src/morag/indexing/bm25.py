@@ -11,6 +11,8 @@ import math
 import re
 from collections import Counter
 
+from nltk.corpus import stopwords
+from nltk.stem.snowball import SnowballStemmer
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import PointVectors
 
@@ -19,27 +21,21 @@ from morag.indexing.embedder import _MD5_MOD
 logger = logging.getLogger(__name__)
 
 _WORD_RE = re.compile(r'\w+')
+_CYRILLIC_RE = re.compile(r'[а-яё]')
 
-# fmt: off
-_STOP_WORDS: frozenset[str] = frozenset({
-    'a', 'an', 'the', 'and', 'or', 'but', 'not', 'nor',
-    'is', 'are', 'was', 'were', 'be', 'been', 'being',
-    'have', 'has', 'had', 'having',
-    'do', 'does', 'did', 'doing',
-    'will', 'would', 'shall', 'should', 'may', 'might', 'can', 'could', 'must',
-    'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'from', 'as',
-    'into', 'through', 'during', 'before', 'after', 'above', 'below',
-    'between', 'under', 'over', 'about', 'against', 'upon',
-    'it', 'its', 'this', 'that', 'these', 'those',
-    'he', 'she', 'they', 'we', 'i', 'you', 'me', 'him', 'her', 'us', 'them',
-    'my', 'your', 'his', 'our', 'their',
-    'what', 'which', 'who', 'whom', 'whose',
-    'if', 'then', 'else', 'when', 'where', 'how', 'why',
-    'all', 'each', 'every', 'both', 'few', 'more', 'most', 'some', 'any', 'no',
-    'such', 'only', 'own', 'same', 'so', 'than', 'too', 'very',
-    'just', 'also', 'now', 'here', 'there',
-})
-# fmt: on
+_STOP_WORDS: frozenset[str] = frozenset(
+    stopwords.words('russian') + stopwords.words('english')
+)
+
+_stemmer_ru = SnowballStemmer('russian')
+_stemmer_en = SnowballStemmer('english')
+
+
+def _stem(word: str) -> str:
+    """Стемминг с автоопределением языка по кириллице."""
+    if _CYRILLIC_RE.search(word):
+        return _stemmer_ru.stem(word)
+    return _stemmer_en.stem(word)
 
 
 def _word_to_index(word: str) -> int:
@@ -49,8 +45,8 @@ def _word_to_index(word: str) -> int:
 
 
 def tokenize(text: str) -> list[str]:
-    """Токенизация: lowercase + word chars + фильтрация стоп-слов."""
-    return [w for w in _WORD_RE.findall(text.lower()) if w not in _STOP_WORDS]
+    """Токенизация: lowercase + стоп-слова + Snowball stemming (ru/en)."""
+    return [_stem(w) for w in _WORD_RE.findall(text.lower()) if w not in _STOP_WORDS]
 
 
 def build_bm25_vectors(
