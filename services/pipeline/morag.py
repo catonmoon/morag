@@ -86,8 +86,10 @@ _SYSTEM_PROMPT = (
     'Используй их для поиска информации.\n\n'
     'Алгоритм работы:\n'
     '1. Проанализируй вопрос и определи, в каких разделах карты документации искать.\n'
-    '2. ОБЯЗАТЕЛЬНО используй search() хотя бы один раз перед ответом. '
+    '2. ОБЯЗАТЕЛЬНО делай ОТДЕЛЬНЫЙ search() для каждого аспекта вопроса. '
     'Никогда не отвечай без поиска — даже если вопрос кажется простым. '
+    'Если в вопросе несколько частей — ищи каждую отдельно. '
+    'Один search() редко находит всё нужное. '
     'Передавай section_ids из карты чтобы сузить поиск. '
     'Первый поиск — по верхнему уровню (##) или без section_ids (вся база). '
     'Можно указать несколько разделов.\n'
@@ -95,8 +97,9 @@ _SYSTEM_PROMPT = (
     'сделай ещё один поиск с другой формулировкой. '
     'При уточняющих поисках можно сужать до подразделов (###).\n'
     '4. Используй get_neighbors() чтобы увидеть контекст вокруг найденного чанка.\n'
-    '5. Лучше сделать 2-3 поиска с разных сторон, чем дать неполный ответ. '
-    'Каждый дополнительный поиск повышает точность и полноту ответа.\n'
+    '5. Делай 2-4 поиска с разных сторон. '
+    'Каждый дополнительный поиск повышает точность и полноту ответа. '
+    'НЕ пытайся найти всё одним запросом — это работает хуже.\n'
     '6. Когда собрал достаточно информации — дай ответ.\n\n'
     'Правила ответа:\n'
     '- Отвечай КРАТКО и по существу. Не пересказывай всё найденное — '
@@ -155,7 +158,7 @@ class Pipeline:
             LLM_ANSWER_MAX_TOKENS=int(os.getenv('LLM_ANSWER_MAX_TOKENS', '1024')),
 
             SEARCH_LIMIT=int(os.getenv('SEARCH_LIMIT', '50')),
-            MAX_ITERATIONS=int(os.getenv('MAX_ITERATIONS', '5')),
+            MAX_ITERATIONS=int(os.getenv('MAX_ITERATIONS', '9')),
             ENABLE_THINKING=os.getenv('ENABLE_THINKING', 'true').lower() == 'true',
             CITATION_MAX_CHARS=int(os.getenv('CITATION_MAX_CHARS', '5000')),
             HTTP_TIMEOUT=int(os.getenv('HTTP_TIMEOUT', '300')),
@@ -371,7 +374,6 @@ class Pipeline:
             'messages': [{'role': 'user', 'content': prompt}],
             'temperature': 0.0,
             'max_tokens': 100,
-            'seed': 42,
             'chat_template_kwargs': {'enable_thinking': False},
         }
         try:
@@ -409,7 +411,6 @@ class Pipeline:
             'tools': _TOOLS,
             'temperature': self.valves.LLM_TEMPERATURE,
             'max_tokens': self.valves.LLM_MAX_TOKENS,
-            'seed': 42,
             'chat_template_kwargs': {'enable_thinking': False},
         }
         resp = requests.post(
@@ -440,11 +441,13 @@ class Pipeline:
             'model': self.valves.LLM_MODEL,
             'messages': final_messages,
             'temperature': self.valves.LLM_TEMPERATURE,
-            'max_tokens': self.valves.LLM_ANSWER_MAX_TOKENS,
-            'seed': 42,
             'stream': True,
         }
-        if not self.valves.ENABLE_THINKING:
+        if self.valves.LLM_ANSWER_MAX_TOKENS > 0:
+            payload['max_tokens'] = self.valves.LLM_ANSWER_MAX_TOKENS
+        if self.valves.ENABLE_THINKING:
+            payload['reasoning_budget'] = 4096
+        else:
             payload['chat_template_kwargs'] = {'enable_thinking': False}
         resp = requests.post(
             f'{self.valves.LLM_URL.rstrip("/")}/chat/completions',
