@@ -87,10 +87,14 @@ _SYSTEM_PROMPT = (
     'Отвечай только на русском языке.\n\n'
     'У тебя есть доступ к базе знаний через инструменты (tools). '
     'Используй их для поиска информации.\n\n'
+    '## ГЛАВНОЕ ПРАВИЛО\n'
+    'ЗАПРЕЩЕНО отвечать без поиска. Твой ПЕРВЫЙ ход — ВСЕГДА вызов search(). '
+    'Без исключений, даже если вопрос кажется простым или творческим. '
+    'Любой вопрос требует фактов из базы знаний.\n\n'
     'Алгоритм работы:\n'
     '1. Проанализируй вопрос и определи, в каких разделах карты документации искать.\n'
-    '2. ОБЯЗАТЕЛЬНО делай ОТДЕЛЬНЫЙ search() для каждого аспекта вопроса. '
-    'Никогда не отвечай без поиска — даже если вопрос кажется простым. '
+    '2. СРАЗУ делай search() — не рассуждай, не объясняй, не проси уточнений. '
+    'Делай ОТДЕЛЬНЫЙ search() для каждого аспекта вопроса. '
     'Если в вопросе несколько частей — ищи каждую отдельно. '
     'Один search() редко находит всё нужное. '
     'Передавай section_ids из карты чтобы сузить поиск. '
@@ -100,7 +104,7 @@ _SYSTEM_PROMPT = (
     'сделай ещё один поиск с другой формулировкой. '
     'При уточняющих поисках можно сужать до подразделов (###).\n'
     '4. Используй get_neighbors() чтобы увидеть контекст вокруг найденного чанка.\n'
-    '5. Делай 2-4 поиска с разных сторон. '
+    '5. Делай 3-5 поисков с разных сторон. '
     'Каждый дополнительный поиск повышает точность и полноту ответа. '
     'НЕ пытайся найти всё одним запросом — это работает хуже.\n'
     '6. Когда собрал достаточно информации — дай ответ.\n\n'
@@ -202,6 +206,7 @@ class Pipeline:
 
         # 4. Agent loop
         all_chunks: dict[str, dict] = {}  # chunk_id → chunk (дедупликация)
+        tool_call_count = 0
 
         for iteration in range(self.valves.MAX_ITERATIONS):
             # Вызов LLM с tools
@@ -215,7 +220,7 @@ class Pipeline:
                 yield from self._emit_grouped_sources(all_chunks)
                 doc_count = len({c['doc_id'] for c in all_chunks.values()})
                 yield self._emit_status(
-                    '✅', f'Найдено {_plural(doc_count, "документ", "документа", "документов")} за {_plural(iteration + 1, "шаг", "шага", "шагов")}', True,
+                    '✅', f'Найдено {_plural(doc_count, "документ", "документа", "документов")} за {_plural(tool_call_count, "шаг", "шага", "шагов")}', True,
                 )
                 # Stream финального ответа (всегда через _stream_final для thinking)
                 agent_messages.append(message)
@@ -226,6 +231,7 @@ class Pipeline:
             agent_messages.append(message)
 
             for tool_call in message['tool_calls']:
+                tool_call_count += 1
                 fn_name = tool_call['function']['name']
                 fn_args = json.loads(tool_call['function']['arguments'])
                 call_id = tool_call['id']
@@ -239,7 +245,7 @@ class Pipeline:
 
                 # Обновить статус с результатами
                 doc_names = list(dict.fromkeys(
-                    (c['path'][0].split('/')[-1] if c['path'] else c['doc_id'])
+                    self._get_doc_title(c['doc_id'])
                     for c in chunks
                 ))
                 if doc_names:
@@ -308,7 +314,7 @@ class Pipeline:
         for i, (doc_id, doc_chunks) in enumerate(by_doc.items(), 1):
             doc_chunks.sort(key=lambda x: x['order'])
             path_display = ' | '.join(doc_chunks[0]['path']) if doc_chunks[0]['path'] else doc_id
-            doc_name = path_display.split('/')[-1]
+            doc_name = self._get_doc_title(doc_id)
             lines = [f'[{i}] Документ: {doc_name}', f'Путь: {path_display}']
             url = doc_chunks[0].get('url')
             if url:
@@ -693,7 +699,7 @@ class Pipeline:
         for doc_id, chunks in by_doc.items():
             chunks.sort(key=lambda c: c['order'])
             path = chunks[0]['path'][0] if chunks[0]['path'] else doc_id
-            doc_name = path.split('/')[-1]
+            doc_name = self._get_doc_title(doc_id)
             url = chunks[0].get('url')
             # Объединить тексты чанков (с разделителем), лимит по CITATION_MAX_CHARS
             combined = '\n\n---\n\n'.join(c['text'] for c in chunks)
