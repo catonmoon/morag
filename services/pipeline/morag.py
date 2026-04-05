@@ -82,7 +82,7 @@ _TOOLS = [
     },
 ]
 
-_SYSTEM_PROMPT = (
+_SYSTEM_PROMPT_V1 = (
     'Ты — ассистент по внутренней документации компании. '
     'Отвечай только на русском языке.\n\n'
     'У тебя есть доступ к базе знаний через инструменты (tools). '
@@ -108,11 +108,50 @@ _SYSTEM_PROMPT = (
     'Каждый дополнительный поиск повышает точность и полноту ответа. '
     'НЕ пытайся найти всё одним запросом — это работает хуже.\n'
     '6. Когда собрал достаточно информации — дай ответ.\n\n'
+)
+
+_SYSTEM_PROMPT = (
+    'Ты — ассистент по внутренней документации компании. '
+    'Отвечай только на русском языке.\n\n'
+    'У тебя есть доступ к базе знаний через инструменты (tools). '
+    'Используй их для поиска информации.\n\n'
+    '## ГЛАВНОЕ ПРАВИЛО\n'
+    'ЗАПРЕЩЕНО отвечать без поиска. Твой ПЕРВЫЙ ход — ВСЕГДА вызов search(). '
+    'Без исключений, даже если вопрос кажется простым или творческим. '
+    'Любой вопрос требует фактов из базы знаний.\n\n'
+    '## Алгоритм работы: Plan → Execute → Verify\n\n'
+    '### 1. ПЛАН (перед первым поиском)\n'
+    'Проанализируй вопрос и составь план поиска:\n'
+    '- Выдели 2-4 СМЫСЛОВЫХ АСПЕКТА вопроса (не переформулировки, а разные грани).\n'
+    '- Для каждого аспекта определи раздел(ы) карты документации, где может быть информация.\n'
+    '- Аспекты должны покрывать вопрос С РАЗНЫХ СТОРОН.\n'
+    'Пример для «Какие роли у менеджера продукта?»:\n'
+    '  а) Оргструктура и должности → раздел с дирекциями/командами\n'
+    '  б) Обязанности и процессы → раздел с регламентами/процессами\n'
+    '  в) Отличия от смежных ролей → раздел с методологией\n\n'
+    '### 2. ВЫПОЛНЕНИЕ\n'
+    '- Делай search() для КАЖДОГО аспекта из плана, в РАЗНЫХ разделах.\n'
+    '- Передавай section_ids из карты чтобы сузить поиск.\n'
+    '- Не ищи один аспект 3 раза — ищи 3 разных аспекта.\n'
+    '- Используй get_neighbors() чтобы увидеть контекст вокруг найденного чанка.\n\n'
+    '### 3. ПРОВЕРКА ПОЛНОТЫ\n'
+    'После поисков проверь:\n'
+    '- Все ли аспекты из плана покрыты?\n'
+    '- Найдена ли информация из РАЗНЫХ разделов/документов?\n'
+    '- ⚠️ КРАСНЫЙ ФЛАГ: если все результаты из одного раздела — '
+    'почти наверняка ты пропустил информацию в других местах. Ищи шире.\n'
+    '- Если аспект не покрыт — ищи в оставшихся разделах.\n'
+    '- Делай 3-6 поисков. Качество важнее скорости.\n\n'
     'Правила ответа:\n'
     '- Отвечай КРАТКО и по существу. Не пересказывай всё найденное — '
     'выбери только то, что прямо отвечает на вопрос.\n'
     '- Отвечай ТОЛЬКО на основе найденной информации из базы знаний. '
     'Не додумывай и не дополняй информацией из общих знаний.\n'
+    '- ЗАПРЕЩЕНО делать выводы о политиках, правилах и разрешениях компании, '
+    'если они НЕ прописаны явно в найденных документах. '
+    'Наличие инструкции (например, «как настроить Mac») '
+    'НЕ означает что это разрешено или рекомендовано. '
+    'Если политика не описана явно — скажи что информации нет.\n'
     '- Если в базе нет ответа — честно сообщи об этом.\n'
     '- При использовании информации вставляй номер документа-источника '
     'в формате [N], где N — номер документа из результатов search. '
@@ -144,6 +183,7 @@ class Pipeline:
         ENABLE_THINKING: bool
         CITATION_MAX_CHARS: int
         HTTP_TIMEOUT: int
+        PROMPT_VERSION: int  # 1 = v1 (linear), 2 = v2 (plan-execute-verify)
 
     def __init__(self):
         self.valves = self.Valves(
@@ -169,6 +209,7 @@ class Pipeline:
             ENABLE_THINKING=os.getenv('ENABLE_THINKING', 'true').lower() == 'true',
             CITATION_MAX_CHARS=int(os.getenv('CITATION_MAX_CHARS', '5000')),
             HTTP_TIMEOUT=int(os.getenv('HTTP_TIMEOUT', '300')),
+            PROMPT_VERSION=int(os.getenv('PROMPT_VERSION', '2')),
         )
         self._knowledge_map: str | None = None
         self._doc_titles: dict[str, str] = {}  # doc_id → title (кеш)
@@ -190,7 +231,7 @@ class Pipeline:
         knowledge_map = self._fetch_knowledge_map()
 
         # 2. Собрать system prompt
-        system_content = _SYSTEM_PROMPT
+        system_content = _SYSTEM_PROMPT if self.valves.PROMPT_VERSION >= 2 else _SYSTEM_PROMPT_V1
         if knowledge_map:
             system_content += (
                 '\n\nСтруктура базы знаний (используй для навигации):\n' + knowledge_map
@@ -207,6 +248,9 @@ class Pipeline:
         # 4. Agent loop
         all_chunks: dict[str, dict] = {}  # chunk_id → chunk (дедупликация)
         tool_call_count = 0
+        search_count = 0
+        searched_section_ids: set[str] = set()
+        diversity_nudge_sent = False
 
         for iteration in range(self.valves.MAX_ITERATIONS):
             # Вызов LLM с tools
@@ -216,9 +260,29 @@ class Pipeline:
 
             # Если LLM решил ответить (не вызвал tool)
             if finish_reason != 'tool_calls' or not message.get('tool_calls'):
+                # Diversity check: все чанки из ≤1 документа после ≥2 search →
+                # инжектим nudge и продолжаем цикл вместо ответа
+                unique_docs = {c['doc_id'] for c in all_chunks.values()}
+                if (
+                    not diversity_nudge_sent
+                    and search_count >= 2
+                    and len(unique_docs) <= 1
+                    and all_chunks
+                ):
+                    diversity_nudge_sent = True
+                    nudge = self._build_diversity_nudge(
+                        searched_section_ids, knowledge_map,
+                    )
+                    agent_messages.append(message)
+                    agent_messages.append({'role': 'user', 'content': nudge})
+                    yield self._emit_status(
+                        '🔄', 'Расширяю поиск — результаты только из одного документа', False,
+                    )
+                    continue
+
                 # Emit citations (сгруппированные по документу)
                 yield from self._emit_grouped_sources(all_chunks)
-                doc_count = len({c['doc_id'] for c in all_chunks.values()})
+                doc_count = len(unique_docs)
                 yield self._emit_status(
                     '✅', f'Найдено {_plural(doc_count, "документ", "документа", "документов")} за {_plural(tool_call_count, "шаг", "шага", "шагов")}', True,
                 )
@@ -235,6 +299,11 @@ class Pipeline:
                 fn_name = tool_call['function']['name']
                 fn_args = json.loads(tool_call['function']['arguments'])
                 call_id = tool_call['id']
+
+                if fn_name == 'search':
+                    search_count += 1
+                    for sid in (fn_args.get('section_ids') or []):
+                        searched_section_ids.add(sid)
 
                 # Выполнение + статус
                 status_text = _format_tool_status(fn_name, fn_args, resolve_title=self._get_doc_title)
@@ -271,6 +340,51 @@ class Pipeline:
         doc_count = len({c['doc_id'] for c in all_chunks.values()})
         yield self._emit_status('✅', f'Найдено {_plural(doc_count, "документ", "документа", "документов")}', True)
         yield from self._stream_final(agent_messages)
+
+    # ── Diversity nudge ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_top_sections(knowledge_map: str) -> list[tuple[str, str]]:
+        """Извлечь разделы верхнего уровня (##) из Knowledge Map.
+
+        Returns list of (section_id, title).
+        """
+        import re
+        sections = []
+        for match in re.finditer(r'^##\s+(.+?)\s*\(id:\s*([^)]+)\)', knowledge_map, re.MULTILINE):
+            title, section_id = match.group(1).strip(), match.group(2).strip()
+            sections.append((section_id, title))
+        return sections
+
+    def _build_diversity_nudge(
+        self, searched_section_ids: set[str], knowledge_map: str,
+    ) -> str:
+        """Построить сообщение-nudge для расширения поиска."""
+        all_sections = self._parse_top_sections(knowledge_map)
+        unsearched = [
+            (sid, title) for sid, title in all_sections
+            if sid not in searched_section_ids
+        ]
+
+        msg = (
+            '⚠️ ВСЕ найденные результаты из ОДНОГО документа. '
+            'Этого недостаточно для полного ответа.\n\n'
+            'Сделай дополнительный search() в ДРУГИХ разделах, '
+            'которые ты ещё НЕ проверял. '
+            'Попробуй search() БЕЗ section_ids (по всей базе) '
+            'или в одном из этих разделов:\n'
+        )
+        if unsearched:
+            for sid, title in unsearched:
+                msg += f'- {title} (id: {sid})\n'
+        else:
+            msg += '(все верхнеуровневые разделы проверены — попробуй поиск без section_ids)\n'
+
+        msg += (
+            '\nИщи с ДРУГОЙ формулировкой запроса. '
+            'Информация по вопросу может быть в неожиданном месте.'
+        )
+        return msg
 
     # ── Tool execution ────────────────────────────────────────────────────────
 
@@ -524,13 +638,33 @@ class Pipeline:
     def _search(self, text: str, limit: int) -> list[dict]:
         dense = self._embed_dense(text)
         indices, values = self._embed_sparse(text)
-        bm25_indices, bm25_values = _bm25_query_vector(text)
-        prefetch = [
+
+        # Лексический сигнал: GTE keywords + BM25 stem + BM25 trigram → nested RRF
+        lexical_prefetch = [
             {'query': {'indices': indices, 'values': values}, 'using': 'keywords', 'limit': limit * 2},
-            {'query': dense, 'using': 'full', 'limit': limit * 2},
         ]
-        if bm25_indices:
-            prefetch.append({'query': {'indices': bm25_indices, 'values': bm25_values}, 'using': 'bm25', 'limit': limit * 2})
+        for vec_fn, vec_name in [
+            (_bm25_query_vector, 'bm25'),
+            (_bm25_trigram_query_vector, 'bm25_trigram'),
+        ]:
+            idx, val = vec_fn(text)
+            if idx:
+                lexical_prefetch.append({
+                    'query': {'indices': idx, 'values': val},
+                    'using': vec_name,
+                    'limit': limit * 2,
+                })
+
+        # Двухуровневый RRF: семантика (1 голос) vs лексика (1 голос)
+        prefetch = [
+            {'query': dense, 'using': 'full', 'limit': limit * 2},
+            {
+                'prefetch': lexical_prefetch,
+                'query': {'fusion': 'rrf'},
+                'limit': limit * 2,
+            },
+        ]
+
         payload = {
             'prefetch': prefetch,
             'query': {'fusion': 'rrf'},
@@ -799,16 +933,39 @@ def _stem(word: str) -> str:
     return _stemmer_en.stem(word)
 
 
-def _bm25_query_vector(text: str) -> tuple[list, list]:
-    """Построить BM25 query vector: слова → стемминг → MD5 хэши, веса = 1.0."""
-    words = [_stem(w) for w in _WORD_RE.findall(text.lower()) if w not in _STOP_WORDS]
-    if not words:
+def _tokens_to_vector(tokens: list[str]) -> tuple[list, list]:
+    """Список токенов → (indices, values) sparse vector. Веса = 1.0."""
+    if not tokens:
         return [], []
     seen: dict[int, float] = {}
-    for word in words:
-        idx = int(hashlib.md5(word.encode('utf-8')).hexdigest(), 16) % _MD5_MOD
+    for token in tokens:
+        idx = int(hashlib.md5(token.encode('utf-8')).hexdigest(), 16) % _MD5_MOD
         seen[idx] = 1.0
     return list(seen.keys()), list(seen.values())
+
+
+def _bm25_query_vector(text: str) -> tuple[list, list]:
+    """BM25 query vector: стемминг."""
+    words = [_stem(w) for w in _WORD_RE.findall(text.lower()) if w not in _STOP_WORDS]
+    return _tokens_to_vector(words)
+
+
+# ── Триграммы ─────────────────────────────────────────────────────────────
+
+def _trigrams(word: str) -> list[str]:
+    padded = f'__{word}__'
+    return [padded[i:i + 3] for i in range(len(padded) - 2)]
+
+
+def _bm25_trigram_query_vector(text: str) -> tuple[list, list]:
+    """BM25 trigram query vector: символьные триграммы оригинальных слов."""
+    tokens = []
+    for w in _WORD_RE.findall(text.lower()):
+        if w in _STOP_WORDS:
+            continue
+        for tri in _trigrams(w):
+            tokens.append(tri)
+    return _tokens_to_vector(tokens)
 
 
 def _sparse_dict_to_indices_values(sparse_dict: dict) -> tuple[list, list]:

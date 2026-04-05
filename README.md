@@ -4,52 +4,42 @@
 
 ## Возможности
 
-- **Агентский ретривал** — LLM с function calling итеративно ищет, фильтрует и уточняет запросы. Сам решает когда информации достаточно
-- **Knowledge Map** — автоматически строит иерархическую карту документации (оглавление) из doc_summary. LLM видит структуру базы знаний и ищет прицельно по разделам
-- **Гибридный поиск** — dense (FRIDA) + sparse (GTE) + BM25 (Snowball stemming, ru/en стоп-слова) с RRF-fusion
+- **Агентский ретривал** — LLM сам ищет, фильтрует и уточняет запросы через function calling. Решает когда информации достаточно для ответа
+- **Knowledge Map** — автоматическая карта документации, LLM ищет прицельно по разделам
+- **Гибридный поиск** — семантический + лексический с multi-signal fusion
 - **Локальные LLM** — любой OpenAI-совместимый эндпойнт (Ollama, LM Studio, облако)
-- **Умное чанкование** — структурный hybrid-чанкер (CommonMark AST, магнитные заголовки, per-type oversized стратегии с рекурсией). Опционально: семантический на эмбеддингах, LLM-чанкер
-- **Точный подсчёт токенов** — FRIDA tokenizer для чанкинга (embedder-native), TikToken для LLM
-- **Адаптивный контекст** — LLM-summary для каждого чанка, размер адаптируется к бюджету embedder (chunk_max_tokens − text − path)
-- **Позиционирование** — char_offset каждого чанка в документе, pages для PDF (paged documents)
-- **Идемпотентность и full sync** — пропуск неизменённых документов, каскадное удаление устаревших
-- **Daemon-режим** — cron-расписание, параллельная индексация, retry с backoff
+- **Умное чанкование** — структурный чанкер на базе CommonMark AST, несколько стратегий обработки крупных блоков
+- **Адаптивный контекст** — LLM-summary для каждого чанка, размер адаптируется к бюджету embedder
+- **Идемпотентность** — пропуск неизменённых документов, каскадное удаление устаревших
 - **Цитаты и ссылки** — URL источников в ответах, группировка по документам
-- **PDF и Vision LLM** — конвертация PDF через Vision LLM или docling-serve, описание изображений
-- **Русский язык** — FRIDA + GTE-multilingual, razdel для сегментации предложений, Snowball stemming для BM25
+- **PDF и Vision LLM** — конвертация PDF через Vision LLM или docling-serve
+- **Русский язык** — нативная поддержка русского в embeddings, стемминге и сегментации
 
 ## Публикации
 - [habr: Юридическое поле экспериментов для RAG](https://habr.com/ru/articles/1014690/)
-- [linkded.in: A Legal Proving Ground for RAG Experiments](https://www.linkedin.com/pulse/legal-proving-ground-rag-experiments-ivan-komarov-lwocf/)
-
-## Стек
-
-| Компонент | Технология |
-|---|---|
-| Векторная БД | [Qdrant](https://qdrant.tech) |
-| Dense embeddings | [ai-forever/FRIDA](https://huggingface.co/ai-forever/FRIDA) (1536-dim, 512 tok) |
-| Sparse embeddings | [Alibaba-NLP/gte-multilingual-base](https://huggingface.co/Alibaba-NLP/gte-multilingual-base) |
-| LLM | Любой OpenAI-совместимый |
+- [linkedin: A Legal Proving Ground for RAG Experiments](https://www.linkedin.com/pulse/legal-proving-ground-rag-experiments-ivan-komarov-lwocf/)
 
 ## Быстрый старт
 
-### Требования
+### Docker (рекомендуется)
 
-- Python 3.12+, [Poetry](https://python-poetry.org)
-- [Qdrant](https://qdrant.tech/documentation/quick-start/)
-- LLM-сервер (опционален для индексации без контекста, обязателен для ретривала)
-
-### Установка
+Самый быстрый способ — всё в одном:
 
 ```bash
 git clone https://github.com/catonmoon/morag.git
 cd morag
-poetry install
 cp config.example.yml config.yml
-# отредактировать config.yml — см. config.example.yml для описания всех опций
+# отредактировать config.yml — указать источники данных
+
+docker compose build && docker compose up -d
 ```
 
-### Ollama (рекомендуется)
+Это поднимет: Qdrant, embedding-серверы, pipeline и Open WebUI. Откройте http://localhost:3000 и задавайте вопросы.
+
+### Требования для Docker
+
+- Docker и Docker Compose
+- LLM-сервер: [Ollama](https://ollama.ai) (рекомендуется) или любой OpenAI-совместимый
 
 ```bash
 brew install ollama          # macOS
@@ -57,110 +47,86 @@ ollama pull qwen3.5:9b
 ollama serve                 # http://localhost:11434
 ```
 
-`config.example.yml` уже настроен на Ollama. Для vision (изображения Confluence) — раскомментировать `llm_vision`.
+`config.example.yml` уже настроен на Ollama.
 
 ### Индексация
 
 ```bash
-poetry run python -m cli.main index --config config.yml
-poetry run python -m cli.main index --reset --config config.yml  # полная переиндексация
-poetry run python -m cli.main serve --config config.yml          # daemon по cron
+# Разовая индексация (подхватит новые и изменённые документы)
+docker compose exec morag-indexer python -m cli.main index
+
+# Полная переиндексация с нуля
+docker compose exec morag-indexer python -m cli.main index --reset
+
+# Daemon-режим (индексация по cron-расписанию из config.yml)
+docker compose exec morag-indexer python -m cli.main serve
 ```
 
-## Архитектура
+### Apple Silicon (MPS ускорение)
 
-### Пайплайн индексации
-
-```
-Source.get_metadata() → full sync → BFS по parent_doc_ids
-  → per level: load_one() → DocTitleProcessor → DocSummaryProcessor → docs.upsert()
-    → HybridChunker → ContextGenerator → ChunkProcessors → chunks.upsert()
-```
-
-### HybridChunker (default)
-
-Структурный чанкер с тремя стадиями:
-
-1. **Parse blocks** — CommonMark AST разбор на типизированные блоки (heading, paragraph, table, list, fence, diagram)
-2. **Greedy fill** — жадное наполнение чанков блоками до max_tokens. Магнитные заголовки (heading всегда в начале чанка). Oversized блоки обрабатываются per-type стратегией
-3. **Post-merge** — склейка мелких чанков (< min_tokens) с соседями
-
-Oversized стратегии (настраиваются в конфиге для каждого типа блока):
-
-| Стратегия | Описание |
-|---|---|
-| `asis` | Оставить как есть (один большой чанк) |
-| `split` | Структурное разбиение (предложения / элементы / строки) |
-| `embed` | SemanticChunker (embedding-based границы) |
-| `transform` | Преобразовать формат + рекурсия (таблица → key-value h4) |
-| `llm` | LLM преобразует/разобьёт |
-
-Другие режимы: `semantic` (на эмбеддингах), `passthrough`, `llm`.
-
-### Два токенизатора
-
-- **FRIDA HuggingFace** — для чанкинга (точный подсчёт токенов embedder модели)
-- **TikToken** — для LLM (context window, prompt overhead)
-
-Для русского текста FRIDA считает на 43% меньше токенов чем TikToken → чанки точно заполняют embedder capacity.
-
-### Источники данных
-
-| Источник | `source_type` | `paged` |
-|---|---|---|
-| Markdown-файлы | `markdown` | нет |
-| PDF-файлы | `pdf` | да |
-| Confluence | `confluence` | нет |
-| Confluence PDF-вложения | `attached_pdf` | да |
-| Jira (по ссылкам в документах) | `attached_jira` | нет |
-
-Для paged документов (PDF) маркеры `<!-- page:N -->` извлекаются до чанкинга, каждый чанк получает номера страниц.
-
-### Knowledge Map
-
-Автоматически генерируемая иерархическая карта документации. Строится после индексации из doc_summary всех документов. Стратегия `weighted` — бюджет токенов распределяется пропорционально числу потомков раздела. Хранится в Qdrant (`knowledge_map` коллекция).
-
-Используется при ретривале: LLM-агент видит структуру базы знаний в system prompt и может фильтровать поиск по разделам через `section_ids`.
-
-### Ретривал
-
-Агентский пайплайн (`services/pipeline/morag.py`) с function calling, совместим с Open WebUI и любым OpenAI-compatible клиентом.
-
-```
-user_question → [system prompt + Knowledge Map]
-  → agent loop:
-      LLM выбирает tool → search(query, section_ids) / get_neighbors(doc_id, order)
-        → hybrid_search (dense + sparse + BM25, RRF) → LLM reranker
-      LLM анализирует результаты → ещё поиск или финальный ответ
-  → streaming ответ с thinking
-```
-
-Tools:
-- `search(query, section_ids)` — гибридный поиск + LLM-фильтрация + опциональное ограничение по разделам
-- `get_neighbors(doc_id, order, window)` — соседние чанки для расширения контекста
-
-## Docker
+На MacBook с Apple Silicon embedding-модели работают на GPU через MPS — значительно быстрее чем CPU в Docker.
 
 ```bash
-docker compose build && docker compose up -d
+poetry install
+cp config.example.yml config.yml
+
+# 1. Qdrant
+docker compose up -d qdrant
+
+# 2. Ollama
+brew install ollama
+ollama pull qwen3.5:9b
+ollama serve
+
+# 3. Embedding-серверы (MPS ускорение)
+python services/embedder_frida/app_native.py --port 8092   # dense, FRIDA
+python services/embedder_gte/app_native.py --port 8091     # sparse, GTE
+
+# 4. Индексация
+poetry run python -m cli.main index --config config.yml
 ```
 
-Один `docker-compose.yml`: qdrant, morag-indexer, embedder-frida, embedder-gte, pipelines, open-webui.
+В `config.yml` указать:
+```yaml
+dense_embedder:
+  base_url: http://localhost:8092
+sparse_embedder:
+  base_url: http://localhost:8091
+```
+
+Для ретривала — запустить pipeline и Open WebUI через Docker:
+```bash
+docker compose up -d pipelines open-webui
+```
+
+## Источники данных
+
+| Источник | Описание |
+|---|---|
+| Markdown-файлы | Локальная директория с .md файлами |
+| Confluence | Пространства и страницы (включая вложенные PDF) |
+| Jira | Задачи по ссылкам из документов |
+| PDF | Конвертация через Vision LLM или docling-serve |
+
+Настраиваются в `config.yml` — см. `config.example.yml` для описания всех опций.
+
+## Стек
+
+| Компонент | Технология |
+|---|---|
+| Векторная БД | [Qdrant](https://qdrant.tech) |
+| Dense embeddings | [ai-forever/FRIDA](https://huggingface.co/ai-forever/FRIDA) |
+| Sparse embeddings | [Alibaba-NLP/gte-multilingual-base](https://huggingface.co/Alibaba-NLP/gte-multilingual-base) |
+| LLM | Любой OpenAI-совместимый |
+| UI | [Open WebUI](https://openwebui.com) (опционально) |
 
 ## Разработка
 
 ```bash
+poetry install
 poetry run ruff check src
 poetry run pytest -v --cov
 ```
-
-### ADR (Architecture Decision Records)
-
-| ADR | Описание |
-|---|---|
-| [ADR-0008](docs/adr/0008-hybrid-chunker.md) | HybridChunker как режим чанкинга по умолчанию |
-| [ADR-0009](docs/adr/0009-dual-tokenizer.md) | Два токенизатора — FRIDA для чанкинга, TikToken для LLM |
-| [ADR-0010](docs/adr/0010-knowledge-map.md) | Knowledge Map — иерархическая карта документации для system prompt |
 
 ### Исследования
 

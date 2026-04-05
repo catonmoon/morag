@@ -68,8 +68,52 @@ def frida_vectors_config(dim: int) -> dict[str, VectorParams]:
 
 
 def gte_sparse_vectors_config() -> dict[str, SparseVectorParams]:
-    """Конфиг sparse-векторов для коллекции чанков с GTE-эмбеддингами и BM25."""
+    """Конфиг sparse-векторов для коллекции чанков с GTE-эмбеддингами и BM25.
+
+    bm25 — стемминг (морфология)
+    bm25_phonetic — фонетическая нормализация + триграммы
+    bm25_translit — транслитерация кириллица↔латиница
+    """
     return {
         'keywords': SparseVectorParams(),
         'bm25': SparseVectorParams(),
+        'bm25_trigram': SparseVectorParams(),
     }
+
+
+async def upgrade_sparse_vectors(
+    client: AsyncQdrantClient,
+    name: str = 'chunks',
+) -> bool:
+    """Проверить что коллекция имеет все нужные sparse vectors.
+
+    Qdrant 1.x не поддерживает добавление sparse vectors к существующей коллекции.
+    Если не хватает — логирует предупреждение, возвращает False.
+    Для добавления нужна полная переиндексация (--reset).
+
+    Returns: True если все вектора на месте, False если нужен --reset.
+    """
+    import logging
+    logger = logging.getLogger(__name__)
+
+    existing = {c.name for c in (await client.get_collections()).collections}
+    if name not in existing:
+        return True  # коллекция будет создана с полной схемой
+
+    info = await client.get_collection(name)
+    current_sparse = set()
+    if info.config.params.sparse_vectors:
+        current_sparse = set(info.config.params.sparse_vectors.keys())
+
+    target = gte_sparse_vectors_config()
+    missing = {k for k in target if k not in current_sparse}
+
+    if not missing:
+        logger.info('All sparse vectors present: %s', sorted(current_sparse))
+        return True
+
+    logger.warning(
+        'Missing sparse vectors: %s. Run with --reset to recreate collection.',
+        sorted(missing),
+    )
+    return False

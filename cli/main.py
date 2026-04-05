@@ -402,7 +402,9 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         else:
             logger.info('No Jira issues found in indexed documents, skipping Jira indexing')
 
-    # Post-indexing: BM25 sparse vectors
+    # Post-indexing: upgrade sparse vectors schema + build BM25
+    from morag.storage.collections import upgrade_sparse_vectors
+    await upgrade_sparse_vectors(client, config.qdrant.collection_chunks)
     await build_bm25_index(client, config.qdrant.collection_chunks)
 
     # Post-indexing: Knowledge Map

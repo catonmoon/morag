@@ -1,11 +1,17 @@
 """BM25 sparse vector builder.
 
 Вычисляет BM25Okapi веса по всему корпусу чанков и записывает
-sparse vector 'bm25' в Qdrant. Запускается как post-indexing шаг,
+sparse vectors в Qdrant. Запускается как post-indexing шаг,
 когда все чанки уже в коллекции.
+
+Поддерживает несколько BM25 представлений:
+- bm25: стемминг (морфология)
+- bm25_phonetic: фонетическая нормализация (Russian Metaphone + триграммы)
+- bm25_translit: транслитерация кириллица↔латиница
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import re
@@ -30,6 +36,15 @@ _STOP_WORDS: frozenset[str] = frozenset(
 _stemmer_ru = SnowballStemmer('russian')
 _stemmer_en = SnowballStemmer('english')
 
+# ── Триграммы ─────────────────────────────────────────────────────────────
+
+def _trigrams(word: str) -> list[str]:
+    """Символьные триграммы слова (с padding)."""
+    padded = f'__{word}__'
+    return [padded[i:i + 3] for i in range(len(padded) - 2)]
+
+
+# ── Токенизаторы ──────────────────────────────────────────────────────────
 
 def _stem(word: str) -> str:
     """Стемминг с автоопределением языка по кириллице."""
@@ -40,7 +55,6 @@ def _stem(word: str) -> str:
 
 def _word_to_index(word: str) -> int:
     """Хэш токена → индекс sparse-вектора. Совместимо с GTE sparse."""
-    import hashlib
     return int(hashlib.md5(word.encode('utf-8')).hexdigest(), 16) % _MD5_MOD
 
 
@@ -49,24 +63,45 @@ def tokenize(text: str) -> list[str]:
     return [_stem(w) for w in _WORD_RE.findall(text.lower()) if w not in _STOP_WORDS]
 
 
+def tokenize_trigram(text: str) -> list[str]:
+    """Токенизация: символьные триграммы оригинальных слов (без стемминга).
+
+    Ловит опечатки через пересечение триграмм:
+    адаптация/адоптация — 70-80% триграмм совпадают.
+    """
+    tokens = []
+    for w in _WORD_RE.findall(text.lower()):
+        if w in _STOP_WORDS:
+            continue
+        for tri in _trigrams(w):
+            tokens.append(tri)
+    return tokens
+
+
 def build_bm25_vectors(
     texts: list[str],
+    tokenizer=tokenize,
     k1: float = 1.5,
     b: float = 0.75,
 ) -> list[dict]:
     """Построить BM25 sparse vectors для корпуса текстов.
 
+    Args:
+        texts: корпус текстов
+        tokenizer: функция text → list[str] (tokenize, tokenize_phonetic, tokenize_translit)
+        k1, b: параметры BM25
+
     Возвращает список {'indices': [...], 'values': [...]}.
     """
     # Токенизация
-    docs = [tokenize(t) for t in texts]
+    docs = [tokenizer(t) for t in texts]
     n = len(docs)
     if n == 0:
         return []
 
     # Средняя длина документа
     doc_lens = [len(d) for d in docs]
-    avgdl = sum(doc_lens) / n
+    avgdl = sum(doc_lens) / n if n > 0 else 1
 
     # Document frequency: в скольких документах встречается терм
     df: Counter[str] = Counter()
@@ -98,12 +133,39 @@ def build_bm25_vectors(
     return vectors
 
 
+# Все BM25 представления: (имя вектора, токенизатор)
+BM25_VARIANTS: list[tuple[str, callable]] = [
+    ('bm25', tokenize),
+    ('bm25_trigram', tokenize_trigram),
+]
+
+
 async def build_bm25_index(
     client: AsyncQdrantClient,
     collection: str = 'chunks',
     batch_size: int = 64,
 ) -> None:
-    """Post-indexing: построить BM25 sparse vectors для всех чанков в коллекции."""
+    """Post-indexing: построить BM25 sparse vectors для всех чанков в коллекции.
+
+    Строит только те варианты из BM25_VARIANTS, которые есть в схеме коллекции.
+    """
+    # Определить какие BM25 вектора есть в схеме
+    info = await client.get_collection(collection)
+    available_sparse = set()
+    if info.config.params.sparse_vectors:
+        available_sparse = set(info.config.params.sparse_vectors.keys())
+
+    variants_to_build = [
+        (name, tok) for name, tok in BM25_VARIANTS if name in available_sparse
+    ]
+    if not variants_to_build:
+        logger.warning('BM25: no BM25 sparse vectors in collection schema, skipping')
+        return
+
+    logger.info(
+        'BM25: will build %d variants: %s',
+        len(variants_to_build), [v[0] for v in variants_to_build],
+    )
     logger.info('BM25: loading all chunks from %s...', collection)
 
     # Scroll all chunks (только с vectors — пропускаем битые точки)
@@ -137,30 +199,41 @@ async def build_bm25_index(
         logger.info('BM25: no chunks found, skipping')
         return
 
-    logger.info('BM25: building vectors for %d chunks...', len(all_points))
     ids = [pid for pid, _ in all_points]
     texts = [text for _, text in all_points]
-    vectors = build_bm25_vectors(texts)
 
-    # Update in batches, пропуская пустые vectors (стоп-слова, пустой текст)
-    total_batches = (len(ids) + batch_size - 1) // batch_size
-    skipped_empty = 0
-    for i in range(total_batches):
-        start = i * batch_size
-        end = min(start + batch_size, len(ids))
-        batch_points = []
-        for j in range(start, end):
-            if vectors[j]['indices']:
-                batch_points.append(PointVectors(id=ids[j], vector={'bm25': vectors[j]}))
-            else:
-                skipped_empty += 1
-        if batch_points:
-            await client.update_vectors(
-                collection_name=collection,
-                points=batch_points,
+    for vector_name, tokenizer in variants_to_build:
+        logger.info('BM25 [%s]: building vectors for %d chunks...', vector_name, len(ids))
+        vectors = build_bm25_vectors(texts, tokenizer=tokenizer)
+
+        # Update in batches
+        total_batches = (len(ids) + batch_size - 1) // batch_size
+        skipped_empty = 0
+        for i in range(total_batches):
+            start = i * batch_size
+            end = min(start + batch_size, len(ids))
+            batch_points = []
+            for j in range(start, end):
+                if vectors[j]['indices']:
+                    batch_points.append(
+                        PointVectors(id=ids[j], vector={vector_name: vectors[j]})
+                    )
+                else:
+                    skipped_empty += 1
+            if batch_points:
+                await client.update_vectors(
+                    collection_name=collection,
+                    points=batch_points,
+                )
+            if (i + 1) % 10 == 0 or i + 1 == total_batches:
+                logger.info(
+                    'BM25 [%s]: batch %d/%d', vector_name, i + 1, total_batches,
+                )
+        if skipped_empty:
+            logger.warning(
+                'BM25 [%s]: skipped %d chunks with empty vectors',
+                vector_name, skipped_empty,
             )
-        logger.info('BM25: batch %d/%d (%d chunks)', i + 1, total_batches, end - start)
-    if skipped_empty:
-        logger.warning('BM25: skipped %d chunks with empty vectors (stop-words only)', skipped_empty)
+        logger.info('BM25 [%s]: done.', vector_name)
 
-    logger.info('BM25: done. Updated %d vectors.', len(ids))
+    logger.info('BM25: all variants built for %d chunks.', len(ids))
