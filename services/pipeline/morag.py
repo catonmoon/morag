@@ -181,6 +181,7 @@ class Pipeline:
         SEARCH_LIMIT: int
         MAX_ITERATIONS: int
         ENABLE_THINKING: bool
+        ENABLE_DIVERSITY_NUDGE: bool
         CITATION_MAX_CHARS: int
         HTTP_TIMEOUT: int
         PROMPT_VERSION: int  # 1 = v1 (linear), 2 = v2 (plan-execute-verify)
@@ -207,6 +208,7 @@ class Pipeline:
             SEARCH_LIMIT=int(os.getenv('SEARCH_LIMIT', '50')),
             MAX_ITERATIONS=int(os.getenv('MAX_ITERATIONS', '9')),
             ENABLE_THINKING=os.getenv('ENABLE_THINKING', 'true').lower() == 'true',
+            ENABLE_DIVERSITY_NUDGE=os.getenv('ENABLE_DIVERSITY_NUDGE', 'false').lower() == 'true',
             CITATION_MAX_CHARS=int(os.getenv('CITATION_MAX_CHARS', '5000')),
             HTTP_TIMEOUT=int(os.getenv('HTTP_TIMEOUT', '300')),
             PROMPT_VERSION=int(os.getenv('PROMPT_VERSION', '2')),
@@ -264,7 +266,8 @@ class Pipeline:
                 # инжектим nudge и продолжаем цикл вместо ответа
                 unique_docs = {c['doc_id'] for c in all_chunks.values()}
                 if (
-                    not diversity_nudge_sent
+                    self.valves.ENABLE_DIVERSITY_NUDGE
+                    and not diversity_nudge_sent
                     and search_count >= 2
                     and len(unique_docs) <= 1
                     and all_chunks
@@ -583,6 +586,7 @@ class Pipeline:
             timeout=self.valves.HTTP_TIMEOUT,
         )
         resp.raise_for_status()
+        resp.encoding = 'utf-8'
         in_thinking = False
         for line in resp.iter_lines(decode_unicode=True):
             if not line or not line.startswith('data: '):
