@@ -402,16 +402,20 @@ class KnowledgeMapGenerator:
             available = 100
 
         # 3. Распределяем бюджет
-        #    Корни (heading_level=1) — минимум (50 tok)
+        #    Корни с потомками — 0 (описаны через детей)
+        #    Корни без потомков (leaf roots) — получают бюджет как обычные узлы
         #    Остальные — пропорционально числу потомков
-        # Корни = 0 бюджета (только заголовок, описаны через детей)
-        non_root_nodes = [(doc, hl, dc) for doc, hl, dc in nodes if hl > 1]
-        total_weight = sum(dc + 1 for _, _, dc in non_root_nodes) or 1
+        budgeted_nodes = [
+            (doc, hl, dc) for doc, hl, dc in nodes
+            if hl > 1 or not children_map.get(doc.id)  # non-root OR leaf root
+        ]
+        total_weight = sum(dc + 1 for _, _, dc in budgeted_nodes) or 1
 
         budgets: dict[str, int] = {}
         for doc, hl, dc in nodes:
-            if hl == 1:
-                budgets[doc.id] = 0  # корни без описания
+            has_children = bool(children_map.get(doc.id))
+            if hl == 1 and has_children:
+                budgets[doc.id] = 0  # корни с потомками — без описания
             else:
                 weight = dc + 1
                 budgets[doc.id] = max(self._node_min_tokens, available * weight // total_weight)
@@ -419,7 +423,7 @@ class KnowledgeMapGenerator:
         logger.info(
             'KnowledgeMap: weighted budget: %d nodes (%d non-root), %d available tok, '
             'total_weight=%d',
-            len(nodes), len(non_root_nodes), available, total_weight,
+            len(nodes), len(budgeted_nodes), available, total_weight,
         )
 
         # 4. Собираем промпт с бюджетами

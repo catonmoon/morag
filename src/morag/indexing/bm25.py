@@ -144,6 +144,7 @@ async def build_bm25_index(
     client: AsyncQdrantClient,
     collection: str = 'chunks',
     batch_size: int = 64,
+    include_doc_summary: bool = False,
 ) -> None:
     """Post-indexing: построить BM25 sparse vectors для всех чанков в коллекции.
 
@@ -187,9 +188,10 @@ async def build_bm25_index(
                 skipped += 1
                 continue
             text = p.payload.get('text', '')
-            doc_summary = p.payload.get('doc_summary', '')
-            combined = f'{text}\n{doc_summary}' if doc_summary else text
-            all_points.append((p.id, combined))
+            if include_doc_summary:
+                doc_summary = p.payload.get('doc_summary', '')
+                text = f'{text}\n{doc_summary}' if doc_summary else text
+            all_points.append((p.id, text))
         if offset is None:
             break
     if skipped:

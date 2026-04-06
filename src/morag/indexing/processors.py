@@ -107,14 +107,15 @@ class SparseEmbeddingProcessor(ChunkProcessor):
     Сохраняется в формате {'indices': [...], 'values': [...]}.
     """
 
-    def __init__(self, embedder: SparseEmbedder) -> None:
+    def __init__(self, embedder: SparseEmbedder, include_doc_summary: bool = False) -> None:
         self._embedder = embedder
+        self._include_doc_summary = include_doc_summary
 
-    @staticmethod
-    def _sparse_text(chunk: Chunk, document: Document) -> str:
-        doc_summary = document.payload.get('doc_summary', '')
-        if doc_summary:
-            return f'{chunk.text}\n{doc_summary}'
+    def _sparse_text(self, chunk: Chunk, document: Document) -> str:
+        if self._include_doc_summary:
+            doc_summary = document.payload.get('doc_summary', '')
+            if doc_summary:
+                return f'{chunk.text}\n{doc_summary}'
         return chunk.text
 
     def process(self, chunk: Chunk, document: Document) -> Chunk:

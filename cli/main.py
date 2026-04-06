@@ -316,7 +316,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         PageMarkerProcessor(),
         MetadataProcessor(),
         DenseEmbeddingProcessor(embedder),
-        SparseEmbeddingProcessor(sparse_embedder),
+        SparseEmbeddingProcessor(sparse_embedder, include_doc_summary=config.indexing.lexical_doc_summary),
     ]
 
     # В LLM-режиме блок + ответ LLM должны влезть в контекстное окно.
@@ -405,7 +405,10 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
     # Post-indexing: upgrade sparse vectors schema + build BM25
     from morag.storage.collections import upgrade_sparse_vectors
     await upgrade_sparse_vectors(client, config.qdrant.collection_chunks)
-    await build_bm25_index(client, config.qdrant.collection_chunks)
+    await build_bm25_index(
+        client, config.qdrant.collection_chunks,
+        include_doc_summary=config.indexing.lexical_doc_summary,
+    )
 
     # Post-indexing: Knowledge Map
     if config.indexing.knowledge_map.enabled:

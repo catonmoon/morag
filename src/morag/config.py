@@ -160,6 +160,7 @@ class IndexingConfig(BaseModel):
     chunker: ChunkerConfig = ChunkerConfig()
     context: ContextConfig = ContextConfig()
     embed_batch_size: int = 64            # размер батча для embed + upsert чанков
+    lexical_doc_summary: bool = False     # добавлять doc_summary к тексту чанка для лексических векторов (GTE keywords, BM25)
     dense_embedder: DenseEmbedderConfig = DenseEmbedderConfig()
     sparse_embedder: SparseEmbedderConfig = SparseEmbedderConfig()
     vision_max_tokens: int = 1024  # лимит токенов ответа Vision LLM (изображения, формулы)
