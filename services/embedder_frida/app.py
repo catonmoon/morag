@@ -46,7 +46,7 @@ def create_app(
     model_name: str | None = None,
     device: str | None = None,
 ) -> FastAPI:
-    model_name = model_name or os.environ.get('MODEL_PATH', 'ai-forever/FRIDA')
+    model_name = model_name or os.environ.get('MODEL_PATH', '/opt/hf/models/FRIDA')
     device = device or os.environ.get('DEVICE', _detect_device())
     local_files_only = os.environ.get('TRANSFORMERS_OFFLINE', '0') == '1'
 
@@ -87,19 +87,17 @@ def create_app(
     return application
 
 
-# Docker: uvicorn app:app
-app = create_app()
-
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='FRIDA embedder server')
-    parser.add_argument('--model', default=None, help='Model name or path (default: ai-forever/FRIDA)')
+    parser.add_argument('--model', default='ai-forever/FRIDA', help='Model name or path')
     parser.add_argument('--device', default=None, help='Device: mps, cuda, cpu (auto if omitted)')
     parser.add_argument('--host', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=8082)
     parser.add_argument('--workers', type=int, default=1)
     args = parser.parse_args()
 
-    # CLI args перезаписывают app, созданный на уровне модуля
     app = create_app(args.model, args.device)
     uvicorn.run(app, host=args.host, port=args.port, workers=args.workers)
+else:
+    # Docker: uvicorn app:app
+    app = create_app()
