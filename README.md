@@ -21,82 +21,63 @@
 
 ## Быстрый старт
 
-### Docker (рекомендуется)
+### Требования
 
-Самый быстрый способ — всё в одном:
+- Docker и Docker Compose
+- LLM-сервер: [Ollama](https://ollama.ai) или любой OpenAI-совместимый
 
 ```bash
 git clone https://github.com/catonmoon/morag.git
 cd morag
-cp config.example.yml config.yml
-# отредактировать config.yml — указать источники данных
 
-docker compose build && docker compose up -d
-```
-
-Это поднимет: Qdrant, embedding-серверы, pipeline и Open WebUI. Откройте http://localhost:3000 и задавайте вопросы.
-
-### Требования для Docker
-
-- Docker и Docker Compose
-- LLM-сервер: [Ollama](https://ollama.ai) (рекомендуется) или любой OpenAI-совместимый
-
-```bash
+# 1. LLM
 brew install ollama          # macOS
 ollama pull qwen3.5:9b
-ollama serve                 # http://localhost:11434
+ollama serve
+
+# 2. Конфиг
+cp config.example.yml config.yml
+# отредактировать config.yml — указать путь к документам в sources.local_documents.path
+
+# 3. Положить документы в папку из config.yml (по умолчанию examples/)
+
+# 4. Собрать и запустить
+docker compose build
+docker compose up -d
 ```
 
-`config.example.yml` уже настроен на Ollama.
+Откройте http://localhost:3000 и задавайте вопросы.
+
+`docker compose up` поднимает: Qdrant, embedding-серверы (FRIDA + GTE), pipeline и запускает индексацию. `config.example.yml` уже настроен на Ollama.
 
 ### Индексация
 
+`morag-indexer` работает в daemon-режиме: при старте выполняет полную индексацию, затем переиндексирует по cron-расписанию из `config.yml` (секция `indexing.schedule`). Новые и изменённые документы подхватываются автоматически, удалённые — каскадно удаляются.
+
 ```bash
-# Разовая индексация (подхватит новые и изменённые документы)
-docker compose exec morag-indexer python -m cli.main index
-
-# Полная переиндексация с нуля
-docker compose exec morag-indexer python -m cli.main index --reset
-
-# Daemon-режим (индексация по cron-расписанию из config.yml)
-docker compose exec morag-indexer python -m cli.main serve
+# Принудительная переиндексация с нуля
+docker compose run morag-indexer index --reset
 ```
 
 ### Apple Silicon (MPS ускорение)
 
-На MacBook с Apple Silicon embedding-модели работают на GPU через MPS — значительно быстрее чем CPU в Docker.
+На Mac с Apple Silicon dense embedding на GPU через MPS значительно быстрее чем CPU в Docker.
 
 ```bash
-poetry install
-cp config.example.yml config.yml
+# 1. Установить зависимости
+pip install -r requirements.txt
 
-# 1. Qdrant
-docker compose up -d qdrant
-
-# 2. Ollama
-brew install ollama
-ollama pull qwen3.5:9b
-ollama serve
-
-# 3. Embedding-серверы (MPS ускорение)
-python services/embedder_frida/app_native.py --port 8092   # dense, FRIDA
-python services/embedder_gte/app_native.py --port 8091     # sparse, GTE
-
-# 4. Индексация
-poetry run python -m cli.main index --config config.yml
+# 2. Запустить FRIDA нативно с MPS
+python services/embedder_frida/app.py --port 8092
 ```
 
-В `config.yml` указать:
+В `config.yml` изменить:
 ```yaml
-dense_embedder:
-  base_url: http://localhost:8092
-sparse_embedder:
-  base_url: http://localhost:8091
-```
-
-Для ретривала — запустить pipeline и Open WebUI через Docker:
-```bash
-docker compose up -d pipelines open-webui
+indexing:
+  dense_embedder:
+    base_url: http://localhost:8092          # вместо http://embedder-frida:8082
+    # или для индексации из Docker:
+    # base_url: http://host.docker.internal:8092
 ```
 
 ## Источники данных
@@ -128,6 +109,3 @@ poetry run ruff check src
 poetry run pytest -v --cov
 ```
 
-### Исследования
-
-Результаты экспериментов и сравнений — в `experiments/`.

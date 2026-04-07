@@ -18,14 +18,13 @@ RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
 # Скачать nltk stopwords (русские + английские) для BM25
 RUN python -c "import nltk; nltk.download('stopwords', download_dir='/usr/local/nltk_data')"
 
-# Скачать FRIDA (модель + токенизатор) во время сборки
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('ai-forever/FRIDA')" && \
-    python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('ai-forever/FRIDA')"
-
-# Скачать GTE sparse во время сборки
-RUN python -c "from transformers import AutoTokenizer, AutoModelForTokenClassification; \
-    AutoTokenizer.from_pretrained('Alibaba-NLP/gte-multilingual-base'); \
-    AutoModelForTokenClassification.from_pretrained('Alibaba-NLP/gte-multilingual-base', trust_remote_code=True)"
+# Embedding-модели загружаются через HTTP-серверы (embedder-frida, embedder-gte).
+# Раскомментировать если нужен локальный запуск эмбеддеров внутри контейнера индексатора:
+# RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('ai-forever/FRIDA')" && \
+#     python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('ai-forever/FRIDA')"
+# RUN python -c "from transformers import AutoTokenizer, AutoModelForTokenClassification; \
+#     AutoTokenizer.from_pretrained('Alibaba-NLP/gte-multilingual-base'); \
+#     AutoModelForTokenClassification.from_pretrained('Alibaba-NLP/gte-multilingual-base', trust_remote_code=True)"
 
 # Исходный код
 COPY src/ ./src/

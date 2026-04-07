@@ -28,18 +28,22 @@ services:
 #      retries: 10
 #      start_period: 120s
 
-#   morag-indexer:
-#     build:
-#       context: .
-#       network: host
-#     command: python -m cli.main serve
-#     depends_on:
-#       qdrant:
-#         condition: service_healthy
-#     volumes:
-#       - ./config.docker.yml:/app/config.yml:ro   # конфиг с qdrant host: qdrant
-#       - ./data:/app/data:ro                       # папка с MD-документами
-#     restart: unless-stopped
+  morag-indexer:
+    build:
+      context: .
+      network: host
+    command: serve
+    depends_on:
+      qdrant:
+        condition: service_healthy
+      embedder-frida:
+        condition: service_healthy
+      embedder-gte:
+        condition: service_healthy
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+      - ./data:/app/data:ro
+    restart: unless-stopped
 
   embedder-frida:
     build:
@@ -89,7 +93,8 @@ services:
       - QDRANT_NUM_RESULTS=50
       - NEIGHBOR_WINDOW=1
       - SPARSE_EMBED_URL=http://embedder-gte:8081
-      - DENSE_EMBED_URL=http://host.docker.internal:8092
+      - DENSE_EMBED_URL=http://embedder-frida:8082
+      # Для MPS на хосте: http://host.docker.internal:8092
       - LLM_URL=${LLM_URL:-http://host.docker.internal:11434/v1}
       - LLM_MODEL=${LLM_MODEL:-qwen3.5:9b}
       - LLM_API_KEY=${LLM_API_KEY:-ollama}
@@ -107,8 +112,6 @@ services:
 
   open-webui:
     image: ghcr.io/open-webui/open-webui:latest
-    profiles:
-      - webui
     ports:
       - "3000:8080"
     environment:
