@@ -96,7 +96,6 @@ services:
       - ENABLE_THINKING=${ENABLE_THINKING:-true}
       - ENABLE_DIVERSITY_NUDGE=${ENABLE_DIVERSITY_NUDGE:-false}
       - MAX_ITERATIONS=32
-      - PROMPT_VERSION=2
     depends_on:
       qdrant:
         condition: service_healthy

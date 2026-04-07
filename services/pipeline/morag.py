@@ -82,34 +82,6 @@ _TOOLS = [
     },
 ]
 
-_SYSTEM_PROMPT_V1 = (
-    'Ты — ассистент по внутренней документации компании. '
-    'Отвечай только на русском языке.\n\n'
-    'У тебя есть доступ к базе знаний через инструменты (tools). '
-    'Используй их для поиска информации.\n\n'
-    '## ГЛАВНОЕ ПРАВИЛО\n'
-    'ЗАПРЕЩЕНО отвечать без поиска. Твой ПЕРВЫЙ ход — ВСЕГДА вызов search(). '
-    'Без исключений, даже если вопрос кажется простым или творческим. '
-    'Любой вопрос требует фактов из базы знаний.\n\n'
-    'Алгоритм работы:\n'
-    '1. Проанализируй вопрос и определи, в каких разделах карты документации искать.\n'
-    '2. СРАЗУ делай search() — не рассуждай, не объясняй, не проси уточнений. '
-    'Делай ОТДЕЛЬНЫЙ search() для каждого аспекта вопроса. '
-    'Если в вопросе несколько частей — ищи каждую отдельно. '
-    'Один search() редко находит всё нужное. '
-    'Передавай section_ids из карты чтобы сузить поиск. '
-    'Первый поиск — по верхнему уровню (##) или без section_ids (вся база). '
-    'Можно указать несколько разделов.\n'
-    '3. Изучи результаты. Если информации недостаточно — '
-    'сделай ещё один поиск с другой формулировкой. '
-    'При уточняющих поисках можно сужать до подразделов (###).\n'
-    '4. Используй get_neighbors() чтобы увидеть контекст вокруг найденного чанка.\n'
-    '5. Делай 3-5 поисков с разных сторон. '
-    'Каждый дополнительный поиск повышает точность и полноту ответа. '
-    'НЕ пытайся найти всё одним запросом — это работает хуже.\n'
-    '6. Когда собрал достаточно информации — дай ответ.\n\n'
-)
-
 _SYSTEM_PROMPT = (
     'Ты — ассистент по внутренней документации компании. '
     'Отвечай только на русском языке.\n\n'
@@ -184,7 +156,6 @@ class Pipeline:
         ENABLE_DIVERSITY_NUDGE: bool
         CITATION_MAX_CHARS: int
         HTTP_TIMEOUT: int
-        PROMPT_VERSION: int  # 1 = v1 (linear), 2 = v2 (plan-execute-verify)
 
     def __init__(self):
         self.valves = self.Valves(
@@ -211,7 +182,6 @@ class Pipeline:
             ENABLE_DIVERSITY_NUDGE=os.getenv('ENABLE_DIVERSITY_NUDGE', 'false').lower() == 'true',
             CITATION_MAX_CHARS=int(os.getenv('CITATION_MAX_CHARS', '5000')),
             HTTP_TIMEOUT=int(os.getenv('HTTP_TIMEOUT', '300')),
-            PROMPT_VERSION=int(os.getenv('PROMPT_VERSION', '2')),
         )
         self._knowledge_map: str | None = None
         self._doc_titles: dict[str, str] = {}  # doc_id → title (кеш)
@@ -233,7 +203,7 @@ class Pipeline:
         knowledge_map = self._fetch_knowledge_map()
 
         # 2. Собрать system prompt
-        system_content = _SYSTEM_PROMPT if self.valves.PROMPT_VERSION >= 2 else _SYSTEM_PROMPT_V1
+        system_content = _SYSTEM_PROMPT
         if knowledge_map:
             system_content += (
                 '\n\nСтруктура базы знаний (используй для навигации):\n' + knowledge_map
