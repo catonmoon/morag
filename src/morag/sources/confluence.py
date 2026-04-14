@@ -105,18 +105,34 @@ class ConfluenceSource(Source):
         cql = self._build_cql()
         logger.info('Confluence CQL: %s', cql)
 
+        expand = 'content.history.lastUpdated,content.space,content.ancestors'
         pages: list[dict] = []
         start = 0
 
+        skip = set(self._skip_ancestor_ids) if self._skip_ancestor_ids else set()
+
         while True:
-            result = self._client.cql(
-                cql,
-                start=start,
-                limit=_CQL_PAGE_SIZE,
-                expand='content.history.lastUpdated,content.space,content.ancestors',
+            result = self._client.get(
+                'rest/api/search',
+                params={
+                    'cql': cql,
+                    'start': start,
+                    'limit': _CQL_PAGE_SIZE,
+                    'expand': expand,
+                },
             )
             batch = result.get('results', [])
-            pages.extend(batch)
+            if skip:
+                filtered = []
+                for page in batch:
+                    content = page.get('content', page)
+                    page_id = content.get('id', '')
+                    ancestor_ids = {a['id'] for a in content.get('ancestors', [])}
+                    if page_id not in skip and not (ancestor_ids & skip):
+                        filtered.append(page)
+                pages.extend(filtered)
+            else:
+                pages.extend(batch)
 
             if len(batch) < _CQL_PAGE_SIZE:
                 break
@@ -168,11 +184,6 @@ class ConfluenceSource(Source):
             keys = ', '.join(f'"{s}"' for s in self._spaces)
             parts.append(f'space IN ({keys})')
 
-        if self._skip_ancestor_ids:
-            ids = ', '.join(f'"{pid}"' for pid in self._skip_ancestor_ids)
-            # исключаем потомков и сами корневые страницы
-            parts.append(f'ancestor NOT IN ({ids})')
-            parts.append(f'id NOT IN ({ids})')
 
         parts.append('ORDER BY lastmodified DESC')
         return ' AND '.join(parts[:-1]) + ' ' + parts[-1]
