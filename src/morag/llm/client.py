@@ -6,7 +6,7 @@ import logging
 import random
 import re
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from aiolimiter import AsyncLimiter
 from openai import AsyncOpenAI
@@ -57,8 +57,11 @@ def _build_extra_body(params: GenerationParams) -> dict | None:
     if params.repetition_penalty is not None:
         extra['repetition_penalty'] = params.repetition_penalty
     if params.enable_thinking is not None:
-        # vLLM / Ollama
+        # vLLM
         extra['chat_template_kwargs'] = {'enable_thinking': params.enable_thinking}
+        # Ollama (/v1/ OpenAI-compatible API)
+        extra['think'] = params.enable_thinking
+        extra['options'] = {'think': params.enable_thinking}
         # OpenRouter
         extra['reasoning'] = {'enabled': params.enable_thinking}
     return extra or None
@@ -92,6 +95,9 @@ class LLMClient:
         model_wait_seconds: int = 0,
         model_wait_retries: int = 0,
         max_rpm: int | None = None,
+        enable_thinking: bool | None = None,
+        seed: int | None = 42,
+        context_window: int = 32768,
     ) -> None:
         self._client = AsyncOpenAI(
             base_url=base_url, api_key=api_key,
@@ -101,6 +107,23 @@ class LLMClient:
         self._model_wait_seconds = model_wait_seconds
         self._model_wait_retries = model_wait_retries
         self._rate_limiter = AsyncLimiter(max_rpm, 60) if max_rpm else None
+        self._default_enable_thinking = enable_thinking
+        self._default_seed = seed
+        self._context_window = context_window
+
+    @property
+    def context_window(self) -> int:
+        """Контекстное окно модели в токенах. Для сайзинга промптов у consumer'ов."""
+        return self._context_window
+
+    def _resolve_params(self, params: GenerationParams | None) -> GenerationParams:
+        """Merge client-level defaults (enable_thinking, seed) with per-call params."""
+        p = params or GenerationParams()
+        if p.enable_thinking is None and self._default_enable_thinking is not None:
+            p = replace(p, enable_thinking=self._default_enable_thinking)
+        if p.seed is None and self._default_seed is not None:
+            p = replace(p, seed=self._default_seed)
+        return p
 
     @asynccontextmanager
     async def _rate_limit(self):
@@ -189,8 +212,7 @@ class LLMClient:
         max_tokens: int | None = None,
     ) -> str:
         """Send a chat completion request and return the response text."""
-        if params is None:
-            params = GenerationParams()
+        params = self._resolve_params(params)
         kwargs: dict = dict(
             model=self._model,
             messages=messages,
@@ -221,8 +243,7 @@ class LLMClient:
         Принимает изображение в формате base64 и текстовый запрос.
         Возвращает текстовое описание изображения.
         """
-        if params is None:
-            params = GenerationParams()
+        params = self._resolve_params(params)
         messages = [
             {
                 'role': 'user',
@@ -257,14 +278,14 @@ class LLMClient:
         schema: dict,
         schema_name: str = 'response',
         params: GenerationParams | None = None,
+        max_tokens: int | None = None,
     ) -> dict:
         """Send a chat completion request expecting a JSON response matching the given schema.
 
         Passes response_format={"type": "json_schema", ...} to enforce structured output.
         Raises ValueError if the response cannot be parsed.
         """
-        if params is None:
-            params = GenerationParams()
+        params = self._resolve_params(params)
         kwargs: dict = dict(
             model=self._model,
             messages=messages,
@@ -281,6 +302,8 @@ class LLMClient:
         extra_body = _build_extra_body(params)
         if extra_body:
             kwargs['extra_body'] = extra_body
+        if max_tokens is not None:
+            kwargs['max_tokens'] = max_tokens
         response = await self._create(**kwargs)
         content = _extract_content(response.choices[0].message) or '{}'
         logger.debug('LLM raw response: %s', content)

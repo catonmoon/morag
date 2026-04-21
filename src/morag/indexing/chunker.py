@@ -22,16 +22,8 @@ from morag.indexing.splitter import (
     split_sentences,
 )
 from morag.indexing.token_counter import TokenCounter
-from morag.llm.client import GenerationParams
 
 logger = logging.getLogger(__name__)
-
-def _llm_params(enable_thinking: bool | None = None) -> GenerationParams:
-    return GenerationParams(
-        temperature=0.0, top_p=1.0, top_k=0,
-        frequency_penalty=0.0, presence_penalty=0.0, seed=42,
-        enable_thinking=enable_thinking,
-    )
 
 _CHUNKS_SCHEMA = {
     'type': 'object',
@@ -219,7 +211,6 @@ class LLMChunker(Chunker):
         fallback_token_limit: int = _FALLBACK_TOKEN_LIMIT,
         halving_retries: int = 0,
         fallback_enabled: bool = False,
-        enable_thinking: bool | None = None,
     ) -> None:
         self._client = client
         self._max_retries = max_retries
@@ -228,7 +219,6 @@ class LLMChunker(Chunker):
         self._fallback_token_limit = fallback_token_limit
         self._halving_retries = halving_retries
         self._fallback_enabled = fallback_enabled
-        self._params = _llm_params(enable_thinking)
 
     async def chunk(self, block: str) -> list[str]:
         return await self._chunk_with_halving(block, halving_left=self._halving_retries)
@@ -361,7 +351,7 @@ class LLMChunker(Chunker):
         try:
             data = await self._client.complete_json(
                 messages, schema=_CHUNKS_SCHEMA,
-                schema_name='chunks', params=self._params,
+                schema_name='chunks',
             )
         except ValueError:
             logger.warning(
@@ -847,11 +837,35 @@ class HybridChunker(Chunker):
                 current_pages = list(block.pages)
                 last_block_offset = block.char_offset
             else:
-                self._flush_chunk(
+                heading_offset = self._flush_chunk(
                     chunks, current_parts, current_pages,
                     current_offset, last_block_offset,
                 )
                 oversized_chunks = await self._split_oversized(block)
+                # Magnetic heading из flush_chunk (current_parts = [trailing_heading])
+                # может содержать висящий заголовок — префиксируем его к первому
+                # oversized-чанку, чтобы не потерять.
+                if current_parts and oversized_chunks:
+                    head_prefix = '\n\n'.join(current_parts)
+                    first = oversized_chunks[0]
+                    oversized_chunks[0] = ChunkResult(
+                        text=head_prefix + '\n\n' + first.text,
+                        pages=first.pages,
+                        char_offset=(
+                            heading_offset if heading_offset is not None
+                            else first.char_offset
+                        ),
+                    )
+                elif current_parts:
+                    # Нет oversized-чанков (странно, но защитимся) — флашим heading как чанк
+                    chunks.append(ChunkResult(
+                        text='\n\n'.join(current_parts),
+                        pages=list(current_pages),
+                        char_offset=(
+                            heading_offset if heading_offset is not None
+                            else current_offset
+                        ),
+                    ))
                 chunks.extend(oversized_chunks)
                 current_parts = []
                 current_pages = []
@@ -1271,3 +1285,218 @@ class HybridChunker(Chunker):
             merged_tokens.append(token_counts[i])
 
         return merged
+
+
+# ============================================================================
+# SectionChunker — иерархическая упаковка по markdown-заголовкам
+# ============================================================================
+
+
+def _heading_level(text: str) -> int:
+    """Определить уровень markdown-заголовка (1-6). 0 если не заголовок."""
+    stripped = text.lstrip()
+    if not stripped.startswith('#'):
+        return 0
+    level = 0
+    for ch in stripped:
+        if ch == '#':
+            level += 1
+        else:
+            break
+    return level if 1 <= level <= 6 else 0
+
+
+@dataclasses.dataclass
+class _Section:
+    """Узел иерархического дерева markdown-разделов.
+
+    Уровень 0 — корневой (весь документ). 1..6 — H1..H6.
+    `prefix_blocks` — блоки, идущие ПЕРЕД heading этого раздела (обычно пусты).
+    Используются при декомпозиции: heading+preamble родителя перекладываются
+    в prefix_blocks первого дочернего раздела, чтобы при рендеринге попасть
+    в начало его текста без необходимости оборачивать в новый _Section.
+    `heading_block` — блок-заголовок этого раздела (None у корня).
+    `preamble_blocks` — блоки контента между заголовком и первым дочерним
+    подразделом (или до конца, если детей нет).
+    `children` — дочерние разделы строго меньшего уровня.
+    """
+
+    level: int
+    heading_block: _Block | None
+    prefix_blocks: list[_Block] = dataclasses.field(default_factory=list)
+    preamble_blocks: list[_Block] = dataclasses.field(default_factory=list)
+    children: list['_Section'] = dataclasses.field(default_factory=list)
+
+
+class SectionChunker(HybridChunker):
+    """Иерархическая упаковка по заголовкам markdown.
+
+    Принцип: раздел markdown (H1 → H2 → H3…) — атомарная логическая единица.
+    Если раздел целиком вмещается в `max_tokens` — выдаётся одним чанком.
+    Иначе — рекурсивный спуск на следующий уровень заголовков. Если дочерних
+    заголовков нет (или дошли до H6) — fallback на `_greedy_fill` родительского
+    HybridChunker с поддержкой oversized-обработки для отдельных блоков.
+
+    Преамбула раздела (контент до первого подзаголовка) «прилипает» к первому
+    дочернему подразделу при декомпозиции — сохраняем логическую связь.
+    """
+
+    async def _run_pipeline(
+        self, text: str, *, paged: bool = False,
+    ) -> list[ChunkResult]:
+        blocks = self._parse_blocks(text, paged=paged)
+        tree = self._build_tree(blocks)
+        raw_chunks = await self._pack_section(tree)
+        chunks = self._post_merge(raw_chunks)
+
+        if paged:
+            missing = sum(1 for c in chunks if not c.pages)
+            if missing:
+                logger.warning(
+                    'SectionChunker: paged document has %d/%d chunk(s) without pages',
+                    missing, len(chunks),
+                )
+
+        logger.info(
+            'SectionChunker: %d block(s) → %d raw chunk(s) → %d final chunk(s)',
+            len(blocks), len(raw_chunks), len(chunks),
+        )
+        return chunks
+
+    # ------------------------------------------------------------------
+    # Build tree
+    # ------------------------------------------------------------------
+
+    def _build_tree(self, blocks: list[_Block]) -> _Section:
+        """Собрать иерархическое дерево: heading-блок → новый раздел.
+
+        Не-heading блоки попадают в preamble_blocks текущего внутреннего раздела
+        (stack top). Heading уровня N закрывает все секции уровня ≥ N.
+        """
+        root = _Section(level=0, heading_block=None)
+        stack: list[_Section] = [root]
+
+        for block in blocks:
+            if block.block_type == 'heading':
+                level = _heading_level(block.text)
+                if not level:
+                    # Странный heading-блок без '#' — трактуем как обычный контент
+                    stack[-1].preamble_blocks.append(block)
+                    continue
+                # Закрываем секции равного или большего уровня
+                while stack and stack[-1].level >= level:
+                    stack.pop()
+                new_sect = _Section(level=level, heading_block=block)
+                stack[-1].children.append(new_sect)
+                stack.append(new_sect)
+            else:
+                stack[-1].preamble_blocks.append(block)
+
+        return root
+
+    # ------------------------------------------------------------------
+    # Pack
+    # ------------------------------------------------------------------
+
+    async def _pack_section(self, sect: _Section) -> list[ChunkResult]:
+        """Упаковать раздел в чанки.
+
+        Если весь раздел влезает в max_tokens — один чанк. Иначе рекурсивно
+        упаковываем детей, приклеивая преамбулу+heading к первому ребёнку
+        через его `prefix_blocks` (без создания оборачивающих _Section —
+        избегаем бесконечной рекурсии).
+        Если детей нет — fallback на greedy_fill.
+        """
+        full_text = self._section_text(sect)
+        if not full_text.strip():
+            return []
+
+        tokens = self._counter.count(full_text)
+        if tokens <= self._max_tokens:
+            return [self._section_to_chunk(sect)]
+
+        # Не влезает — декомпозируем
+        if not sect.children:
+            # Нет дочерних разделов: плоский greedy по блокам раздела
+            flat_blocks = self._section_blocks_flat(sect)
+            return await self._greedy_fill(flat_blocks)
+
+        # Есть дети: собираем «родительский вклад» (heading + преамбула + уже накопленный prefix)
+        parent_contribution: list[_Block] = []
+        parent_contribution.extend(sect.prefix_blocks)
+        if sect.heading_block:
+            parent_contribution.append(sect.heading_block)
+        parent_contribution.extend(sect.preamble_blocks)
+
+        children = list(sect.children)
+        if parent_contribution:
+            first = children[0]
+            children[0] = dataclasses.replace(
+                first,
+                prefix_blocks=list(parent_contribution) + list(first.prefix_blocks),
+            )
+
+        chunks: list[ChunkResult] = []
+        for child in children:
+            chunks.extend(await self._pack_section(child))
+        return chunks
+
+    # ------------------------------------------------------------------
+    # Section helpers
+    # ------------------------------------------------------------------
+
+    def _section_text(self, sect: _Section) -> str:
+        """Сериализовать раздел: prefix + heading + preamble + дети."""
+        parts: list[str] = []
+        for b in sect.prefix_blocks:
+            parts.append(b.text)
+        if sect.heading_block:
+            parts.append(sect.heading_block.text)
+        for b in sect.preamble_blocks:
+            parts.append(b.text)
+        for c in sect.children:
+            child_text = self._section_text(c)
+            if child_text:
+                parts.append(child_text)
+        return '\n\n'.join(p for p in parts if p.strip())
+
+    def _section_pages(self, sect: _Section) -> list[int]:
+        pages: list[int] = []
+        for b in sect.prefix_blocks:
+            pages = _merge_pages(pages, b.pages)
+        if sect.heading_block:
+            pages = _merge_pages(pages, sect.heading_block.pages)
+        for b in sect.preamble_blocks:
+            pages = _merge_pages(pages, b.pages)
+        for c in sect.children:
+            pages = _merge_pages(pages, self._section_pages(c))
+        return pages
+
+    def _section_char_offset(self, sect: _Section) -> int:
+        if sect.prefix_blocks:
+            return sect.prefix_blocks[0].char_offset
+        if sect.heading_block:
+            return sect.heading_block.char_offset
+        if sect.preamble_blocks:
+            return sect.preamble_blocks[0].char_offset
+        if sect.children:
+            return self._section_char_offset(sect.children[0])
+        return 0
+
+    def _section_to_chunk(self, sect: _Section) -> ChunkResult:
+        return ChunkResult(
+            text=self._section_text(sect),
+            pages=self._section_pages(sect),
+            char_offset=self._section_char_offset(sect),
+        )
+
+    def _section_blocks_flat(self, sect: _Section) -> list[_Block]:
+        """Все блоки раздела в порядке появления — для fallback на greedy_fill."""
+        out: list[_Block] = []
+        out.extend(sect.prefix_blocks)
+        if sect.heading_block:
+            out.append(sect.heading_block)
+        out.extend(sect.preamble_blocks)
+        for c in sect.children:
+            out.extend(self._section_blocks_flat(c))
+        return out

@@ -30,9 +30,10 @@
 git clone https://github.com/catonmoon/morag.git
 cd morag
 
-# 1. LLM
-brew install ollama          # macOS
-ollama pull qwen3.5:9b
+# 1. Ollama с LLM и эмбеддером на том же демоне
+brew install ollama                  # macOS
+ollama pull qwen3.5:9b               # LLM для агента
+ollama pull qwen3-embedding:4b       # dense-эмбеддер (dim=2560, context=32K)
 ollama serve
 
 # 2. Конфиг
@@ -48,7 +49,7 @@ docker compose up -d
 
 Откройте http://localhost:3000 и задавайте вопросы.
 
-`docker compose up` поднимает: Qdrant, embedding-серверы (FRIDA + GTE), pipeline и запускает индексацию. `config.example.yml` уже настроен на Ollama.
+`docker compose up` поднимает: Qdrant, GTE sparse-эмбеддер, pipeline и запускает индексацию.
 
 ### Индексация
 
@@ -59,25 +60,20 @@ docker compose up -d
 docker compose run morag-indexer index --reset
 ```
 
-### Apple Silicon (MPS ускорение)
+### Dense embedder
 
-На Mac с Apple Silicon dense embedding на GPU через MPS значительно быстрее чем CPU в Docker.
+Используется **Qwen3-Embedding-4B** (dim=2560, context=32K токенов), можно запустить на Ollama.
 
-```bash
-# 1. Установить зависимости
-pip install -r requirements.txt
-
-# 2. Запустить FRIDA нативно с MPS
-python services/embedder_frida/app.py --port 8092
-```
-
-В `config.yml` изменить:
 ```yaml
 indexing:
   dense_embedder:
-    base_url: http://localhost:8092          # вместо http://embedder-frida:8082
-    # или для индексации из Docker:
-    # base_url: http://host.docker.internal:8092
+    model: qwen3-embedding:4b
+    tokenizer: Qwen/Qwen3-Embedding-4B  # нативный токенизатор (HF) для точного подсчёта
+    base_url: http://localhost:11434    # Ollama локально, или host.docker.internal:11434 из Docker
+    dim: 2560
+    timeout: 180
+    document_template: '{text}'
+    query_template: "Instruct: Given a user question, retrieve passages that answer the question\nQuery:{text}"
 ```
 
 ## Источники данных
@@ -96,7 +92,7 @@ indexing:
 | Компонент | Технология |
 |---|---|
 | Векторная БД | [Qdrant](https://qdrant.tech) |
-| Dense embeddings | [ai-forever/FRIDA](https://huggingface.co/ai-forever/FRIDA) |
+| Dense embeddings | [Qwen3-Embedding-4B](https://huggingface.co/Qwen/Qwen3-Embedding-4B)  |
 | Sparse embeddings | [Alibaba-NLP/gte-multilingual-base](https://huggingface.co/Alibaba-NLP/gte-multilingual-base) |
 | LLM | Любой OpenAI-совместимый |
 | UI | [Open WebUI](https://openwebui.com) (опционально) |

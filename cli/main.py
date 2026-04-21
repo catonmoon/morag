@@ -12,13 +12,17 @@ from qdrant_client import AsyncQdrantClient
 
 from morag.config import Config, DenseEmbedderConfig, PdfConfig, RetryConfig, SparseEmbedderConfig, load_config
 from morag.indexing.bm25 import build_bm25_index
-from morag.indexing.chunker import HybridChunker, LLMChunker, PassthroughChunker, SemanticChunker
+from morag.indexing.chunker import (
+    HybridChunker,
+    LLMChunker,
+    PassthroughChunker,
+    SectionChunker,
+    SemanticChunker,
+)
 from morag.indexing.context import LLMContextGenerator, NoopContextGenerator
 from morag.indexing.embedder import (
     Embedder,
-    FridaEmbedder,
-    GteSparseEmbedder,
-    HttpFridaEmbedder,
+    HttpEmbedder,
     HttpGteSparseEmbedder,
     SparseEmbedder,
 )
@@ -69,21 +73,31 @@ def _make_retry(cfg: RetryConfig) -> RetryPolicy:
 
 
 def _make_dense_embedder(cfg: DenseEmbedderConfig) -> Embedder:
-    if cfg.base_url is not None:
-        return HttpFridaEmbedder(
-            cfg.base_url, cfg.dim, cfg.timeout,
-            retry_policy=_make_retry(cfg.retry), max_rpm=cfg.max_rpm,
+    if cfg.base_url is None:
+        raise ValueError(
+            'dense_embedder.base_url is required. Native in-process embedder removed, '
+            'use HTTP (Ollama / vLLM / OpenAI-compatible) endpoint.',
         )
-    return FridaEmbedder(cfg.model)
+    return HttpEmbedder(
+        cfg.base_url, cfg.model, cfg.dim,
+        document_template=cfg.document_template,
+        query_template=cfg.query_template,
+        timeout=cfg.timeout,
+        retry_policy=_make_retry(cfg.retry),
+        max_rpm=cfg.max_rpm,
+    )
 
 
 def _make_sparse_embedder(cfg: SparseEmbedderConfig) -> SparseEmbedder:
-    if cfg.base_url is not None:
-        return HttpGteSparseEmbedder(
-            cfg.base_url, cfg.timeout,
-            retry_policy=_make_retry(cfg.retry), max_rpm=cfg.max_rpm,
+    if cfg.base_url is None:
+        raise ValueError(
+            'sparse_embedder.base_url is required. Native in-process embedder removed, '
+            'run services/embedder_gte/ (Docker) or any OpenAI-compatible endpoint.',
         )
-    return GteSparseEmbedder(cfg.model, device=cfg.device)
+    return HttpGteSparseEmbedder(
+        cfg.base_url, cfg.timeout,
+        retry_policy=_make_retry(cfg.retry), max_rpm=cfg.max_rpm,
+    )
 
 
 def _make_pdf_converter(
@@ -104,8 +118,6 @@ def _make_pdf_converter(
             repetition_penalty=config.pdf.repetition_penalty,
             frequency_penalty=config.pdf.frequency_penalty,
             presence_penalty=config.pdf.presence_penalty,
-            seed=42,
-            enable_thinking=config.llm_vision.enable_thinking,
         )
         postprocessors = _build_postprocessors(config.pdf)
         return VisionPdfConverter(
@@ -176,6 +188,8 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         max_rpm=config.llm.max_rpm,
         model_wait_seconds=config.llm.model_wait_seconds,
         model_wait_retries=config.llm.model_wait_retries,
+        enable_thinking=config.llm.enable_thinking,
+        context_window=config.llm.context_window,
     )
 
     vision_client = None
@@ -189,6 +203,8 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             max_rpm=config.llm_vision.max_rpm,
             model_wait_seconds=config.llm_vision.model_wait_seconds,
             model_wait_retries=config.llm_vision.model_wait_retries,
+            enable_thinking=config.llm_vision.enable_thinking,
+            context_window=config.llm_vision.context_window,
         )
         logger.info('Vision LLM: %s @ %s', config.llm_vision.model, config.llm_vision.base_url)
 
@@ -217,8 +233,19 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         return
 
     llm_counter = TiktokenCounter()  # для LLM context window, doc_summary, doc_title
-    embed_counter = HuggingFaceTokenCounter(config.indexing.dense_embedder.model)  # для чанкинга
-    logger.info('Token counters: llm=TikToken, embed=HuggingFace(%s)', config.indexing.dense_embedder.model)
+    embed_tokenizer = (
+        config.indexing.dense_embedder.tokenizer
+        or config.indexing.dense_embedder.model
+    )
+    # 'tiktoken' — спец-значение: использовать TikToken вместо HF-токенайзера.
+    # Подходит для моделей с большим max_tokens (Qwen3, 1024+) где точность ±40% терпима
+    # и позволяет избежать HF-зависимости при индексации.
+    if embed_tokenizer == 'tiktoken':
+        embed_counter = TiktokenCounter()
+        logger.info('Token counters: llm=TikToken, embed=TikToken')
+    else:
+        embed_counter = HuggingFaceTokenCounter(embed_tokenizer)
+        logger.info('Token counters: llm=TikToken, embed=HuggingFace(%s)', embed_tokenizer)
     chunker_mode = config.indexing.chunker.mode
     if chunker_mode == 'semantic':
         chunker = SemanticChunker(
@@ -235,9 +262,8 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             embed_fn=embedder.embed,
             halving_retries=config.indexing.chunker.halving_retries,
             fallback_enabled=config.indexing.chunker.fallback,
-            enable_thinking=config.llm.enable_thinking,
         )
-    elif chunker_mode == 'hybrid':
+    elif chunker_mode in ('hybrid', 'section'):
         oversized_cfg = config.indexing.chunker.oversized
         oversized_strategies = {
             'table': oversized_cfg.table,
@@ -255,12 +281,12 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
                 embed_fn=embedder.embed,
                 halving_retries=config.indexing.chunker.halving_retries,
                 fallback_enabled=config.indexing.chunker.fallback,
-                enable_thinking=config.llm.enable_thinking,
             )
         # Embed fn нужен если хотя бы одна стратегия = embed
         embed_fn = embedder.embed_batch if 'embed' in oversized_strategies.values() else None
-        chunker = HybridChunker(
-            counter=embed_counter,  # FRIDA tokenizer для точного подсчёта
+        chunker_cls = SectionChunker if chunker_mode == 'section' else HybridChunker
+        chunker = chunker_cls(
+            counter=embed_counter,
             min_tokens=config.indexing.chunker.min_tokens,
             max_tokens=config.indexing.chunker.max_tokens,
             oversized_strategies=oversized_strategies,
@@ -274,9 +300,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             llm_client,
             token_counter=llm_counter,
             embed_counter=embed_counter,
-            context_window=config.llm.context_window,
             max_output_tokens=config.indexing.context.max_tokens,
-            enable_thinking=config.llm.enable_thinking,
             window_tokens=config.indexing.context.window_tokens,
             chunk_max_tokens=config.indexing.context.chunk_max_tokens,
         ) if config.indexing.context.mode == 'llm' else NoopContextGenerator()
@@ -291,8 +315,6 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             scan_tokens=config.indexing.doc_title.scan_tokens,
             scan_pages=config.indexing.doc_title.scan_pages,
             token_counter=llm_counter,
-            context_window=config.llm.context_window,
-            enable_thinking=config.llm.enable_thinking,
         ))
     if config.indexing.doc_summary.max_tokens is not None:
         summary_classes = {
@@ -308,21 +330,23 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             doc_repo=doc_repo,
             max_tokens=config.indexing.doc_summary.max_tokens,
             token_counter=llm_counter,
-            context_window=config.llm.context_window,
-            enable_thinking=config.llm.enable_thinking,
         ))
 
     chunk_processors = [
         PageMarkerProcessor(),
         MetadataProcessor(),
         DenseEmbeddingProcessor(embedder),
-        SparseEmbeddingProcessor(sparse_embedder, include_doc_summary=config.indexing.lexical_doc_summary),
+        SparseEmbeddingProcessor(
+            sparse_embedder,
+            include_doc_summary=config.indexing.lexical_doc_summary,
+            include_chunk_context=config.indexing.lexical_chunk_context,
+        ),
     ]
 
     # В LLM-режиме блок + ответ LLM должны влезть в контекстное окно.
     # Ответ ≈ такого же размера как вход, поэтому безопасный лимит: (context_window - overhead) / 2.
     _LLM_PROMPT_OVERHEAD = 512  # токенов на системный промпт + запас
-    skip_presplit = chunker_mode in ('semantic', 'hybrid')
+    skip_presplit = chunker_mode in ('semantic', 'hybrid', 'section')
     if chunker_mode == 'llm':
         llm_safe_limit = (config.llm.context_window - _LLM_PROMPT_OVERHEAD) // 2
         block_limit = min(config.indexing.chunker.block_limit, llm_safe_limit)
@@ -408,6 +432,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
     await build_bm25_index(
         client, config.qdrant.collection_chunks,
         include_doc_summary=config.indexing.lexical_doc_summary,
+        include_chunk_context=config.indexing.lexical_chunk_context,
     )
 
     # Post-indexing: Knowledge Map
@@ -426,10 +451,12 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             prompt_strategy=km_cfg.prompt_strategy,
             prompt_budget=km_cfg.prompt_budget,
             token_counter=llm_counter,
-            context_window=config.llm.context_window,
-            enable_thinking=km_cfg.enable_thinking,
             concurrency=config.indexing.concurrency,
             exclude_source_types=km_cfg.exclude_source_types,
+            depth1_section_ids=km_cfg.depth1_section_ids,
+            flat_topics_target=km_cfg.flat_topics_target,
+            flat_topics_max_input_docs=km_cfg.flat_topics_max_input_docs,
+            flat_topics_assign_batch=km_cfg.flat_topics_assign_batch,
         )
         root_ids = set()
         if config.sources.confluence:
@@ -438,6 +465,66 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         await km_generator.generate(root_ids=root_ids or None)
 
     await client.close()
+
+
+async def cmd_rebuild_km(config_path: str) -> None:
+    """Перестроить только Knowledge Map из существующих документов в Qdrant."""
+    config = load_config(config_path)
+
+    if not config.indexing.knowledge_map.enabled:
+        logger.error('knowledge_map.enabled is false in config — nothing to rebuild')
+        return
+
+    logger.info('Connecting to Qdrant %s:%d', config.qdrant.host, config.qdrant.port)
+    client = AsyncQdrantClient(
+        host=config.qdrant.host, port=config.qdrant.port,
+        timeout=60,
+    )
+
+    doc_repo = DocRepository(client, config.qdrant.collection_docs)
+    llm_client = LLMClient(
+        base_url=config.llm.base_url,
+        model=config.llm.model,
+        api_key=config.llm.api_key,
+        timeout=config.llm.timeout,
+        max_retries=config.llm.retry.max_retries,
+        max_rpm=config.llm.max_rpm,
+        model_wait_seconds=config.llm.model_wait_seconds,
+        model_wait_retries=config.llm.model_wait_retries,
+        enable_thinking=config.llm.enable_thinking,
+        context_window=config.llm.context_window,
+    )
+    llm_counter = TiktokenCounter()
+
+    from morag.indexing.knowledge_map import KnowledgeMapGenerator
+    km_cfg = config.indexing.knowledge_map
+    km_generator = KnowledgeMapGenerator(
+        client=client,
+        llm_client=llm_client,
+        doc_repo=doc_repo,
+        collection=km_cfg.collection,
+        depth=km_cfg.depth,
+        max_depth=km_cfg.max_depth,
+        node_max_tokens=km_cfg.node_max_tokens,
+        node_min_tokens=km_cfg.node_min_tokens,
+        prompt_strategy=km_cfg.prompt_strategy,
+        prompt_budget=km_cfg.prompt_budget,
+        token_counter=llm_counter,
+        concurrency=config.indexing.concurrency,
+        exclude_source_types=km_cfg.exclude_source_types,
+        flat_topics_target=km_cfg.flat_topics_target,
+        flat_topics_max_input_docs=km_cfg.flat_topics_max_input_docs,
+        flat_topics_assign_batch=km_cfg.flat_topics_assign_batch,
+        depth1_section_ids=km_cfg.depth1_section_ids,
+    )
+    root_ids = set()
+    if config.sources.confluence:
+        root_ids = set(config.sources.confluence.ancestor_ids)
+    logger.info('Rebuilding Knowledge Map (roots=%s)...', root_ids or 'auto')
+    await km_generator.generate(root_ids=root_ids or None)
+
+    await client.close()
+    logger.info('Knowledge Map rebuild complete')
 
 
 async def cmd_serve(config_path: str) -> None:
@@ -576,6 +663,12 @@ def main() -> None:
         help='Удалить все коллекции Qdrant перед индексацией (полная переиндексация)',
     )
 
+    km_parser = subparsers.add_parser('rebuild-km', help='Перестроить Knowledge Map без полной индексации')
+    km_parser.add_argument(
+        '--config', default='config.yml', metavar='PATH',
+        help='Путь к конфигу (по умолчанию: config.yml)',
+    )
+
     serve_parser = subparsers.add_parser('serve', help='Daemon-режим: индексация по расписанию из конфига')
     serve_parser.add_argument(
         '--config', default='config.yml', metavar='PATH',
@@ -597,6 +690,8 @@ def main() -> None:
 
     if args.command == 'index':
         asyncio.run(cmd_index(args.config, reset=args.reset))
+    elif args.command == 'rebuild-km':
+        asyncio.run(cmd_rebuild_km(args.config))
     elif args.command == 'serve':
         asyncio.run(cmd_serve(args.config))
     elif args.command == 'query':

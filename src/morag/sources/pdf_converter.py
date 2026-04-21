@@ -211,7 +211,6 @@ class DoclingPdfConverter(PdfConverter):
                 desc = await self._vision_client.complete_vision(
                     _IMAGE_PROMPT, img_b64, media_type='image/png',
                     max_tokens=self._vision_max_tokens,
-                    params=GenerationParams(seed=42),
                 )
                 descriptions[i] = desc
             except Exception as exc:
@@ -266,7 +265,6 @@ class DoclingPdfConverter(PdfConverter):
                 desc = await self._vision_client.complete_vision(
                     _FORMULA_PROMPT, img_b64, media_type='image/png',
                     max_tokens=self._vision_max_tokens,
-                    params=GenerationParams(seed=42),
                 )
                 descriptions[i] = desc
             except Exception as exc:

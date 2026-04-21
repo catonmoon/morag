@@ -28,7 +28,7 @@ sources:
   #   # timeout: 180                            # таймаут HTTP-запросов (секунды; по умолчанию 180)
 
 qdrant:
-  host: qdrant                    # 'qdrant' для Docker, 'localhost' для нативного запуска
+  host: qdrant                    # Docker; для нативного запуска: localhost
   port: 6333
   collection_docs: docs
   collection_chunks: chunks
@@ -41,6 +41,7 @@ llm:
   base_url: http://host.docker.internal:11434/v1   # Ollama на хосте; для нативного запуска: http://localhost:11434/v1
   model: qwen3.5:9b
   api_key: ollama
+  enable_thinking: false           # qwen3.5 думает по умолчанию — отключаем для индексации
   # timeout: 180                  # таймаут HTTP-запросов к LLM (секунды; по умолчанию 180)
   # context_window: 32768         # контекстное окно модели в токенах (по умолчанию 32768)
   # max_rpm: 60                   # лимит запросов в минуту; None = без ограничения
@@ -110,15 +111,18 @@ indexing:
     # chunk_max_tokens: 512      # макс. токенов на чанк (text + context + path); context адаптивный
     # max_tokens: 256            # явный лимит ответа LLM (перекрывает адаптивный)
 
-  # Dense-эмбеддер (FRIDA)
-  # HTTP-режим (по умолчанию): embedder-frida из docker-compose.
-  # Локальный режим: убрать base_url и dim — модель загрузится через sentence-transformers.
+  # Dense-эмбеддер (Qwen3-Embedding-4B через Ollama)
+  # Ollama на хосте раздаёт и LLM, и embeddings (OpenAI-совместимый /v1/embeddings).
+  # См. ADR-0011 про выбор Qwen3.
   dense_embedder:
-    model: ai-forever/FRIDA
-    base_url: http://embedder-frida:8082   # Docker; для нативного MPS: http://localhost:8092
-    dim: 1536
-    # timeout: 30                       # таймаут HTTP-запросов (секунды; по умолчанию 30)
-    # retry:                            # политика retry (только в HTTP-режиме)
+    model: qwen3-embedding:4b               # Ollama-нотация, идёт в body
+    tokenizer: Qwen/Qwen3-Embedding-4B      # нативный HF-токенизатор для точного подсчёта в чанкере
+    base_url: http://host.docker.internal:11434   # Docker; для локального прогона: http://localhost:11434
+    dim: 2560                                # native dim Qwen3-Embedding-4B
+    timeout: 180                             # первый прогрев Ollama может быть 30-60 сек
+    document_template: '{text}'              # Qwen3 не требует префикса на документах
+    query_template: "Instruct: Given a user question, retrieve passages that answer the question\nQuery:{text}"
+    # retry:
     #   max_retries: 3
 
   # Sparse-эмбеддер (GTE)
@@ -159,8 +163,17 @@ indexing:
     enabled: true
     depth: 2                     # уровней в системном промпте
     # max_depth:                 # макс. глубина обхода дерева; не задано = до самого дна
-    prompt_strategy: weighted    # 'fixed' (node_max_tokens на узел) | 'weighted' (prompt_budget по потомкам)
+    prompt_strategy: weighted    # 'fixed' | 'weighted' | 'flat_topics'
     prompt_budget: 8192          # для weighted: общий бюджет токенов на системный промпт
     # node_max_tokens: 256       # для fixed: лимит токенов на узел
     node_min_tokens: 256         # для weighted: минимальный бюджет на узел
+    # depth1_section_ids:        # разделы с depth=1: только сам раздел с LLM-обобщением, без потомков
+    #   - "123456"               # полезно для разделов с сотнями плоских детей
+    #
+    # flat_topics — стратегия для плоских источников (нет иерархии parent_doc_ids).
+    # LLM группирует все документы в ~N тем, каждая тема — виртуальный раздел в карте.
+    # Размер prompt вытекает из числа тем × документов, без ограничения.
+    # flat_topics_target:         # целевое число тем; не задано = авто (~sqrt(N))
+    # flat_topics_assign_batch: 5 # размер батча классификации (меньше = точнее, больше вызовов)
+    # flat_topics_max_input_docs: 3000  # safety limit на число документов
 

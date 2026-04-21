@@ -36,33 +36,12 @@ services:
     depends_on:
       qdrant:
         condition: service_healthy
-      embedder-frida:
-        condition: service_healthy
       embedder-gte:
         condition: service_healthy
     volumes:
       - ./config.yml:/app/config.yml:ro
       - ./data:/app/data:ro
     restart: unless-stopped
-
-  embedder-frida:
-    build:
-      context: services/embedder_frida
-      network: host
-    ports:
-      - "8082:8082"
-    deploy:
-      resources:
-        limits:
-          cpus: '2'
-          memory: 4G
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8082/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 60s
 
   embedder-gte:
     build:
@@ -85,6 +64,8 @@ services:
   pipelines:
     build:
       context: services/pipeline
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "9099:9099"
     environment:
@@ -93,18 +74,19 @@ services:
       - QDRANT_NUM_RESULTS=50
       - NEIGHBOR_WINDOW=1
       - SPARSE_EMBED_URL=http://embedder-gte:8081
-      - DENSE_EMBED_URL=http://embedder-frida:8082
-      # Для MPS на хосте: http://host.docker.internal:8092
+      # Dense: Qwen3-Embedding-4B через Ollama на хосте
+      - DENSE_EMBED_URL=${DENSE_EMBED_URL:-http://host.docker.internal:11434}
+      - DENSE_EMBEDDER_MODEL=${DENSE_EMBEDDER_MODEL:-qwen3-embedding:4b}
+      - DENSE_ENCODING_FORMAT=${DENSE_ENCODING_FORMAT:-base64}
+      - QUERY_TEMPLATE=${QUERY_TEMPLATE:-Instruct: Given a user question, retrieve passages that answer the question\nQuery:{text}}
       - LLM_URL=${LLM_URL:-http://host.docker.internal:11434/v1}
       - LLM_MODEL=${LLM_MODEL:-qwen3.5:9b}
       - LLM_API_KEY=${LLM_API_KEY:-ollama}
-      - ENABLE_THINKING=${ENABLE_THINKING:-true}
+      - ENABLE_THINKING=${ENABLE_THINKING:-false}
       - ENABLE_DIVERSITY_NUDGE=${ENABLE_DIVERSITY_NUDGE:-false}
       - MAX_ITERATIONS=32
     depends_on:
       qdrant:
-        condition: service_healthy
-      embedder-frida:
         condition: service_healthy
       embedder-gte:
         condition: service_healthy

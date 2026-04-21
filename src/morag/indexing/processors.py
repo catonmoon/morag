@@ -6,17 +6,10 @@ from abc import ABC, abstractmethod
 
 from morag.indexing.embedder import Embedder, SparseEmbedder
 from morag.indexing.token_counter import TokenCounter, TiktokenCounter
-from morag.llm.client import GenerationParams, LLMClient
+from morag.llm.client import LLMClient
 from morag.sources.base import Chunk, Document
 
 logger = logging.getLogger(__name__)
-
-def _llm_params(enable_thinking: bool | None = None) -> GenerationParams:
-    return GenerationParams(
-        temperature=0.0, top_p=1.0, top_k=0,
-        frequency_penalty=0.0, presence_penalty=0.0, seed=42,
-        enable_thinking=enable_thinking,
-    )
 
 _SUMMARY_PROMPT_NO_PARENT = """\
 Briefly describe the document's content — what it is about, what problem it solves, or what it describes. \
@@ -102,21 +95,34 @@ class DenseEmbeddingProcessor(ChunkProcessor):
 class SparseEmbeddingProcessor(ChunkProcessor):
     """Добавляет sparse-вектор 'keywords' в chunk.vectors.
 
-    Вектор строится из текста чанка + doc_summary документа, чтобы keyword search
-    находил чанки по метаданным из суммари (номер дела, стороны, судья, даты и т.д.).
-    Сохраняется в формате {'indices': [...], 'values': [...]}.
+    Вектор строится из текста чанка (+ опционально doc_summary и chunk.context)
+    для улучшения лексического поиска. Сохраняется в формате
+    {'indices': [...], 'values': [...]}.
+
+    `include_doc_summary` — добавляет doc_summary документа (метаданные, вроде
+    номера дела или сторон).
+    `include_chunk_context` — добавляет chunk.context (Anthropic «Contextual BM25»):
+    контекстуальная подсказка улучшает попадание на общих терминах.
     """
 
-    def __init__(self, embedder: SparseEmbedder, include_doc_summary: bool = False) -> None:
+    def __init__(
+        self, embedder: SparseEmbedder,
+        include_doc_summary: bool = False,
+        include_chunk_context: bool = False,
+    ) -> None:
         self._embedder = embedder
         self._include_doc_summary = include_doc_summary
+        self._include_chunk_context = include_chunk_context
 
     def _sparse_text(self, chunk: Chunk, document: Document) -> str:
+        parts = [chunk.text]
+        if self._include_chunk_context and chunk.context:
+            parts.append(chunk.context)
         if self._include_doc_summary:
             doc_summary = document.payload.get('doc_summary', '')
             if doc_summary:
-                return f'{chunk.text}\n{doc_summary}'
-        return chunk.text
+                parts.append(doc_summary)
+        return '\n'.join(parts)
 
     def process(self, chunk: Chunk, document: Document) -> Chunk:
         indices, values = self._embedder.embed(self._sparse_text(chunk, document))
@@ -154,15 +160,11 @@ class DocSummaryProcessor(DocumentProcessor):
         doc_repo,
         max_tokens: int = 128,
         token_counter: TokenCounter | None = None,
-        context_window: int = 32768,
-        enable_thinking: bool | None = None,
     ) -> None:
         self._client = llm_client
         self._doc_repo = doc_repo
         self._max_tokens = max_tokens
         self._token_counter = token_counter or TiktokenCounter()
-        self._context_window = context_window
-        self._params = _llm_params(enable_thinking)
         self._overhead_no_parent = self._token_counter.count(
             self._prompt_no_parent.format(doc_text='')
         )
@@ -182,22 +184,23 @@ class DocSummaryProcessor(DocumentProcessor):
             if parent_doc and 'doc_summary' in parent_doc.payload:
                 parent_summaries.append(parent_doc.payload['doc_summary'])
 
+        context_window = self._client.context_window
         if parent_summaries:
             parent_context = '\n\n'.join(parent_summaries)
             parent_tokens = self._token_counter.count(parent_context)
-            available = self._context_window - self._overhead_with_parents - parent_tokens - self._max_tokens
+            available = context_window - self._overhead_with_parents - parent_tokens - self._max_tokens
             doc_text = self._token_counter.truncate(document.text, max(available, 0))
             prompt = self._prompt_with_parents.format(
                 parent_context=parent_context,
                 doc_text=doc_text,
             )
         else:
-            available = self._context_window - self._overhead_no_parent - self._max_tokens
+            available = context_window - self._overhead_no_parent - self._max_tokens
             doc_text = self._token_counter.truncate(document.text, max(available, 0))
             prompt = self._prompt_no_parent.format(doc_text=doc_text)
 
         messages = [{'role': 'user', 'content': prompt}]
-        summary = await self._client.complete(messages, params=self._params, max_tokens=self._max_tokens)
+        summary = await self._client.complete(messages, max_tokens=self._max_tokens)
         document.payload['doc_summary'] = summary.strip()
         logger.info('DocSummaryProcessor: %s (%d chars)', document.id, len(summary))
 
@@ -325,16 +328,12 @@ class DocTitleProcessor(DocumentProcessor):
         scan_tokens: int = 32768,
         scan_pages: int | None = None,
         token_counter: TokenCounter | None = None,
-        context_window: int = 32768,
-        enable_thinking: bool | None = None,
     ) -> None:
         self._client = llm_client
         self._max_tokens = max_tokens
         self._scan_tokens = scan_tokens
         self._scan_pages = scan_pages
         self._token_counter = token_counter or TiktokenCounter()
-        self._context_window = context_window
-        self._params = _llm_params(enable_thinking)
         self._prompt_overhead = self._token_counter.count(
             _TITLE_PROMPT.format(doc_text='')
         )
@@ -367,11 +366,12 @@ class DocTitleProcessor(DocumentProcessor):
         if self._scan_pages is not None:
             doc_text = self._extract_pages(document.text, self._scan_pages)
 
+        context_window = self._client.context_window
         # Fallback на scan_tokens
         if doc_text is None:
             scan_limit = min(
                 self._scan_tokens,
-                self._context_window - self._prompt_overhead - self._max_tokens,
+                context_window - self._prompt_overhead - self._max_tokens,
             )
             if scan_limit <= 0:
                 logger.warning('DocTitleProcessor: no room for doc text, skipping %s', document.id)
@@ -379,7 +379,7 @@ class DocTitleProcessor(DocumentProcessor):
             doc_text = self._token_counter.truncate(document.text, scan_limit)
 
         # Обрезать по контекстному окну в любом случае
-        max_doc_tokens = self._context_window - self._prompt_overhead - self._max_tokens
+        max_doc_tokens = context_window - self._prompt_overhead - self._max_tokens
         if max_doc_tokens <= 0:
             logger.warning('DocTitleProcessor: no room for doc text, skipping %s', document.id)
             return document
@@ -389,7 +389,7 @@ class DocTitleProcessor(DocumentProcessor):
         messages = [{'role': 'user', 'content': prompt}]
         try:
             title = await self._client.complete(
-                messages, params=self._params, max_tokens=self._max_tokens,
+                messages, max_tokens=self._max_tokens,
             )
             document.title = title.strip()
             document.path = [title.strip()]

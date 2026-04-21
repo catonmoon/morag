@@ -4,16 +4,8 @@ import logging
 from abc import ABC, abstractmethod
 
 from morag.indexing.token_counter import TokenCounter, TiktokenCounter
-from morag.llm.client import GenerationParams
 
 logger = logging.getLogger(__name__)
-
-def _llm_params(enable_thinking: bool | None = None) -> GenerationParams:
-    return GenerationParams(
-        temperature=0.0, top_p=1.0, top_k=0,
-        frequency_penalty=0.0, presence_penalty=0.0, seed=42,
-        enable_thinking=enable_thinking,
-    )
 
 _PROMPT_TEMPLATE = """\
 You are an assistant that provides context for semantic chunks of documents.
@@ -119,18 +111,14 @@ class LLMContextGenerator(ContextGenerator):
         client,
         token_counter: TokenCounter | None = None,
         embed_counter: TokenCounter | None = None,
-        context_window: int = 32768,
         max_output_tokens: int | None = None,
-        enable_thinking: bool | None = None,
         window_tokens: int | None = None,
         chunk_max_tokens: int | None = None,
     ) -> None:
         self._client = client
         self._token_counter = token_counter or TiktokenCounter()  # для LLM context window
         self._embed_counter = embed_counter or self._token_counter  # для chunk_max_tokens
-        self._context_window = context_window
         self._max_output_tokens = max_output_tokens
-        self._params = _llm_params(enable_thinking)
         self._window_tokens = window_tokens
         self._chunk_max_tokens = chunk_max_tokens
         self._prompt_overhead = self._token_counter.count(
@@ -164,8 +152,9 @@ class LLMContextGenerator(ContextGenerator):
         # llm_counter — для расчёта промпта LLM
         chunk_tokens = self._token_counter.count(chunk_text)
         summary_tokens = self._token_counter.count(doc_summary)
+        context_window = self._client.context_window
         available_for_doc = (
-            self._context_window - self._prompt_overhead
+            context_window - self._prompt_overhead
             - chunk_tokens - summary_tokens - output_reserve
         )
 
@@ -174,7 +163,7 @@ class LLMContextGenerator(ContextGenerator):
                 'LLMContextGenerator: chunk (%d) + summary (%d) + overhead (%d) + reserve (%d) '
                 'exceeds context window (%d), skipping context',
                 chunk_tokens, summary_tokens, self._prompt_overhead,
-                output_reserve, self._context_window,
+                output_reserve, context_window,
             )
             return ''
 
@@ -197,7 +186,7 @@ class LLMContextGenerator(ContextGenerator):
         messages = [{'role': 'user', 'content': prompt}]
         try:
             result = await self._client.complete(
-                messages, params=self._params, max_tokens=max_tokens,
+                messages, max_tokens=max_tokens,
             )
             logger.info(
                 'LLMContextGenerator: context %d tok (max %s) for chunk %d tok',

@@ -13,7 +13,6 @@ from bs4 import BeautifulSoup
 from markdownify import markdownify
 
 from morag.config import ConfluenceConfig
-from morag.llm.client import GenerationParams
 from morag.sources.base import Document, Source
 
 logger = logging.getLogger(__name__)
@@ -268,9 +267,18 @@ class ConfluenceSource(Source):
             if isinstance(description, Exception) or not description:
                 img.decompose()
             else:
+                # Резолвим относительный src в абсолютный URL — чтобы после ретрива
+                # markdown-рендерер (OWUI) мог подтянуть картинку из Confluence.
+                # Alt очищаем, чтобы в markdown-вывод попал пустой alt вместо автоподстановки.
+                src = img.get('src', '')
+                if src and not src.startswith('http'):
+                    img['src'] = urljoin(self._base_url, src)
+                img.attrs.pop('alt', None)
+                # После <img> ставим <p> с текстовым описанием от vision LLM.
+                # markdownify превратит пару в: "![](url)\n\n[Изображение: описание]".
                 p = soup.new_tag('p')
                 p.string = f'[Изображение: {description}]'
-                img.replace_with(p)
+                img.insert_after(p)
 
     async def _describe_image(self, src: str, alt: str, page_id: str) -> str | None:
         """Скачать изображение по URL и получить описание от vision LLM."""
@@ -299,7 +307,6 @@ class ConfluenceSource(Source):
             description = await self._vision_client.complete_vision(
                 _IMAGE_PROMPT, image_b64, media_type,
                 max_tokens=self._vision_max_tokens,
-                params=GenerationParams(seed=42),
             )
             logger.info('Page %s: image described: %s -> %s...', page_id, src[:80], description[:80].replace('\n', '\\n'))
             return description.strip() or None

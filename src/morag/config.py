@@ -84,27 +84,32 @@ class LLMConfig(BaseModel):
 
 
 class DenseEmbedderConfig(BaseModel):
-    model: str = 'ai-forever/FRIDA'
-    base_url: str | None = None   # если задан → HTTP-режим; иначе — локальная модель
-    dim: int | None = None        # обязателен в HTTP-режиме; в local-режиме определяется автоматически
-    timeout: int = 30             # таймаут HTTP-запросов (секунды; только в HTTP-режиме)
-    retry: RetryConfig = RetryConfig()  # политика повторных попыток (только в HTTP-режиме)
-    max_rpm: int | None = None    # лимит запросов в минуту (только в HTTP-режиме); None = без ограничения
+    model: str = 'qwen3-embedding:4b'  # отправляется в /v1/embeddings body (Ollama-нотация или HF-имя)
+    tokenizer: str | None = None  # HF-имя или 'tiktoken' для счёта токенов чанкером; None → использовать model
+    base_url: str | None = None   # OpenAI-совместимый endpoint: Ollama / vLLM / OpenAI. Обязателен для индексации.
+    dim: int | None = None        # обязателен для индексации: размерность эмбеддинга
+    document_template: str = '{text}'  # формат входа для embed(); {text} заменяется на текст чанка
+    query_template: str = '{text}'     # формат входа для embed_query(); {text} заменяется на текст запроса
+    timeout: int = 30             # таймаут HTTP-запросов (секунды)
+    retry: RetryConfig = RetryConfig()  # политика повторных попыток
+    max_rpm: int | None = None    # лимит запросов в минуту; None = без ограничения
 
     @model_validator(mode='after')
     def _validate_http_dim(self) -> 'DenseEmbedderConfig':
+        # base_url без dim — ошибка (dim нужен для создания Qdrant коллекции).
+        # Оба None разрешены: может быть IndexingConfig() создан без явной секции embedder.
+        # Реальная проверка отсутствия base_url/dim — в cli._make_dense_embedder.
         if self.base_url is not None and self.dim is None:
-            raise ValueError('dense_embedder.dim is required when base_url is set (HTTP mode)')
+            raise ValueError('dense_embedder.dim is required when base_url is set')
         return self
 
 
 class SparseEmbedderConfig(BaseModel):
     model: str = 'Alibaba-NLP/gte-multilingual-base'
-    device: str | None = None     # устройство для local-режима: 'cpu' | 'mps' | 'cuda' | None (авто)
-    base_url: str | None = None   # если задан → HTTP-режим; иначе — локальная модель
-    timeout: int = 30             # таймаут HTTP-запросов (секунды; только в HTTP-режиме)
-    retry: RetryConfig = RetryConfig()  # политика повторных попыток (только в HTTP-режиме)
-    max_rpm: int | None = None    # лимит запросов в минуту (только в HTTP-режиме); None = без ограничения
+    base_url: str | None = None   # OpenAI-совместимый endpoint; обязателен для индексации
+    timeout: int = 30             # таймаут HTTP-запросов (секунды)
+    retry: RetryConfig = RetryConfig()  # политика повторных попыток
+    max_rpm: int | None = None    # лимит запросов в минуту; None = без ограничения
 
 
 class OversizedConfig(BaseModel):
@@ -125,7 +130,7 @@ class OversizedConfig(BaseModel):
 
 
 class ChunkerConfig(BaseModel):
-    mode: str = 'hybrid'                # 'hybrid' | 'semantic' | 'passthrough' | 'llm'
+    mode: str = 'hybrid'                # 'hybrid' | 'section' | 'semantic' | 'passthrough' | 'llm'
     block_limit: int = 32000             # лимит токенов для pre-split блока (llm/passthrough)
     min_tokens: int = 50                 # мин. размер чанка в токенах (semantic/hybrid)
     max_tokens: int = 250                # макс. размер чанка в токенах (semantic/hybrid)
@@ -148,12 +153,22 @@ class KnowledgeMapConfig(BaseModel):
     depth: int = 2                       # кол-во уровней в системном промпте
     max_depth: int | None = None         # макс. глубина обхода дерева; None = до самого дна
     collection: str = 'knowledge_map'    # коллекция Qdrant для карт
-    prompt_strategy: str = 'fixed'       # 'fixed' (node_max_tokens на узел) | 'weighted' (prompt_budget по потомкам)
+    # 'fixed'       — лимит токенов на каждый узел, для естественной иерархии
+    # 'weighted'    — общий бюджет распределяется по потомкам (иерархии)
+    # 'flat_topics' — для плоских источников: LLM группирует roots в темы,
+    #                 карта получает искусственную иерархию «тема → документы».
+    #                 Размер prompt — следствие числа тем × документов (без capping).
+    prompt_strategy: str = 'fixed'
     node_max_tokens: int = 256           # для fixed: лимит токенов на описание каждого узла
     node_min_tokens: int = 256           # для weighted: минимальный бюджет на узел (защита от обрывов)
     prompt_budget: int = 8192            # для weighted: общий бюджет токенов на системный промпт
-    enable_thinking: bool = False        # включить thinking-режим LLM; по умолчанию выключен
     exclude_source_types: list[str] = ['attached_jira', 'attached_pdf']  # не включать в карту
+    depth1_section_ids: list[str] = []  # разделы с depth=1: показывает прямых детей, но не внуков
+    # flat_topics:
+    flat_topics_target: int | None = None   # целевое число тем; None = авто (~sqrt(N))
+    flat_topics_max_input_docs: int = 3000  # safety limit; одна LLM-сессия не батчуется
+    flat_topics_assign_batch: int = 5       # размер батча в пасс 2 (классификация);
+                                            # меньше — точнее, но больше LLM-вызовов
 
 
 class IndexingConfig(BaseModel):
@@ -161,6 +176,7 @@ class IndexingConfig(BaseModel):
     context: ContextConfig = ContextConfig()
     embed_batch_size: int = 64            # размер батча для embed + upsert чанков
     lexical_doc_summary: bool = False     # добавлять doc_summary к тексту чанка для лексических векторов (GTE keywords, BM25)
+    lexical_chunk_context: bool = False   # добавлять chunk.context к тексту чанка для лексических векторов (Anthropic «Contextual BM25»)
     dense_embedder: DenseEmbedderConfig = DenseEmbedderConfig()
     sparse_embedder: SparseEmbedderConfig = SparseEmbedderConfig()
     vision_max_tokens: int = 1024  # лимит токенов ответа Vision LLM (изображения, формулы)

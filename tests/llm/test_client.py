@@ -366,3 +366,118 @@ class TestRateLimiter:
         with patch('morag.llm.client.AsyncOpenAI'):
             client = LLMClient(base_url='http://test', model='test', max_rpm=60)
             assert client._rate_limiter is not None
+
+
+# ---------------------------------------------------------------------------
+# Client-level defaults: enable_thinking and seed
+# ---------------------------------------------------------------------------
+
+class TestDefaultEnableThinking:
+    async def test_default_false_applied_to_extra_body(self, mock_openai):
+        """Client constructed with enable_thinking=False sends thinking-off flags in extra_body."""
+        client = LLMClient(base_url='http://test', model='m', enable_thinking=False)
+        mock_openai.chat.completions.create.return_value = make_completion('ok')
+        await client.complete([{'role': 'user', 'content': 'hi'}])
+
+        call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
+        extra = call_kwargs.get('extra_body') or {}
+        assert extra.get('chat_template_kwargs') == {'enable_thinking': False}
+        assert extra.get('think') is False
+        assert extra.get('options') == {'think': False}
+        assert extra.get('reasoning') == {'enabled': False}
+
+    async def test_per_call_true_overrides_default_false(self, mock_openai):
+        """Per-call GenerationParams.enable_thinking=True overrides default False."""
+        client = LLMClient(base_url='http://test', model='m', enable_thinking=False)
+        mock_openai.chat.completions.create.return_value = make_completion('ok')
+        await client.complete(
+            [{'role': 'user', 'content': 'hi'}],
+            params=GenerationParams(enable_thinking=True),
+        )
+
+        call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
+        extra = call_kwargs.get('extra_body') or {}
+        assert extra.get('chat_template_kwargs') == {'enable_thinking': True}
+        assert extra.get('think') is True
+        assert extra.get('reasoning') == {'enabled': True}
+
+    async def test_default_none_preserves_backward_compat(self, mock_openai):
+        """No enable_thinking default → no thinking-related fields in extra_body."""
+        client = LLMClient(base_url='http://test', model='m')  # default enable_thinking=None
+        mock_openai.chat.completions.create.return_value = make_completion('ok')
+        await client.complete([{'role': 'user', 'content': 'hi'}])
+
+        call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
+        extra = call_kwargs.get('extra_body')
+        # Either no extra_body at all or extra_body without thinking keys
+        if extra is not None:
+            assert 'chat_template_kwargs' not in extra
+            assert 'think' not in extra
+            assert 'reasoning' not in extra
+
+    async def test_default_false_applies_to_vision(self, mock_openai):
+        """enable_thinking default propagates to complete_vision."""
+        client = LLMClient(base_url='http://test', model='m', enable_thinking=False)
+        mock_openai.chat.completions.create.return_value = make_completion('ok')
+        await client.complete_vision('describe', 'base64data', 'image/png')
+
+        call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
+        extra = call_kwargs.get('extra_body') or {}
+        assert extra.get('chat_template_kwargs') == {'enable_thinking': False}
+
+    async def test_default_false_applies_to_complete_json(self, mock_openai):
+        """enable_thinking default propagates to complete_json."""
+        client = LLMClient(base_url='http://test', model='m', enable_thinking=False)
+        mock_openai.chat.completions.create.return_value = make_completion('{}')
+        schema = {'type': 'object', 'properties': {}, 'required': []}
+        await client.complete_json([{'role': 'user', 'content': 'json'}], schema=schema)
+
+        call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
+        extra = call_kwargs.get('extra_body') or {}
+        assert extra.get('chat_template_kwargs') == {'enable_thinking': False}
+
+
+class TestDefaultSeed:
+    async def test_default_seed_42_passed_to_create(self, mock_openai):
+        """Default seed=42 is applied when no per-call seed is provided."""
+        client = LLMClient(base_url='http://test', model='m')
+        mock_openai.chat.completions.create.return_value = make_completion('ok')
+        await client.complete([{'role': 'user', 'content': 'hi'}])
+
+        call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
+        assert call_kwargs.get('seed') == 42
+
+    async def test_per_call_seed_overrides_default(self, mock_openai):
+        """Per-call GenerationParams.seed overrides client default."""
+        client = LLMClient(base_url='http://test', model='m')
+        mock_openai.chat.completions.create.return_value = make_completion('ok')
+        await client.complete(
+            [{'role': 'user', 'content': 'hi'}],
+            params=GenerationParams(seed=123),
+        )
+
+        call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
+        assert call_kwargs.get('seed') == 123
+
+    async def test_seed_none_in_constructor_disables_seed(self, mock_openai):
+        """Passing seed=None in constructor removes seed from requests."""
+        client = LLMClient(base_url='http://test', model='m', seed=None)
+        mock_openai.chat.completions.create.return_value = make_completion('ok')
+        await client.complete([{'role': 'user', 'content': 'hi'}])
+
+        call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
+        assert 'seed' not in call_kwargs
+
+    async def test_default_seed_applied_to_vision_and_json(self, mock_openai):
+        """Default seed propagates to complete_vision and complete_json."""
+        client = LLMClient(base_url='http://test', model='m')
+        mock_openai.chat.completions.create.return_value = make_completion('{}')
+        schema = {'type': 'object', 'properties': {}, 'required': []}
+        await client.complete_json([{'role': 'user', 'content': 'j'}], schema=schema)
+        call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
+        assert call_kwargs.get('seed') == 42
+
+        mock_openai.chat.completions.create.return_value = make_completion('ok')
+        await client.complete_vision('describe', 'b64', 'image/png')
+        call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
+        assert call_kwargs.get('seed') == 42

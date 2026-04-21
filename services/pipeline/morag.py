@@ -125,6 +125,9 @@ _SYSTEM_PROMPT = (
     'НЕ означает что это разрешено или рекомендовано. '
     'Если политика не описана явно — скажи что информации нет.\n'
     '- Если в базе нет ответа — честно сообщи об этом.\n'
+    '- При наличии нескольких источников предпочитай более свежие документы '
+    '(ориентируйся на поле «Обновлён» в результатах поиска). '
+    'Если старый и новый документ противоречат — доверяй новому.\n'
     '- При использовании информации вставляй номер документа-источника '
     'в формате [N], где N — номер документа из результатов search. '
     'Например: "Для настройки Docker нужно установить Docker Desktop [1]." '
@@ -142,6 +145,9 @@ class Pipeline:
 
         SPARSE_EMBED_URL: str
         DENSE_EMBED_URL: str
+        DENSE_EMBEDDER_MODEL: str       # имя модели в /v1/embeddings body (пусто = не отправлять)
+        DENSE_ENCODING_FORMAT: str      # 'base64' | 'float'
+        QUERY_TEMPLATE: str             # формат входа query-side; {text} → текст запроса
 
         LLM_URL: str
         LLM_MODEL: str
@@ -156,6 +162,7 @@ class Pipeline:
         ENABLE_DIVERSITY_NUDGE: bool
         CITATION_MAX_CHARS: int
         HTTP_TIMEOUT: int
+        ADMIN_INSTRUCTIONS: str
 
     def __init__(self):
         self.valves = self.Valves(
@@ -167,7 +174,10 @@ class Pipeline:
             ),
 
             SPARSE_EMBED_URL=os.getenv('SPARSE_EMBED_URL', 'http://embedder-gte:8081'),
-            DENSE_EMBED_URL=os.getenv('DENSE_EMBED_URL', 'http://embedder-frida:8082'),
+            DENSE_EMBED_URL=os.getenv('DENSE_EMBED_URL', 'http://host.docker.internal:11434'),
+            DENSE_EMBEDDER_MODEL=os.getenv('DENSE_EMBEDDER_MODEL', ''),
+            DENSE_ENCODING_FORMAT=os.getenv('DENSE_ENCODING_FORMAT', 'base64'),
+            QUERY_TEMPLATE=os.getenv('QUERY_TEMPLATE', 'search_query: {text}'),
 
             LLM_URL=os.getenv('LLM_URL', 'http://localhost:11434/v1'),
             LLM_MODEL=os.getenv('LLM_MODEL', 'qwen3.5-9b'),
@@ -179,13 +189,20 @@ class Pipeline:
             SEARCH_LIMIT=int(os.getenv('SEARCH_LIMIT', '50')),
             MAX_ITERATIONS=int(os.getenv('MAX_ITERATIONS', '9')),
             ENABLE_THINKING=os.getenv('ENABLE_THINKING', 'true').lower() == 'true',
-            ENABLE_DIVERSITY_NUDGE=os.getenv('ENABLE_DIVERSITY_NUDGE', 'false').lower() == 'true',
+            ENABLE_DIVERSITY_NUDGE=os.getenv('ENABLE_DIVERSITY_NUDGE', 'true').lower() == 'true',
             CITATION_MAX_CHARS=int(os.getenv('CITATION_MAX_CHARS', '5000')),
             HTTP_TIMEOUT=int(os.getenv('HTTP_TIMEOUT', '300')),
+            ADMIN_INSTRUCTIONS=os.getenv('ADMIN_INSTRUCTIONS',
+                'Если информация не была найдена в конкретном разделе знаний '
+                'или её недостаточно для полного ответа, ОБЯЗАТЕЛЬНО сделай '
+                'дополнительный поиск без указания раздела (section_ids) — '
+                'по всей базе знаний.',
+            ),
         )
         self._knowledge_map: str | None = None
         self._doc_titles: dict[str, str] = {}  # doc_id → title (кеш)
         self._doc_tree: dict[str, list[str]] | None = None  # parent_id → [child_ids]
+        self._cluster_membership: dict[str, list[str]] | None = None  # cluster_id → [doc_id]
 
     def pipe(
         self,
@@ -204,6 +221,11 @@ class Pipeline:
 
         # 2. Собрать system prompt
         system_content = _SYSTEM_PROMPT
+        if self.valves.ADMIN_INSTRUCTIONS:
+            system_content += (
+                '\n\n## Обязательные инструкции администратора\n'
+                + self.valves.ADMIN_INSTRUCTIONS
+            )
         if knowledge_map:
             system_content += (
                 '\n\nСтруктура базы знаний (используй для навигации):\n' + knowledge_map
@@ -378,16 +400,24 @@ class Pipeline:
         chunks = self._search(query, limit)
         if not chunks:
             return 'Поиск не дал результатов. Попробуй другую формулировку.', []
+        raw_chunks = chunks  # полный нефильтрованный набор — понадобится для auto-fallback
+
         # Фильтрация по разделам
+        filtered_applied = False
         if section_ids:
             allowed_doc_ids = self._get_descendant_doc_ids(section_ids)
             if allowed_doc_ids:
                 filtered = [c for c in chunks if c['doc_id'] in allowed_doc_ids]
                 if filtered:
                     chunks = filtered
+                    filtered_applied = True
 
         # LLM reranker — отфильтровать нерелевантные чанки
         reranked = self._rerank(query, chunks)
+        if not reranked and filtered_applied:
+            # Фильтр оставил чанки, но rerank их все выбросил — возможно классификация
+            # документа по теме расходится с тем, где агент искал. Повторяем без фильтра.
+            reranked = self._rerank(query, raw_chunks)
         if not reranked:
             return 'Поиск дал результаты, но ни один не оказался релевантным. Попробуй другую формулировку.', []
         chunks = reranked
@@ -403,6 +433,9 @@ class Pipeline:
             path_display = ' | '.join(doc_chunks[0]['path']) if doc_chunks[0]['path'] else doc_id
             doc_name = self._get_doc_title(doc_id)
             lines = [f'[{i}] Документ: {doc_name}', f'Путь: {path_display}']
+            updated_at = doc_chunks[0].get('updated_at', '')
+            if updated_at:
+                lines.append(f'Обновлён: {updated_at}')
             url = doc_chunks[0].get('url')
             if url:
                 lines.append(f'URL: {url}')
@@ -449,7 +482,10 @@ class Pipeline:
         for i, c in enumerate(chunks):
             path_display = ' | '.join(c['path']) if c['path'] else c['doc_id']
             context = c.get('context', '')
+            updated_at = c.get('updated_at', '')
             lines = [f'[{i}] {path_display}']
+            if updated_at:
+                lines.append(f'Обновлён: {updated_at}')
             if context:
                 lines.append(f'Контекст: {context}')
             lines.append(c['text'])
@@ -460,7 +496,8 @@ class Pipeline:
             f'Чанки:\n' + '\n---\n'.join(items) + '\n\n'
             'Какие из этих чанков могут быть полезны для ответа на вопрос? '
             'Включай чанки даже если они связаны с вопросом косвенно. '
-            'При сомнении — включай.\n'
+            'При сомнении — включай. '
+            'При прочих равных предпочитай более свежие чанки (по дате «Обновлён»).\n'
             'Верни ТОЛЬКО номера чанков через запятую. '
             'Например: 0, 3, 5\n'
             'Если ни один не релевантен — верни: none'
@@ -472,17 +509,25 @@ class Pipeline:
             'max_tokens': 100,
             'chat_template_kwargs': {'enable_thinking': False},
         }
+        import time as _time
         try:
-            resp = requests.post(
-                f'{self.valves.LLM_URL.rstrip("/")}/chat/completions',
-                headers={
-                    'Authorization': f'Bearer {self.valves.LLM_API_KEY}',
-                    'Content-Type': 'application/json',
-                },
-                json=payload,
-                timeout=self.valves.HTTP_TIMEOUT,
-            )
-            resp.raise_for_status()
+            for _attempt in range(3):
+                resp = requests.post(
+                    f'{self.valves.LLM_URL.rstrip("/")}/chat/completions',
+                    headers={
+                        'Authorization': f'Bearer {self.valves.LLM_API_KEY}',
+                        'Content-Type': 'application/json',
+                    },
+                    json=payload,
+                    timeout=self.valves.HTTP_TIMEOUT,
+                )
+                if resp.status_code == 429:
+                    wait = max(int(resp.headers.get('Retry-After', 30)), 15 * (_attempt + 1))
+                    print(f'[morag-agent] rerank 429, waiting {wait}s')
+                    _time.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                break
             answer = resp.json()['choices'][0]['message']['content'].strip()
         except Exception as exc:
             print(f'[morag-agent] rerank failed, returning all chunks: {exc}')
@@ -500,26 +545,92 @@ class Pipeline:
     # ── LLM calls ─────────────────────────────────────────────────────────────
 
     def _llm_call_with_tools(self, messages: list[dict]) -> dict:
-        """Вызов LLM с tools, non-streaming. Возвращает полный response."""
+        """Вызов LLM с tools через streaming, собирает полный response.
+
+        Streaming: SSE-чанки идут регулярно, поэтому read_timeout не
+        триггерится. При 429 (rate limit) — backoff с retry.
+        """
+        import time as _time
         payload = {
             'model': self.valves.LLM_MODEL,
             'messages': messages,
             'tools': _TOOLS,
             'temperature': self.valves.LLM_TEMPERATURE,
             'max_tokens': self.valves.LLM_MAX_TOKENS,
+            'stream': True,
             'chat_template_kwargs': {'enable_thinking': False},
         }
-        resp = requests.post(
-            f'{self.valves.LLM_URL.rstrip("/")}/chat/completions',
-            headers={
-                'Authorization': f'Bearer {self.valves.LLM_API_KEY}',
-                'Content-Type': 'application/json',
-            },
-            json=payload,
-            timeout=self.valves.HTTP_TIMEOUT,
-        )
-        resp.raise_for_status()
-        return resp.json()
+        url = f'{self.valves.LLM_URL.rstrip("/")}/chat/completions'
+        headers = {
+            'Authorization': f'Bearer {self.valves.LLM_API_KEY}',
+            'Content-Type': 'application/json',
+            'Accept': 'text/event-stream',
+            'Connection': 'close',
+        }
+        last_exc = None
+        for attempt in range(3):
+            resp = requests.post(
+                url, headers=headers, json=payload,
+                timeout=self.valves.HTTP_TIMEOUT, stream=True,
+            )
+            if resp.status_code == 429:
+                retry_after = int(resp.headers.get('Retry-After', 30))
+                wait = max(retry_after, 15 * (attempt + 1))
+                print(f'[morag-agent] 429 rate limited, waiting {wait}s (attempt {attempt + 1}/3)')
+                _time.sleep(wait)
+                last_exc = requests.exceptions.HTTPError(response=resp)
+                continue
+            resp.raise_for_status()
+            resp.encoding = 'utf-8'
+            break
+        else:
+            raise last_exc or requests.exceptions.HTTPError('429 after 3 retries')
+
+        content_parts: list[str] = []
+        tool_calls_by_idx: dict[int, dict] = {}
+        finish_reason = ''
+
+        for raw_line in resp.iter_lines(decode_unicode=True):
+            if not raw_line:
+                continue
+            if not raw_line.startswith('data:'):
+                continue
+            data = raw_line[5:].strip()
+            if data == '[DONE]':
+                break
+            try:
+                event = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            choices = event.get('choices') or []
+            if not choices:
+                continue
+            choice = choices[0]
+            delta = choice.get('delta') or {}
+            if 'content' in delta and delta['content']:
+                content_parts.append(delta['content'])
+            for tc_delta in delta.get('tool_calls') or []:
+                idx = tc_delta.get('index', 0)
+                slot = tool_calls_by_idx.setdefault(
+                    idx,
+                    {'id': '', 'type': 'function', 'function': {'name': '', 'arguments': ''}},
+                )
+                if tc_delta.get('id'):
+                    slot['id'] = tc_delta['id']
+                if tc_delta.get('type'):
+                    slot['type'] = tc_delta['type']
+                fn = tc_delta.get('function') or {}
+                if fn.get('name'):
+                    slot['function']['name'] += fn['name']
+                if fn.get('arguments'):
+                    slot['function']['arguments'] += fn['arguments']
+            if choice.get('finish_reason'):
+                finish_reason = choice['finish_reason']
+
+        message: dict = {'role': 'assistant', 'content': ''.join(content_parts)}
+        if tool_calls_by_idx:
+            message['tool_calls'] = [tool_calls_by_idx[i] for i in sorted(tool_calls_by_idx)]
+        return {'choices': [{'message': message, 'finish_reason': finish_reason}]}
 
     def _stream_final(self, messages: list[dict]) -> Generator:
         """Streaming финального ответа с thinking."""
@@ -589,14 +700,21 @@ class Pipeline:
     # ── Embeddings ────────────────────────────────────────────────────────────
 
     def _embed_dense(self, text: str) -> list:
-        payload = {'input': f'search_query: {text}', 'encoding_format': 'base64'}
+        wrapped = self.valves.QUERY_TEMPLATE.format(text=text)
+        payload: dict = {'input': wrapped}
+        if self.valves.DENSE_EMBEDDER_MODEL:
+            payload['model'] = self.valves.DENSE_EMBEDDER_MODEL
+        if self.valves.DENSE_ENCODING_FORMAT == 'base64':
+            payload['encoding_format'] = 'base64'
         resp = requests.post(
             f'{self.valves.DENSE_EMBED_URL}/v1/embeddings',
             json=payload, timeout=self.valves.HTTP_TIMEOUT,
         )
         resp.raise_for_status()
-        b64 = resp.json()['data'][0]['embedding']
-        return np.frombuffer(base64.b64decode(b64), dtype=np.float32).tolist()
+        raw = resp.json()['data'][0]['embedding']
+        if self.valves.DENSE_ENCODING_FORMAT == 'base64':
+            return np.frombuffer(base64.b64decode(raw), dtype=np.float32).tolist()
+        return list(raw)
 
     def _embed_sparse(self, text: str) -> tuple[list, list]:
         resp = requests.post(
@@ -609,18 +727,39 @@ class Pipeline:
 
     # ── Qdrant ────────────────────────────────────────────────────────────────
 
+    def _get_sparse_vector_names(self) -> set[str]:
+        """Получить имена sparse-векторов из коллекции (с кешем)."""
+        if not hasattr(self, '_sparse_vector_names'):
+            self._sparse_vector_names: set[str] = set()
+            try:
+                url = f'{self.valves.QDRANT_URL}/collections/{self.valves.QDRANT_COLLECTION}'
+                resp = requests.get(url, timeout=10)
+                resp.raise_for_status()
+                sparse = resp.json().get('result', {}).get('config', {}).get(
+                    'params', {},
+                ).get('sparse_vectors', {})
+                self._sparse_vector_names = set(sparse.keys())
+            except Exception as exc:
+                print(f'[morag-agent] failed to get sparse vector names: {exc}')
+        return self._sparse_vector_names
+
     def _search(self, text: str, limit: int) -> list[dict]:
         dense = self._embed_dense(text)
         indices, values = self._embed_sparse(text)
+        available_sparse = self._get_sparse_vector_names()
 
         # Лексический сигнал: GTE keywords + BM25 stem + BM25 trigram → nested RRF
-        lexical_prefetch = [
-            {'query': {'indices': indices, 'values': values}, 'using': 'keywords', 'limit': limit * 2},
-        ]
+        lexical_prefetch = []
+        if 'keywords' in available_sparse:
+            lexical_prefetch.append(
+                {'query': {'indices': indices, 'values': values}, 'using': 'keywords', 'limit': limit * 2},
+            )
         for vec_fn, vec_name in [
             (_bm25_query_vector, 'bm25'),
             (_bm25_trigram_query_vector, 'bm25_trigram'),
         ]:
+            if vec_name not in available_sparse:
+                continue
             idx, val = vec_fn(text)
             if idx:
                 lexical_prefetch.append({
@@ -630,14 +769,13 @@ class Pipeline:
                 })
 
         # Двухуровневый RRF: семантика (1 голос) vs лексика (1 голос)
-        prefetch = [
-            {'query': dense, 'using': 'full', 'limit': limit * 2},
-            {
+        prefetch = [{'query': dense, 'using': 'full', 'limit': limit * 2}]
+        if lexical_prefetch:
+            prefetch.append({
                 'prefetch': lexical_prefetch,
                 'query': {'fusion': 'rrf'},
                 'limit': limit * 2,
-            },
-        ]
+            })
 
         payload = {
             'prefetch': prefetch,
@@ -734,16 +872,31 @@ class Pipeline:
         return self._doc_tree
 
     def _get_descendant_doc_ids(self, section_ids: list[str]) -> set[str]:
-        """BFS от section_ids → множество всех потомков (включая сами section_ids)."""
-        tree = self._build_doc_tree()
-        result: set[str] = set(section_ids)
-        queue = list(section_ids)
-        while queue:
-            parent = queue.pop(0)
-            for child in tree.get(parent, []):
-                if child not in result:
-                    result.add(child)
-                    queue.append(child)
+        """Развернуть section_ids в set конкретных doc_id.
+
+        Сначала смотрим в cluster_membership (flat_topics): если id — ключ,
+        подставляем список. Остальные id идут по старой BFS-логике через
+        дерево parent_doc_ids. Для fixed/weighted membership пустой, ветка
+        не активируется.
+        """
+        membership = self._fetch_cluster_membership()
+        result: set[str] = set()
+        tree_ids: list[str] = []
+        for sid in section_ids:
+            if sid in membership:
+                result.update(membership[sid])
+            else:
+                tree_ids.append(sid)
+        if tree_ids:
+            tree = self._build_doc_tree()
+            result.update(tree_ids)
+            queue = list(tree_ids)
+            while queue:
+                parent = queue.pop(0)
+                for child in tree.get(parent, []):
+                    if child not in result:
+                        result.add(child)
+                        queue.append(child)
         return result
 
     def _fetch_knowledge_map(self) -> str:
@@ -768,6 +921,39 @@ class Pipeline:
             print(f'[morag-agent] _fetch_knowledge_map failed: {exc}')
             self._knowledge_map = ''
         return self._knowledge_map
+
+    def _fetch_cluster_membership(self) -> dict[str, list[str]]:
+        """Загрузить cluster_membership из knowledge_map collection (ленивый кеш).
+
+        Возвращает {cluster_id: [doc_id, ...]}. Пустой dict если точки нет
+        (например, стратегия fixed/weighted).
+        """
+        if self._cluster_membership is not None:
+            return self._cluster_membership
+        payload = {
+            'filter': {'must': [{'key': 'doc_id', 'match': {'value': '_cluster_membership'}}]},
+            'with_payload': ['cluster_membership'],
+            'with_vectors': False,
+            'limit': 1,
+        }
+        url = f'{self.valves.QDRANT_URL}/collections/{self.valves.QDRANT_KNOWLEDGE_MAP_COLLECTION}/points/scroll'
+        try:
+            resp = requests.post(url, json=payload, timeout=self.valves.HTTP_TIMEOUT)
+            resp.raise_for_status()
+            points = resp.json().get('result', {}).get('points', [])
+            if points:
+                raw = points[0]['payload'].get('cluster_membership') or {}
+                # Санитарная проверка типов
+                self._cluster_membership = {
+                    k: list(v) for k, v in raw.items()
+                    if isinstance(k, str) and isinstance(v, list)
+                }
+            else:
+                self._cluster_membership = {}
+        except Exception as exc:
+            print(f'[morag-agent] _fetch_cluster_membership failed: {exc}')
+            self._cluster_membership = {}
+        return self._cluster_membership
 
     def _get_doc_title(self, doc_id: str) -> str:
         """Получить title документа из Qdrant (с кешем)."""

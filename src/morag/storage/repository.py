@@ -61,6 +61,10 @@ class DocRepository:
         self._client = client
         self._collection = collection
 
+    @property
+    def collection(self) -> str:
+        return self._collection
+
     async def get_by_id(self, doc_id: str) -> Document | None:
         """Найти документ по id. Возвращает None если не найден."""
         point_id = _doc_id_to_point_id(doc_id)
