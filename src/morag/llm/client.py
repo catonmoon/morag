@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 # Реестр shared in-flight семафоров по (base_url, model). Один и тот же провайдер
-# (например ai.kth.pro Vision-модель, шарится между llm и llm_vision) получает
+# (например vLLM-инстанс, шарится между llm и llm_vision на одной модели) получает
 # единый семафор, а не отдельный на каждый LLMClient.
 _shared_semaphores: dict[tuple[str, str], tuple[asyncio.Semaphore, int]] = {}
 _registry_lock = threading.Lock()
@@ -272,6 +272,80 @@ class LLMClient:
             kwargs['max_tokens'] = max_tokens
         response = await self._create(**kwargs)
         return _extract_content(response.choices[0].message)
+
+    async def complete_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        params: GenerationParams | None = None,
+        max_tokens: int | None = None,
+    ) -> dict:
+        """Chat completion с tools (function calling). Streaming под капотом.
+
+        Возвращает dict вида ``{'choices': [{'message': {...}, 'finish_reason': '...'}]}`` —
+        совместимый с OpenAI-API форматом, чтобы агентский цикл мог итерироваться
+        по `message.tool_calls` так же как над raw API JSON.
+
+        ВНИМАНИЕ: используем streaming чтобы обойти строгую серверную валидацию
+        ``tool_choice='auto'`` у некоторых vLLM-инсталляций (xAI Grok). Без stream
+        сервер требует ``--enable-auto-tool-choice`` на старте и реджектит запрос с tools.
+        Возвращаем агрегированный финал — потребитель не видит разницы со streamingом.
+
+        Использование: retrieval-pipeline (`services/pipeline/morag_pipeline.py`) —
+        агент выбирает между `search()` / `get_neighbors()` / финальным ответом.
+        """
+        params = self._resolve_params(params)
+        kwargs: dict = dict(
+            model=self._model,
+            messages=messages,
+            tools=tools,
+            stream=True,
+            temperature=params.temperature,
+            top_p=params.top_p,
+            **self._penalty_kwargs(params),
+        )
+        if params.seed is not None:
+            kwargs['seed'] = params.seed
+        extra_body = _build_extra_body(params)
+        if extra_body:
+            kwargs['extra_body'] = extra_body
+        if max_tokens is not None:
+            kwargs['max_tokens'] = max_tokens
+
+        async with self._inflight_cap():
+            stream = await self._client.chat.completions.create(**kwargs)
+            content_parts: list[str] = []
+            tool_calls_by_idx: dict[int, dict] = {}
+            finish_reason = ''
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                delta = choice.delta
+                if delta.content:
+                    content_parts.append(delta.content)
+                for tc in (delta.tool_calls or []):
+                    idx = tc.index
+                    slot = tool_calls_by_idx.setdefault(
+                        idx,
+                        {'id': '', 'type': 'function', 'function': {'name': '', 'arguments': ''}},
+                    )
+                    if tc.id:
+                        slot['id'] = tc.id
+                    if tc.type:
+                        slot['type'] = tc.type
+                    if tc.function:
+                        if tc.function.name:
+                            slot['function']['name'] += tc.function.name
+                        if tc.function.arguments:
+                            slot['function']['arguments'] += tc.function.arguments
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
+
+        message: dict = {'role': 'assistant', 'content': ''.join(content_parts)}
+        if tool_calls_by_idx:
+            message['tool_calls'] = [tool_calls_by_idx[i] for i in sorted(tool_calls_by_idx)]
+        return {'choices': [{'message': message, 'finish_reason': finish_reason}]}
 
     async def complete_vision(
         self,

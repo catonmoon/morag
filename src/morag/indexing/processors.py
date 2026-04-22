@@ -75,7 +75,8 @@ class DenseEmbeddingProcessor(ChunkProcessor):
 
     @staticmethod
     def _full_text(chunk: Chunk) -> str:
-        return f'{"\n".join(chunk.path)}\n{chunk.text}\n{chunk.context}'
+        path_str = '\n'.join(chunk.path)
+        return f'{path_str}\n{chunk.text}\n{chunk.context}'
 
     async def process(self, chunk: Chunk, document: Document) -> Chunk:
         chunk.vectors['full'] = await self._embedder.embed(self._full_text(chunk))
