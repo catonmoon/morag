@@ -8,12 +8,12 @@ import re
 from datetime import datetime, timezone
 from urllib.parse import urljoin, urlparse
 
+import httpx
 from atlassian import Confluence
 from bs4 import BeautifulSoup
 from markdownify import markdownify
 
 from morag.config import ConfluenceConfig
-from morag.llm.client import GenerationParams
 from morag.sources.base import Document, Source
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,11 @@ class ConfluenceSource(Source):
             backoff_and_retry=config.max_retries > 0,
             max_backoff_retries=config.max_retries,
         )
+        # Async-клиент для скачки картинок (basic-auth = тот же creds, что и atlassian SDK).
+        self._http = httpx.AsyncClient(
+            auth=(config.username, credential),
+            timeout=config.timeout,
+        )
         self._base_url = config.url.rstrip('/')
         self._spaces = config.spaces
         self._ancestor_ids = config.ancestor_ids
@@ -69,6 +74,8 @@ class ConfluenceSource(Source):
         self._vision_client = vision_client
         self._vision_max_tokens = vision_max_tokens
         self._min_image_size_bytes = config.min_image_size_bytes
+        self._data_url_handling = config.data_url_handling
+        self._decorative_patterns = [re.compile(p) for p in config.decorative_image_patterns]
         self._timeout = config.timeout
 
     async def get_metadata(self) -> list[Document]:
@@ -255,6 +262,9 @@ class ConfluenceSource(Source):
         _remove_buttons(soup)
         _convert_checkboxes(soup)
         _unwrap_lists_in_table_cells(soup)
+        # Глобально стрипаем data: URL'ы из non-img элементов (href/src в <a>/<source>/etc).
+        # img-теги обработает _replace_images_with_descriptions согласно data_url_handling.
+        _strip_non_img_data_urls(soup, page_id)
 
         if self._vision_client:
             await self._replace_images_with_descriptions(soup, page_id)
@@ -265,10 +275,29 @@ class ConfluenceSource(Source):
         return md
 
     async def _replace_images_with_descriptions(self, soup: BeautifulSoup, page_id: str) -> None:
-        """Скачать изображения и заменить <img> тегами с описанием от vision LLM."""
+        """Скачать изображения и заменить <img> тегами с описанием от vision LLM.
+
+        data:image base64 в src обрабатываются согласно self._data_url_handling:
+        - 'skip' (default) — img-тег декомпозится без обработки
+        - 'vision' — base64 декодируется и отправляется в vision LLM как обычная картинка
+        """
         imgs = soup.find_all('img')
         if not imgs:
             return
+
+        # Для 'skip' — отдельным проходом дропаем data: img'ы перед основной обработкой.
+        if self._data_url_handling == 'skip':
+            data_imgs = [img for img in imgs if img.get('src', '').startswith('data:')]
+            if data_imgs:
+                logger.info(
+                    'Page %s: stripping %d data-URL image(s) (data_url_handling=skip)',
+                    page_id, len(data_imgs),
+                )
+                for img in data_imgs:
+                    img.decompose()
+                imgs = [img for img in imgs if img.parent is not None]
+                if not imgs:
+                    return
 
         logger.info('Page %s: processing %d image(s) with vision LLM', page_id, len(imgs))
 
@@ -279,23 +308,50 @@ class ConfluenceSource(Source):
             if isinstance(description, Exception) or not description:
                 img.decompose()
             else:
+                # Резолвим относительный src в абсолютный URL — чтобы после ретрива
+                # markdown-рендерер (OWUI) мог подтянуть картинку из Confluence.
+                # Alt очищаем, чтобы в markdown-вывод попал пустой alt вместо автоподстановки.
+                src = img.get('src', '')
+                if src and not src.startswith('http'):
+                    img['src'] = urljoin(self._base_url, src)
+                img.attrs.pop('alt', None)
+                # После <img> ставим <p> с текстовым описанием от vision LLM.
+                # markdownify превратит пару в: "![](url)\n\n[Изображение: описание]".
                 p = soup.new_tag('p')
                 p.string = f'[Изображение: {description}]'
-                img.replace_with(p)
+                img.insert_after(p)
 
     async def _describe_image(self, src: str, alt: str, page_id: str) -> str | None:
-        """Скачать изображение по URL и получить описание от vision LLM."""
+        """Скачать изображение по URL и получить описание от vision LLM.
+
+        Если src — data:image/... base64 URL, base64 декодируется напрямую (без HTTP).
+        Декоративные иконки (Confluence emoticons и т.п.) — возвращаем None,
+        чтобы _replace_images_with_descriptions их полностью убрал из soup.
+        """
         if not src:
             return alt or None
 
-        media_type = _guess_media_type(src)
-        if media_type == 'image/svg+xml':
-            logger.info('Page %s: skipping SVG image: %s', page_id, src)
-            return alt or None
+        if any(p.search(src) for p in self._decorative_patterns):
+            logger.debug('Page %s: skipping decorative icon: %s', page_id, src)
+            return None
 
-        image_bytes = await asyncio.to_thread(self._download_image, src, page_id)
-        if not image_bytes:
-            return alt or None
+        if src.startswith('data:'):
+            decoded = _parse_data_url(src)
+            if decoded is None:
+                logger.warning('Page %s: malformed data: URL, skipping', page_id)
+                return alt or None
+            media_type, image_bytes = decoded
+            if media_type == 'image/svg+xml':
+                logger.info('Page %s: skipping SVG data-URL image', page_id)
+                return alt or None
+        else:
+            media_type = _guess_media_type(src)
+            if media_type == 'image/svg+xml':
+                logger.info('Page %s: skipping SVG image: %s', page_id, src)
+                return alt or None
+            image_bytes = await self._download_image(src, page_id)
+            if not image_bytes:
+                return alt or None
 
         if self._min_image_size_bytes is not None and len(image_bytes) < self._min_image_size_bytes:
             logger.info(
@@ -310,7 +366,6 @@ class ConfluenceSource(Source):
             description = await self._vision_client.complete_vision(
                 _IMAGE_PROMPT, image_b64, media_type,
                 max_tokens=self._vision_max_tokens,
-                params=GenerationParams(seed=42),
             )
             logger.info('Page %s: image described: %s -> %s...', page_id, src[:80], description[:80].replace('\n', '\\n'))
             return description.strip() or None
@@ -318,12 +373,11 @@ class ConfluenceSource(Source):
             logger.warning('Page %s: vision LLM failed for image %s', page_id, src, exc_info=True)
             return alt or None
 
-    def _download_image(self, src: str, page_id: str) -> bytes | None:
-        """Синхронно скачать изображение, используя сессию Confluence (с авторизацией)."""
+    async def _download_image(self, src: str, page_id: str) -> bytes | None:
+        """Async-скачать изображение по URL с теми же credentials, что и Confluence SDK."""
         try:
             url = src if src.startswith('http') else urljoin(self._base_url, src)
-            # Используем сессию atlassian клиента — она уже содержит авторизацию
-            response = self._client._session.get(url, timeout=self._timeout)
+            response = await self._http.get(url)
             response.raise_for_status()
             return response.content
         except Exception:
@@ -505,6 +559,42 @@ def _guess_media_type(src: str) -> str:
     path = urlparse(src).path
     mime, _ = mimetypes.guess_type(path)
     return mime or 'image/png'
+
+
+_DATA_URL_RE = re.compile(r'^data:([^;,]+)(?:;base64)?,(.*)$', re.DOTALL)
+
+
+def _parse_data_url(src: str) -> tuple[str, bytes] | None:
+    """Распарсить data:image/...;base64,... в (media_type, raw bytes). None если не парсится."""
+    m = _DATA_URL_RE.match(src)
+    if not m:
+        return None
+    media_type = m.group(1).strip() or 'image/png'
+    payload = m.group(2)
+    try:
+        if ';base64' in src.split(',', 1)[0]:
+            return media_type, base64.b64decode(payload, validate=False)
+        # URL-encoded data — редкий вариант, не поддерживаем
+        return None
+    except Exception:
+        return None
+
+
+def _strip_non_img_data_urls(soup: BeautifulSoup, page_id: str) -> None:
+    """Дропнуть элементы с data: URL в href/src, кроме <img> (тот обработает _replace_images_with_descriptions)."""
+    # Сначала собираем целевые теги, потом decompose — иначе декомпозиция родителя
+    # роняет .attrs у уже посещённых детей в том же find_all-проходе.
+    to_drop = []
+    for tag in soup.find_all(True):
+        if tag.name == 'img' or tag.attrs is None:
+            continue
+        if tag.get('href', '').startswith('data:') or tag.get('src', '').startswith('data:'):
+            to_drop.append(tag)
+    for tag in to_drop:
+        if tag.parent is not None:
+            tag.decompose()
+    if to_drop:
+        logger.info('Page %s: stripped %d non-img element(s) with data: URL', page_id, len(to_drop))
 
 
 def _build_page_path(space_name: str, ancestors: list[str], title: str) -> str:

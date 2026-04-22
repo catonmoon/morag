@@ -5,13 +5,54 @@ import json
 import logging
 import random
 import re
+import threading
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from aiolimiter import AsyncLimiter
 from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
+
+
+# Реестр shared in-flight семафоров по (base_url, model). Один и тот же провайдер
+# (например vLLM-инстанс, шарится между llm и llm_vision на одной модели) получает
+# единый семафор, а не отдельный на каждый LLMClient.
+_shared_semaphores: dict[tuple[str, str], tuple[asyncio.Semaphore, int]] = {}
+_registry_lock = threading.Lock()
+
+
+def _get_or_create_semaphore(
+    base_url: str, model: str, max_concurrent: int | None,
+) -> asyncio.Semaphore | None:
+    """Получить shared in-flight Semaphore для (base_url, model), создать при необходимости.
+
+    Если для ключа уже зарегистрирован семафор с другим max_concurrent — оставляем
+    существующий и логируем warning. Пользователь должен согласовать значения в конфиге.
+    """
+    if max_concurrent is None:
+        return None
+    key = (base_url, model)
+    with _registry_lock:
+        existing = _shared_semaphores.get(key)
+        if existing is not None:
+            sem, existing_max = existing
+            if max_concurrent != existing_max:
+                logger.warning(
+                    'LLMClient: shared semaphore for %s already exists with max_concurrent=%d, '
+                    'new request asked for %d — keeping existing. Set the same value in config.',
+                    key, existing_max, max_concurrent,
+                )
+            return sem
+        sem = asyncio.Semaphore(max_concurrent)
+        _shared_semaphores[key] = (sem, max_concurrent)
+        logger.info('LLMClient: registered shared in-flight semaphore for %s = %d', key, max_concurrent)
+        return sem
+
+
+def _reset_shared_semaphores() -> None:
+    """Очистить registry — для тестов."""
+    with _registry_lock:
+        _shared_semaphores.clear()
 
 
 @dataclass
@@ -57,8 +98,11 @@ def _build_extra_body(params: GenerationParams) -> dict | None:
     if params.repetition_penalty is not None:
         extra['repetition_penalty'] = params.repetition_penalty
     if params.enable_thinking is not None:
-        # vLLM / Ollama
+        # vLLM
         extra['chat_template_kwargs'] = {'enable_thinking': params.enable_thinking}
+        # Ollama (/v1/ OpenAI-compatible API)
+        extra['think'] = params.enable_thinking
+        extra['options'] = {'think': params.enable_thinking}
         # OpenRouter
         extra['reasoning'] = {'enabled': params.enable_thinking}
     return extra or None
@@ -91,7 +135,10 @@ class LLMClient:
         max_retries: int = 3,
         model_wait_seconds: int = 0,
         model_wait_retries: int = 0,
-        max_rpm: int | None = None,
+        max_concurrent: int | None = None,
+        enable_thinking: bool | None = None,
+        seed: int | None = 42,
+        context_window: int = 32768,
     ) -> None:
         self._client = AsyncOpenAI(
             base_url=base_url, api_key=api_key,
@@ -100,25 +147,44 @@ class LLMClient:
         self._model = model
         self._model_wait_seconds = model_wait_seconds
         self._model_wait_retries = model_wait_retries
-        self._rate_limiter = AsyncLimiter(max_rpm, 60) if max_rpm else None
+        # Shared in-flight cap по (base_url, model). 429-обработку делает SDK retry.
+        self._semaphore = _get_or_create_semaphore(base_url, model, max_concurrent)
+        self._default_enable_thinking = enable_thinking
+        self._default_seed = seed
+        self._context_window = context_window
+
+    @property
+    def context_window(self) -> int:
+        """Контекстное окно модели в токенах. Для сайзинга промптов у consumer'ов."""
+        return self._context_window
+
+    def _resolve_params(self, params: GenerationParams | None) -> GenerationParams:
+        """Merge client-level defaults (enable_thinking, seed) with per-call params."""
+        p = params or GenerationParams()
+        if p.enable_thinking is None and self._default_enable_thinking is not None:
+            p = replace(p, enable_thinking=self._default_enable_thinking)
+        if p.seed is None and self._default_seed is not None:
+            p = replace(p, seed=self._default_seed)
+        return p
 
     @asynccontextmanager
-    async def _rate_limit(self):
-        """Acquire rate limiter if configured, otherwise no-op."""
-        if self._rate_limiter:
+    async def _inflight_cap(self):
+        """Acquire shared in-flight semaphore if configured, otherwise no-op."""
+        if self._semaphore:
             t0 = asyncio.get_event_loop().time()
-            async with self._rate_limiter:
+            async with self._semaphore:
                 waited = asyncio.get_event_loop().time() - t0
                 if waited > 0.1:
-                    logger.info('Rate limiter: waited %.1fs for token', waited)
+                    logger.info('In-flight cap: waited %.1fs for slot', waited)
                 yield
         else:
             yield
 
     async def _create(self, **kwargs):
-        """Обёртка над chat.completions.create с rate limiting и model-wait логикой.
+        """Обёртка над chat.completions.create с in-flight cap и model-wait логикой.
 
-        Rate limiting: если задан max_rpm, ожидает свободный слот перед запросом.
+        In-flight cap: если задан max_concurrent, не больше N одновременных запросов.
+        429-обработка — встроенная в SDK (max_retries + Retry-After).
 
         Обнаруживает два сигнала недоступности модели:
         1. response.choices is None — сервер вернул 200, но пустое тело (перезагрузка)
@@ -129,7 +195,7 @@ class LLMClient:
         """
         # Первая попытка (без ожидания)
         try:
-            async with self._rate_limit():
+            async with self._inflight_cap():
                 response = await self._client.chat.completions.create(**kwargs)
             if response.choices is None:
                 raise _ModelUnavailableError('Empty response from server (choices is None)')
@@ -156,7 +222,7 @@ class LLMClient:
             await asyncio.sleep(wait_with_jitter)
 
             try:
-                async with self._rate_limit():
+                async with self._inflight_cap():
                     response = await self._client.chat.completions.create(**kwargs)
                 if response.choices is None:
                     raise _ModelUnavailableError('Empty response from server (choices is None)')
@@ -189,8 +255,7 @@ class LLMClient:
         max_tokens: int | None = None,
     ) -> str:
         """Send a chat completion request and return the response text."""
-        if params is None:
-            params = GenerationParams()
+        params = self._resolve_params(params)
         kwargs: dict = dict(
             model=self._model,
             messages=messages,
@@ -208,6 +273,80 @@ class LLMClient:
         response = await self._create(**kwargs)
         return _extract_content(response.choices[0].message)
 
+    async def complete_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        params: GenerationParams | None = None,
+        max_tokens: int | None = None,
+    ) -> dict:
+        """Chat completion с tools (function calling). Streaming под капотом.
+
+        Возвращает dict вида ``{'choices': [{'message': {...}, 'finish_reason': '...'}]}`` —
+        совместимый с OpenAI-API форматом, чтобы агентский цикл мог итерироваться
+        по `message.tool_calls` так же как над raw API JSON.
+
+        ВНИМАНИЕ: используем streaming чтобы обойти строгую серверную валидацию
+        ``tool_choice='auto'`` у некоторых vLLM-инсталляций (xAI Grok). Без stream
+        сервер требует ``--enable-auto-tool-choice`` на старте и реджектит запрос с tools.
+        Возвращаем агрегированный финал — потребитель не видит разницы со streamingом.
+
+        Использование: retrieval-pipeline (`services/pipeline/morag_pipeline.py`) —
+        агент выбирает между `search()` / `get_neighbors()` / финальным ответом.
+        """
+        params = self._resolve_params(params)
+        kwargs: dict = dict(
+            model=self._model,
+            messages=messages,
+            tools=tools,
+            stream=True,
+            temperature=params.temperature,
+            top_p=params.top_p,
+            **self._penalty_kwargs(params),
+        )
+        if params.seed is not None:
+            kwargs['seed'] = params.seed
+        extra_body = _build_extra_body(params)
+        if extra_body:
+            kwargs['extra_body'] = extra_body
+        if max_tokens is not None:
+            kwargs['max_tokens'] = max_tokens
+
+        async with self._inflight_cap():
+            stream = await self._client.chat.completions.create(**kwargs)
+            content_parts: list[str] = []
+            tool_calls_by_idx: dict[int, dict] = {}
+            finish_reason = ''
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                choice = chunk.choices[0]
+                delta = choice.delta
+                if delta.content:
+                    content_parts.append(delta.content)
+                for tc in (delta.tool_calls or []):
+                    idx = tc.index
+                    slot = tool_calls_by_idx.setdefault(
+                        idx,
+                        {'id': '', 'type': 'function', 'function': {'name': '', 'arguments': ''}},
+                    )
+                    if tc.id:
+                        slot['id'] = tc.id
+                    if tc.type:
+                        slot['type'] = tc.type
+                    if tc.function:
+                        if tc.function.name:
+                            slot['function']['name'] += tc.function.name
+                        if tc.function.arguments:
+                            slot['function']['arguments'] += tc.function.arguments
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
+
+        message: dict = {'role': 'assistant', 'content': ''.join(content_parts)}
+        if tool_calls_by_idx:
+            message['tool_calls'] = [tool_calls_by_idx[i] for i in sorted(tool_calls_by_idx)]
+        return {'choices': [{'message': message, 'finish_reason': finish_reason}]}
+
     async def complete_vision(
         self,
         prompt: str,
@@ -221,8 +360,7 @@ class LLMClient:
         Принимает изображение в формате base64 и текстовый запрос.
         Возвращает текстовое описание изображения.
         """
-        if params is None:
-            params = GenerationParams()
+        params = self._resolve_params(params)
         messages = [
             {
                 'role': 'user',
@@ -257,14 +395,14 @@ class LLMClient:
         schema: dict,
         schema_name: str = 'response',
         params: GenerationParams | None = None,
+        max_tokens: int | None = None,
     ) -> dict:
         """Send a chat completion request expecting a JSON response matching the given schema.
 
         Passes response_format={"type": "json_schema", ...} to enforce structured output.
         Raises ValueError if the response cannot be parsed.
         """
-        if params is None:
-            params = GenerationParams()
+        params = self._resolve_params(params)
         kwargs: dict = dict(
             model=self._model,
             messages=messages,
@@ -281,6 +419,8 @@ class LLMClient:
         extra_body = _build_extra_body(params)
         if extra_body:
             kwargs['extra_body'] = extra_body
+        if max_tokens is not None:
+            kwargs['max_tokens'] = max_tokens
         response = await self._create(**kwargs)
         content = _extract_content(response.choices[0].message) or '{}'
         logger.debug('LLM raw response: %s', content)

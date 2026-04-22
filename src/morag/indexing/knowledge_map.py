@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import re
 from collections import defaultdict
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
 from morag.indexing.token_counter import TokenCounter, TiktokenCounter
-from morag.llm.client import GenerationParams
 from morag.sources.base import Document
 from morag.storage.repository import DocRepository
 
@@ -82,6 +83,34 @@ Requirements:
 """
 
 
+_SLUG_RE = re.compile(r'[^a-z0-9]+')
+
+
+def _slugify(text: str, fallback: str = 'topic') -> str:
+    """Простейший транслит в ascii-slug. Кириллица → транслит, остальное режется."""
+    table = {
+        'а':'a','б':'b','в':'v','г':'g','д':'d','е':'e','ё':'e','ж':'zh','з':'z',
+        'и':'i','й':'y','к':'k','л':'l','м':'m','н':'n','о':'o','п':'p','р':'r',
+        'с':'s','т':'t','у':'u','ф':'f','х':'h','ц':'c','ч':'ch','ш':'sh','щ':'sch',
+        'ъ':'','ы':'y','ь':'','э':'e','ю':'yu','я':'ya',
+    }
+    s = text.lower().strip()
+    s = ''.join(table.get(ch, ch) for ch in s)
+    s = _SLUG_RE.sub('_', s).strip('_')
+    return s or fallback
+
+
+def _first_sentence(s: str, max_chars: int = 240) -> str:
+    """Вернуть первое предложение строки или первые max_chars символов."""
+    s = (s or '').strip().replace('\n', ' ')
+    if not s:
+        return ''
+    m = re.search(r'[.!?](?:\s|$)', s[:max_chars + 50])
+    if m:
+        return s[:m.end()].strip()
+    return s[:max_chars].strip()
+
+
 def _node_title(doc: Document, parent: Document | None = None) -> str:
     """Получить название узла: из поля title или fallback на path."""
     if doc.title:
@@ -91,14 +120,6 @@ def _node_title(doc: Document, parent: Document | None = None) -> str:
     full_path = doc.path[0]
     last_slash = full_path.rfind('/')
     return full_path[last_slash + 1:] if last_slash >= 0 else full_path
-
-
-def _llm_params(enable_thinking: bool | None = None) -> GenerationParams:
-    return GenerationParams(
-        temperature=0.0, top_p=1.0, top_k=0,
-        frequency_penalty=0.0, presence_penalty=0.0, seed=42,
-        enable_thinking=enable_thinking,
-    )
 
 
 class KnowledgeMapGenerator:
@@ -117,10 +138,12 @@ class KnowledgeMapGenerator:
         prompt_strategy: str = 'fixed',
         prompt_budget: int = 8192,
         token_counter: TokenCounter | None = None,
-        context_window: int = 32768,
-        enable_thinking: bool | None = None,
         concurrency: int = 4,
         exclude_source_types: list[str] | None = None,
+        flat_topics_target: int | None = None,
+        flat_topics_max_input_docs: int = 3000,
+        flat_topics_assign_batch: int = 5,
+        depth1_section_ids: list[str] | None = None,
     ) -> None:
         self._client = client
         self._llm_client = llm_client
@@ -133,10 +156,12 @@ class KnowledgeMapGenerator:
         self._prompt_strategy = prompt_strategy
         self._prompt_budget = prompt_budget
         self._counter = token_counter or TiktokenCounter()
-        self._context_window = context_window
-        self._params = _llm_params(enable_thinking)
         self._sem = asyncio.Semaphore(concurrency)
         self._exclude_source_types = frozenset(exclude_source_types or [])
+        self._flat_topics_target = flat_topics_target
+        self._flat_topics_max_input_docs = flat_topics_max_input_docs
+        self._flat_topics_assign_batch = flat_topics_assign_batch
+        self._depth1_section_ids = frozenset(depth1_section_ids or [])
 
     async def ensure_collection(self) -> None:
         """Создать коллекцию для карт если не существует."""
@@ -171,6 +196,21 @@ class KnowledgeMapGenerator:
         if not all_docs:
             logger.warning('KnowledgeMap: no documents found')
             return {}
+
+        # flat_topics: LLM-кластеризация плоского списка в темы.
+        # Не использует существующий tree-building — собирает prompt напрямую.
+        if self._prompt_strategy == 'flat_topics':
+            map_text, membership = await self._build_flat_topics_prompt(all_docs)
+            maps = {'_system_prompt': map_text}
+            logger.info(
+                'KnowledgeMap: flat_topics prompt built (%d chars, %d tok, %d clusters)',
+                len(map_text), self._counter.count(map_text), len(membership),
+            )
+            await self._save_maps(
+                maps,
+                extra_points=[('_cluster_membership', {'cluster_membership': membership})],
+            )
+            return maps
 
         # Построить дерево
         children_map = defaultdict(list)  # parent_id → [child_docs]
@@ -233,8 +273,10 @@ class KnowledgeMapGenerator:
         """
         children = children_map.get(doc.id, [])
 
-        # Лист или достигли max_depth (если задан) — возвращаем doc_summary
-        if not children or (self._max_depth is not None and depth >= self._max_depth):
+        # Лист, достигли max_depth, или shallow-раздел — возвращаем doc_summary
+        if (not children
+                or (self._max_depth is not None and depth >= self._max_depth)
+                or doc.id in self._depth1_section_ids):
             summary = doc.payload.get('doc_summary', '')
             title = _node_title(doc)
             return f'{title} (id: {doc.id}): {summary}' if summary else ''
@@ -243,7 +285,7 @@ class KnowledgeMapGenerator:
         prompt_overhead = self._counter.count(
             _MAP_PROMPT.format(section_title='', children_summaries=''),
         )
-        available = self._context_window - prompt_overhead - self._node_max_tokens
+        available = self._llm_client.context_window - prompt_overhead - self._node_max_tokens
 
         # Собираем сырую карту: h-заголовки + doc_summary всех потомков рекурсивно
         raw_lines: list[str] = []
@@ -336,7 +378,6 @@ class KnowledgeMapGenerator:
             try:
                 result = await self._llm_client.complete(
                     [{'role': 'user', 'content': prompt}],
-                    params=self._params,
                     max_tokens=max_tokens if max_tokens is not None else self._node_max_tokens,
                 )
                 return result.strip()
@@ -407,15 +448,16 @@ class KnowledgeMapGenerator:
         #    Остальные — пропорционально числу потомков
         budgeted_nodes = [
             (doc, hl, dc) for doc, hl, dc in nodes
-            if hl > 1 or not children_map.get(doc.id)  # non-root OR leaf root
+            if hl > 1 or not children_map.get(doc.id) or doc.id in self._depth1_section_ids
         ]
         total_weight = sum(dc + 1 for _, _, dc in budgeted_nodes) or 1
 
         budgets: dict[str, int] = {}
         for doc, hl, dc in nodes:
             has_children = bool(children_map.get(doc.id))
-            if hl == 1 and has_children:
-                budgets[doc.id] = 0  # корни с потомками — без описания
+            is_depth1 = doc.id in self._depth1_section_ids
+            if hl == 1 and has_children and not is_depth1:
+                budgets[doc.id] = 0  # корни с потомками — без описания (дети опишут)
             else:
                 weight = dc + 1
                 budgets[doc.id] = max(self._node_min_tokens, available * weight // total_weight)
@@ -450,9 +492,18 @@ class KnowledgeMapGenerator:
         for doc in docs:
             dc = self._count_all_descendants(doc.id, children_map)
             nodes.append((doc, heading_level, dc))
-            children = children_map.get(doc.id, [])
-            if children and heading_level < self._depth:
-                self._collect_prompt_nodes(children, children_map, nodes, heading_level + 1)
+            if doc.id in self._depth1_section_ids:
+                children_count = len(children_map.get(doc.id, []))
+                logger.info(
+                    'depth1_section_ids: skipping children of %s (%s), '
+                    '%d direct children not expanded',
+                    doc.id, _node_title(doc), children_count,
+                )
+                continue
+            if doc.id not in self._depth1_section_ids:
+                children = children_map.get(doc.id, [])
+                if children and heading_level < self._depth:
+                    self._collect_prompt_nodes(children, children_map, nodes, heading_level + 1)
 
     def _count_all_descendants(
         self, doc_id: str, children_map: dict[str, list[Document]],
@@ -509,13 +560,14 @@ class KnowledgeMapGenerator:
         else:
             lines.append(f'{prefix} {title} (id: {doc.id})\n')
 
-        children = children_map.get(doc.id, [])
-        if children and heading_level < self._depth:
-            for child in children:
-                await self._append_node_weighted(
-                    child, children_map, maps, lines,
-                    heading_level + 1, budgets=budgets, parent=doc,
-                )
+        if doc.id not in self._depth1_section_ids:
+            children = children_map.get(doc.id, [])
+            if children and heading_level < self._depth:
+                for child in children:
+                    await self._append_node_weighted(
+                        child, children_map, maps, lines,
+                        heading_level + 1, budgets=budgets, parent=doc,
+                    )
 
     async def _append_node_to_prompt(
         self,
@@ -548,13 +600,13 @@ class KnowledgeMapGenerator:
         else:
             lines.append(f'{prefix} {title} (id: {doc.id})\n')
 
-        # Потомки до depth
-        children = children_map.get(doc.id, [])
-        if children and heading_level < self._depth:
-            for child in children:
-                await self._append_node_to_prompt(
-                    child, children_map, maps, lines, heading_level + 1, parent=doc,
-                )
+        if doc.id not in self._depth1_section_ids:
+            children = children_map.get(doc.id, [])
+            if children and heading_level < self._depth:
+                for child in children:
+                    await self._append_node_to_prompt(
+                        child, children_map, maps, lines, heading_level + 1, parent=doc,
+                    )
 
     def _append_node(
         self,
@@ -599,7 +651,6 @@ class KnowledgeMapGenerator:
             try:
                 result = await self._llm_client.complete(
                     [{'role': 'user', 'content': prompt}],
-                    params=self._params,
                     max_tokens=budget,
                 )
                 return result.strip()
@@ -661,7 +712,6 @@ class KnowledgeMapGenerator:
             try:
                 result = await self._llm_client.complete(
                     [{'role': 'user', 'content': prompt}],
-                    params=self._params,
                     max_tokens=target_tokens,
                 )
                 return result.strip()
@@ -669,13 +719,311 @@ class KnowledgeMapGenerator:
                 logger.exception('KnowledgeMap: compact failed, using truncated')
                 return self._counter.truncate(layer_text, target_tokens)
 
+    # ── flat_topics strategy ──────────────────────────────────────────────
+
+    async def _build_flat_topics_prompt(
+        self, docs: list[Document],
+    ) -> tuple[str, dict[str, list[str]]]:
+        """Построить system prompt и membership для плоского источника.
+
+        Возвращает кортеж (map_text, cluster_membership), где
+        cluster_membership — `{cluster_id: [doc_id, ...]}` для разворота
+        section_ids в retrieval-слое.
+
+        TODO: многоуровневая рекурсия — если какая-то тема содержит много
+        документов, кластеризовать её саму вторым проходом. Для >3000 доков
+        также нужен батчинг + merge-проход.
+        """
+        if len(docs) > self._flat_topics_max_input_docs:
+            raise ValueError(
+                f'flat_topics: {len(docs)} docs exceeds safety limit '
+                f'{self._flat_topics_max_input_docs}. Implement batching or '
+                f'raise flat_topics_max_input_docs.',
+            )
+
+        target_n = self._flat_topics_target or min(max(4, math.ceil(math.sqrt(len(docs)))), 40)
+
+        # Детерминированный порядок для стабильных прогонов
+        docs_sorted = sorted(docs, key=lambda d: d.id)
+        clusters = await self._cluster_docs_llm(docs_sorted, target_n)
+        map_text = self._render_flat_topics_prompt(clusters, docs_sorted)
+        membership = {cl['id']: [d.id for d in cl['docs']] for cl in clusters}
+        return map_text, membership
+
+    async def _cluster_docs_llm(
+        self, docs: list[Document], target_n: int,
+    ) -> list[dict]:
+        """Двухпроходная LLM-кластеризация.
+
+        Проход 1: все заголовки+summary без id → LLM выделяет N тем (name + \
+        summary). Маленький вывод, grok справляется надёжно.
+
+        Проход 2: для каждого документа параллельно (батчами) LLM решает \
+        в какую тему он входит. Каждый батч — изолированный контекст с \
+        номерами тем; grok больше не тащит тысячу id.
+
+        Возвращает: `[{'name', 'summary', 'docs': [Document, ...]}]`
+        """
+        topics = await self._generate_topics(docs, target_n)
+        if not topics:
+            logger.warning('flat_topics: LLM returned no topics, using single fallback cluster')
+            return [{
+                'name': 'Все документы',
+                'summary': 'Темы не сгенерированы.',
+                'docs': list(docs),
+            }]
+
+        assignments = await self._assign_docs_to_topics(docs, topics)
+
+        # Собираем результат. Индекс -1 → fallback.
+        clusters: list[dict] = [
+            {'name': t['name'], 'summary': t['summary'], 'docs': []}
+            for t in topics
+        ]
+        missing: list[Document] = []
+        for doc, idx in zip(docs, assignments):
+            if 0 <= idx < len(clusters):
+                clusters[idx]['docs'].append(doc)
+            else:
+                missing.append(doc)
+
+        # Отбросить пустые темы — LLM мог сгенерировать лишнее
+        non_empty = [c for c in clusters if c['docs']]
+        if missing:
+            logger.warning(
+                'flat_topics: %d/%d docs unassigned, placing into fallback cluster',
+                len(missing), len(docs),
+            )
+            non_empty.append({
+                'name': 'Без темы',
+                'summary': 'Документы, которые не удалось отнести к конкретной тематике.',
+                'docs': missing,
+            })
+
+        # Назначить уникальные slug-id для ссылок из section_ids
+        used_ids: set[str] = set()
+        for cl in non_empty:
+            base = _slugify(cl['name'])
+            cid = base
+            i = 2
+            while cid in used_ids:
+                cid = f'{base}_{i}'
+                i += 1
+            used_ids.add(cid)
+            cl['id'] = cid
+
+        logger.info(
+            'flat_topics: %d topics → %d non-empty clusters, %d docs placed',
+            len(topics), len(non_empty), sum(len(c['docs']) for c in non_empty),
+        )
+        return non_empty
+
+    async def _generate_topics(
+        self, docs: list[Document], target_n: int,
+    ) -> list[dict]:
+        """Проход 1: по всем doc_summary сгенерировать N тем без id.
+
+        Возвращает `[{'name': str, 'summary': str}]`.
+        """
+        n_docs = len(docs)
+        min_n = max(4, target_n - 5)
+        max_n = target_n + 10
+
+        lines = []
+        for d in docs:
+            title = _node_title(d)
+            summary = (d.payload.get('doc_summary') or '').strip().replace('\n', ' ')
+            lines.append(f'- **{title}** — {summary}' if summary else f'- **{title}**')
+        catalog = '\n'.join(lines)
+
+        prompt = f"""\
+На входе — {n_docs} документов (только title + первое предложение summary, \
+без идентификаторов). Твоя задача: предложить **от {min_n} до {max_n}** \
+навигационных тематик (оптимум ~{target_n}) так, чтобы по ним можно было \
+решить «в какой теме искать ответ на мой вопрос».
+
+Требования к темам:
+- Каждая тема покрывает осмысленную группу документов; тем не слишком \
+  много и не слишком мало.
+- Избегай общих меток вроде «Разное», «Прочее», «Новости». Примеры \
+  хороших названий: «Автомобильный рынок», «Госполитика и законы», \
+  «Происшествия и суды», «Шоубиз и культура».
+- Все темы должны быть взаимно-исключающими.
+
+Для каждой темы верни:
+- `name`: короткое название, 2–6 слов, по-русски
+- `summary`: 1–2 предложения о том, что в теме лежит и какие вопросы она \
+  покрывает
+
+Идентификаторы документов в ответе НЕ нужны — мы раскидаем документы по \
+темам отдельным проходом.
+
+Список документов:
+{catalog}
+"""
+
+        schema = {
+            'type': 'object',
+            'properties': {
+                'topics': {
+                    'type': 'array',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'name': {'type': 'string'},
+                            'summary': {'type': 'string'},
+                        },
+                        'required': ['name', 'summary'],
+                    },
+                },
+            },
+            'required': ['topics'],
+        }
+
+        logger.info('flat_topics pass 1: generating ~%d topics from %d docs', target_n, n_docs)
+        response = await self._llm_client.complete_json(
+            messages=[{'role': 'user', 'content': prompt}],
+            schema=schema,
+            schema_name='topics',
+            max_tokens=4096,
+        )
+        topics = []
+        for t in response.get('topics') or []:
+            name = (t.get('name') or '').strip()
+            summary = (t.get('summary') or '').strip()
+            if name:
+                topics.append({'name': name, 'summary': summary})
+        logger.info('flat_topics pass 1: got %d topics', len(topics))
+        return topics
+
+    async def _assign_docs_to_topics(
+        self, docs: list[Document], topics: list[dict],
+    ) -> list[int]:
+        """Проход 2: для каждого документа вернуть индекс темы (0..N-1) или -1.
+
+        Батчи по ~20 документов, параллельно через `self._sem`.
+        """
+        topics_block = '\n'.join(
+            f'{i}. **{t["name"]}** — {t["summary"]}'
+            for i, t in enumerate(topics)
+        )
+        n_topics = len(topics)
+        batch_size = self._flat_topics_assign_batch
+
+        async def _classify_batch(batch_idx: int, batch: list[Document]) -> list[int]:
+            def _fmt(d: Document) -> str:
+                title = _node_title(d)
+                summary = (d.payload.get('doc_summary') or '').strip().replace('\n', ' ')
+                return f'**{title}** — {summary}' if summary else f'**{title}**'
+            items_block = '\n'.join(
+                f'[{j}] {_fmt(d)}' for j, d in enumerate(batch)
+            )
+            prompt = f"""\
+У тебя есть список из {n_topics} тематик:
+
+{topics_block}
+
+Ниже — {len(batch)} документ(ов). Для каждого определи номер темы \
+(целое число от 0 до {n_topics - 1}), к которой он относится. Выбирай \
+ровно одну тему на документ. Если документ очевидно не подходит ни под \
+одну — всё равно выбери самую близкую.
+
+Документы:
+{items_block}
+
+Верни массив `assignments` длины {len(batch)} — i-й элемент это индекс \
+темы для i-го документа.
+"""
+            schema = {
+                'type': 'object',
+                'properties': {
+                    'assignments': {
+                        'type': 'array',
+                        'items': {'type': 'integer'},
+                    },
+                },
+                'required': ['assignments'],
+            }
+            async with self._sem:
+                try:
+                    response = await self._llm_client.complete_json(
+                        messages=[{'role': 'user', 'content': prompt}],
+                        schema=schema,
+                        schema_name='topic_assignments',
+                        max_tokens=1024,
+                    )
+                    raw = response.get('assignments') or []
+                    # Нормализуем: усечь/дополнить до размера батча
+                    out: list[int] = []
+                    for k in range(len(batch)):
+                        val = raw[k] if k < len(raw) else -1
+                        if isinstance(val, int) and 0 <= val < n_topics:
+                            out.append(val)
+                        else:
+                            out.append(-1)
+                    return out
+                except Exception:
+                    logger.exception(
+                        'flat_topics pass 2: batch %d classification failed', batch_idx,
+                    )
+                    return [-1] * len(batch)
+
+        batches = [docs[i:i + batch_size] for i in range(0, len(docs), batch_size)]
+        logger.info(
+            'flat_topics pass 2: classifying %d docs in %d batches of %d',
+            len(docs), len(batches), batch_size,
+        )
+        results = await asyncio.gather(
+            *(_classify_batch(i, b) for i, b in enumerate(batches)),
+        )
+        # Плоский список в исходном порядке
+        assignments: list[int] = []
+        for r in results:
+            assignments.extend(r)
+        return assignments
+
+    def _render_flat_topics_prompt(
+        self, clusters: list[dict], docs: list[Document],
+    ) -> str:
+        """Собрать итоговый markdown из кластеров.
+
+        Формат:
+            # Карта документации
+
+            ## {cluster.name}
+            {cluster.summary}
+
+            - **{doc.title}** (id: {doc.id})
+            - ...
+
+            ## {cluster2.name}
+            ...
+        """
+        lines: list[str] = ['# Карта документации', '']
+        for cl in clusters:
+            cid = cl.get('id', '')
+            header = f'## {cl["name"]}'
+            if cid:
+                header += f' (id: {cid})'
+            lines.append(header)
+            if cl.get('summary'):
+                lines.append(cl['summary'])
+            lines.append('')
+            for doc in cl['docs']:
+                title = _node_title(doc)
+                lines.append(f'- **{title}** (id: {doc.id})')
+            lines.append('')
+        return '\n'.join(lines).rstrip() + '\n'
+
+    # ── tree loading ──────────────────────────────────────────────────────
+
     async def _load_all_docs(self) -> list[Document]:
         """Загрузить все документы из Qdrant."""
         all_docs = []
         offset = None
         while True:
             results = await self._client.scroll(
-                collection_name='docs',
+                collection_name=self._doc_repo.collection,
                 limit=100,
                 offset=offset,
                 with_payload=True,
@@ -702,9 +1050,17 @@ class KnowledgeMapGenerator:
                 break
         return all_docs
 
-    async def _save_maps(self, maps: dict[str, str]) -> None:
-        """Сохранить карты в Qdrant."""
-        if not maps:
+    async def _save_maps(
+        self,
+        maps: dict[str, str],
+        extra_points: list[tuple[str, dict]] | None = None,
+    ) -> None:
+        """Сохранить карты и произвольные extra-точки в Qdrant.
+
+        extra_points: список `(doc_id, payload)` для записи рядом с map-точками.
+        Используется flat_topics для хранения membership.
+        """
+        if not maps and not extra_points:
             return
 
         # Очистить коллекцию
@@ -724,9 +1080,20 @@ class KnowledgeMapGenerator:
                     'map_text': map_text,
                 },
             ))
+        if extra_points:
+            base = len(points)
+            for i, (doc_id, payload) in enumerate(extra_points):
+                points.append(PointStruct(
+                    id=base + i,
+                    vector=[0.0],
+                    payload={'doc_id': doc_id, **payload},
+                ))
 
         await self._client.upsert(
             collection_name=self._collection,
             points=points,
         )
-        logger.info('KnowledgeMap: saved %d maps to %s', len(points), self._collection)
+        logger.info(
+            'KnowledgeMap: saved %d point(s) to %s',
+            len(points), self._collection,
+        )

@@ -145,6 +145,7 @@ async def build_bm25_index(
     collection: str = 'chunks',
     batch_size: int = 64,
     include_doc_summary: bool = False,
+    include_chunk_context: bool = False,
 ) -> None:
     """Post-indexing: построить BM25 sparse vectors для всех чанков в коллекции.
 
@@ -178,7 +179,7 @@ async def build_bm25_index(
             collection_name=collection,
             limit=100,
             offset=offset,
-            with_payload=['text', 'doc_summary'],
+            with_payload=['text', 'doc_summary', 'context'],
             with_vectors=['full'],
         )
         if not points:
@@ -187,10 +188,16 @@ async def build_bm25_index(
             if not p.vector or not p.vector.get('full'):
                 skipped += 1
                 continue
-            text = p.payload.get('text', '')
+            parts = [p.payload.get('text', '')]
+            if include_chunk_context:
+                ctx = p.payload.get('context', '')
+                if ctx:
+                    parts.append(ctx)
             if include_doc_summary:
                 doc_summary = p.payload.get('doc_summary', '')
-                text = f'{text}\n{doc_summary}' if doc_summary else text
+                if doc_summary:
+                    parts.append(doc_summary)
+            text = '\n'.join(parts)
             all_points.append((p.id, text))
         if offset is None:
             break

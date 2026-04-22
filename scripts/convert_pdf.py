@@ -53,6 +53,7 @@ def _build_converter(config) -> VisionPdfConverter:
         max_retries=config.llm_vision.retry.max_retries,
         model_wait_seconds=config.llm_vision.model_wait_seconds,
         model_wait_retries=config.llm_vision.model_wait_retries,
+        enable_thinking=config.llm_vision.enable_thinking,
     )
     pdf_config = config.pdf
     gen_params = GenerationParams(
@@ -60,8 +61,6 @@ def _build_converter(config) -> VisionPdfConverter:
         repetition_penalty=pdf_config.repetition_penalty if pdf_config else None,
         frequency_penalty=pdf_config.frequency_penalty if pdf_config else 0.0,
         presence_penalty=pdf_config.presence_penalty if pdf_config else 0.0,
-        seed=42,
-        enable_thinking=config.llm_vision.enable_thinking if config.llm_vision else None,
     )
     postprocessors = _build_postprocessors(pdf_config) if pdf_config else []
     return VisionPdfConverter(

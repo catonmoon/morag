@@ -16,9 +16,26 @@ coverage_html/
 # Env
 .env
 config.yml
+# Все env-specific configs (содержат api_keys, base_urls конкретных провайдеров).
+# Публичный пример — config.example.yml.
+config.*.yml
+!config.example.yml
+
+# Local docker-compose override (не для production)
+docker-compose.override.yml
 
 # Reports — experiment logs
 reports/
+
+# Research artifacts с реальными provider URL'ами и логами прогонов
+adventures/
+experiments/
+
+# Локальные research-runners с захардкоженными OWUI/xAI ключами
+scripts/run_arena.py
+scripts/run_dragon_native.py
+scripts/run_dragon_questions.py
+scripts/run_scorpi.py
 
 # Claude Code internal instructions — never commit
 CLAUDE.md

@@ -18,13 +18,14 @@ RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
 # Скачать nltk stopwords (русские + английские) для BM25
 RUN python -c "import nltk; nltk.download('stopwords', download_dir='/usr/local/nltk_data')"
 
-# Embedding-модели загружаются через HTTP-серверы (embedder-frida, embedder-gte).
-# Раскомментировать если нужен локальный запуск эмбеддеров внутри контейнера индексатора:
-# RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('ai-forever/FRIDA')" && \
-#     python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('ai-forever/FRIDA')"
-# RUN python -c "from transformers import AutoTokenizer, AutoModelForTokenClassification; \
-#     AutoTokenizer.from_pretrained('Alibaba-NLP/gte-multilingual-base'); \
-#     AutoModelForTokenClassification.from_pretrained('Alibaba-NLP/gte-multilingual-base', trust_remote_code=True)"
+# Скачать токенизатор Qwen3-Embedding-4B заранее — HuggingFaceTokenCounter
+# использует его для точного подсчёта токенов в SectionChunker/HybridChunker.
+# Без этого первый запуск индексатора будет тянуть ~6 MB с HuggingFace.
+RUN python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('Qwen/Qwen3-Embedding-4B')"
+
+# Embedding-модели (dense и sparse) сами раздаются через HTTP:
+#   - dense: Qwen3-Embedding-4B через Ollama на хосте (host.docker.internal:11434)
+#   - sparse: embedder-gte сервис из docker-compose
 
 # Исходный код
 COPY src/ ./src/

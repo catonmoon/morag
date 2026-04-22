@@ -348,11 +348,13 @@ class IndexingPipeline:
                 chunk.payload['pages'] = cr.pages
             chunks.append(chunk)
 
-        # Применяем процессоры и сохраняем батчами
+        # Применяем процессоры и сохраняем батчами.
+        # process_batch — async (AsyncOpenAI / httpx.AsyncClient), параллелизм
+        # при concurrency>1 достигается естественно через event loop.
         for batch_start in range(0, len(chunks), self._embed_batch_size):
             batch = chunks[batch_start:batch_start + self._embed_batch_size]
             for processor in self._chunk_processors:
-                batch = processor.process_batch(batch, document)
+                batch = await processor.process_batch(batch, document)
             for chunk in batch:
                 vec_summary = ', '.join(
                     f"{k}:dense({len(v)})" if isinstance(v, list)
