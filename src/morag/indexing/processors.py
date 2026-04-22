@@ -54,13 +54,13 @@ class ChunkProcessor(ABC):
     """
 
     @abstractmethod
-    def process(self, chunk: Chunk, document: Document) -> Chunk:
+    async def process(self, chunk: Chunk, document: Document) -> Chunk:
         """Обработать чанк и вернуть обновлённую версию."""
         ...
 
-    def process_batch(self, chunks: list[Chunk], document: Document) -> list[Chunk]:
+    async def process_batch(self, chunks: list[Chunk], document: Document) -> list[Chunk]:
         """Батчевая обработка чанков. По умолчанию вызывает process() по одному."""
-        return [self.process(c, document) for c in chunks]
+        return [await self.process(c, document) for c in chunks]
 
 
 class DenseEmbeddingProcessor(ChunkProcessor):
@@ -77,16 +77,16 @@ class DenseEmbeddingProcessor(ChunkProcessor):
     def _full_text(chunk: Chunk) -> str:
         return f'{"\n".join(chunk.path)}\n{chunk.text}\n{chunk.context}'
 
-    def process(self, chunk: Chunk, document: Document) -> Chunk:
-        chunk.vectors['full'] = self._embedder.embed(self._full_text(chunk))
+    async def process(self, chunk: Chunk, document: Document) -> Chunk:
+        chunk.vectors['full'] = await self._embedder.embed(self._full_text(chunk))
         return chunk
 
-    def process_batch(self, chunks: list[Chunk], document: Document) -> list[Chunk]:
+    async def process_batch(self, chunks: list[Chunk], document: Document) -> list[Chunk]:
         """Батчевый эмбеддинг всех чанков документа за один вызов."""
         if not chunks:
             return chunks
         texts = [self._full_text(c) for c in chunks]
-        vectors = self._embedder.embed_batch(texts)
+        vectors = await self._embedder.embed_batch(texts)
         for chunk, vec in zip(chunks, vectors):
             chunk.vectors['full'] = vec
         return chunks
@@ -124,17 +124,17 @@ class SparseEmbeddingProcessor(ChunkProcessor):
                 parts.append(doc_summary)
         return '\n'.join(parts)
 
-    def process(self, chunk: Chunk, document: Document) -> Chunk:
-        indices, values = self._embedder.embed(self._sparse_text(chunk, document))
+    async def process(self, chunk: Chunk, document: Document) -> Chunk:
+        indices, values = await self._embedder.embed(self._sparse_text(chunk, document))
         chunk.vectors['keywords'] = {'indices': indices, 'values': values}
         return chunk
 
-    def process_batch(self, chunks: list[Chunk], document: Document) -> list[Chunk]:
+    async def process_batch(self, chunks: list[Chunk], document: Document) -> list[Chunk]:
         """Батчевый sparse-эмбеддинг всех чанков документа за один вызов."""
         if not chunks:
             return chunks
         texts = [self._sparse_text(c, document) for c in chunks]
-        results = self._embedder.embed_batch(texts)
+        results = await self._embedder.embed_batch(texts)
         for chunk, (indices, values) in zip(chunks, results):
             chunk.vectors['keywords'] = {'indices': indices, 'values': values}
         return chunks
@@ -416,14 +416,14 @@ class PageMarkerProcessor(ChunkProcessor):
     маркера, он наследует последнюю известную страницу от предыдущих чанков.
     """
 
-    def process(self, chunk: Chunk, document: Document) -> Chunk:
+    async def process(self, chunk: Chunk, document: Document) -> Chunk:
         markers = _PAGE_MARKER_RE.findall(chunk.text)
         if markers:
             chunk.payload['pages'] = sorted({int(m) for m in markers})
         chunk.text = _PAGE_MARKER_RE.sub('', chunk.text)
         return chunk
 
-    def process_batch(self, chunks: list[Chunk], document: Document) -> list[Chunk]:
+    async def process_batch(self, chunks: list[Chunk], document: Document) -> list[Chunk]:
         last_page: int | None = None
         for chunk in chunks:
             markers = _PAGE_MARKER_RE.findall(chunk.text)
@@ -444,7 +444,7 @@ class MetadataProcessor(ChunkProcessor):
     в результатах поиска без дополнительных запросов к коллекции docs.
     """
 
-    def process(self, chunk: Chunk, document: Document) -> Chunk:
+    async def process(self, chunk: Chunk, document: Document) -> Chunk:
         chunk.payload['source_type'] = document.source_type
         if document.creator is not None:
             chunk.payload['creator'] = document.creator

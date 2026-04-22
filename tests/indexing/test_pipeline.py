@@ -363,7 +363,7 @@ class TestIndexingPipelineRun:
         doc_repo.get_by_id.return_value = None
 
         class TagProcessor(ChunkProcessor):
-            def process(self, chunk, document):
+            async def process(self, chunk, document):
                 chunk.payload['tagged'] = True
                 return chunk
 

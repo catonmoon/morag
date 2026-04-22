@@ -2,7 +2,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from morag.llm.client import GenerationParams, LLMClient
+from morag.llm.client import GenerationParams, LLMClient, _reset_shared_semaphores
+
+
+@pytest.fixture(autouse=True)
+def _clear_shared_semaphores():
+    """Изолируем тесты — registry shared semaphores чистится перед каждым тестом."""
+    _reset_shared_semaphores()
+    yield
+    _reset_shared_semaphores()
 
 
 def make_completion(content: str, reasoning: str | None = None):
@@ -356,16 +364,39 @@ class TestPenaltyKwargs:
 # Rate limiter
 # ---------------------------------------------------------------------------
 
-class TestRateLimiter:
-    def test_no_limiter_by_default(self):
+class TestInflightCap:
+    def test_no_semaphore_by_default(self):
         with patch('morag.llm.client.AsyncOpenAI'):
             client = LLMClient(base_url='http://test', model='test')
-            assert client._rate_limiter is None
+            assert client._semaphore is None
 
-    def test_limiter_created_with_max_rpm(self):
+    def test_semaphore_created_with_max_concurrent(self):
         with patch('morag.llm.client.AsyncOpenAI'):
-            client = LLMClient(base_url='http://test', model='test', max_rpm=60)
-            assert client._rate_limiter is not None
+            client = LLMClient(base_url='http://test', model='m1', max_concurrent=8)
+            assert client._semaphore is not None
+
+    def test_semaphore_shared_for_same_base_url_and_model(self):
+        """Два клиента с одинаковым (base_url, model) делят один Semaphore."""
+        with patch('morag.llm.client.AsyncOpenAI'):
+            a = LLMClient(base_url='http://test', model='m-shared', max_concurrent=8)
+            b = LLMClient(base_url='http://test', model='m-shared', max_concurrent=8)
+        assert a._semaphore is b._semaphore
+
+    def test_semaphore_separate_for_different_models(self):
+        """Разные model → разные семафоры (per-model лимиты у OpenAI/OpenRouter)."""
+        with patch('morag.llm.client.AsyncOpenAI'):
+            a = LLMClient(base_url='http://test', model='m-x', max_concurrent=8)
+            b = LLMClient(base_url='http://test', model='m-y', max_concurrent=8)
+        assert a._semaphore is not b._semaphore
+
+    def test_warning_on_max_concurrent_mismatch(self, caplog):
+        """Если для (base_url, model) уже есть семафор с другим значением — warning."""
+        import logging
+        with patch('morag.llm.client.AsyncOpenAI'):
+            LLMClient(base_url='http://test', model='m-warn', max_concurrent=8)
+            with caplog.at_level(logging.WARNING, logger='morag.llm.client'):
+                LLMClient(base_url='http://test', model='m-warn', max_concurrent=16)
+        assert any('max_concurrent' in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@ import sys
 
 from qdrant_client import AsyncQdrantClient
 
-from morag.config import Config, DenseEmbedderConfig, PdfConfig, RetryConfig, SparseEmbedderConfig, load_config
+from morag.config import Config, DenseEmbedderConfig, PdfConfig, SparseEmbedderConfig, load_config
 from morag.indexing.bm25 import build_bm25_index
 from morag.indexing.chunker import (
     HybridChunker,
@@ -68,10 +68,6 @@ def _build_postprocessors(pdf_config: PdfConfig) -> list[PdfPostProcessor]:
     return processors
 
 
-def _make_retry(cfg: RetryConfig) -> RetryPolicy:
-    return RetryPolicy(max_retries=cfg.max_retries)
-
-
 def _make_dense_embedder(cfg: DenseEmbedderConfig) -> Embedder:
     if cfg.base_url is None:
         raise ValueError(
@@ -83,8 +79,9 @@ def _make_dense_embedder(cfg: DenseEmbedderConfig) -> Embedder:
         document_template=cfg.document_template,
         query_template=cfg.query_template,
         timeout=cfg.timeout,
-        retry_policy=_make_retry(cfg.retry),
+        max_retries=cfg.max_retries,
         max_rpm=cfg.max_rpm,
+        max_concurrent=cfg.max_concurrent,
     )
 
 
@@ -96,7 +93,8 @@ def _make_sparse_embedder(cfg: SparseEmbedderConfig) -> SparseEmbedder:
         )
     return HttpGteSparseEmbedder(
         cfg.base_url, cfg.timeout,
-        retry_policy=_make_retry(cfg.retry), max_rpm=cfg.max_rpm,
+        retry_policy=RetryPolicy(max_retries=cfg.max_retries),
+        max_rpm=cfg.max_rpm,
     )
 
 
@@ -184,8 +182,8 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         model=config.llm.model,
         api_key=config.llm.api_key,
         timeout=config.llm.timeout,
-        max_retries=config.llm.retry.max_retries,
-        max_rpm=config.llm.max_rpm,
+        max_retries=config.llm.max_retries,
+        max_concurrent=config.llm.max_concurrent,
         model_wait_seconds=config.llm.model_wait_seconds,
         model_wait_retries=config.llm.model_wait_retries,
         enable_thinking=config.llm.enable_thinking,
@@ -199,8 +197,8 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             model=config.llm_vision.model,
             api_key=config.llm_vision.api_key,
             timeout=config.llm_vision.timeout,
-            max_retries=config.llm_vision.retry.max_retries,
-            max_rpm=config.llm_vision.max_rpm,
+            max_retries=config.llm_vision.max_retries,
+            max_concurrent=config.llm_vision.max_concurrent,
             model_wait_seconds=config.llm_vision.model_wait_seconds,
             model_wait_retries=config.llm_vision.model_wait_retries,
             enable_thinking=config.llm_vision.enable_thinking,
@@ -259,7 +257,6 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         chunker = LLMChunker(
             llm_client,
             token_counter=llm_counter,
-            embed_fn=embedder.embed,
             halving_retries=config.indexing.chunker.halving_retries,
             fallback_enabled=config.indexing.chunker.fallback,
         )
@@ -278,7 +275,6 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             llm_chunker_for_hybrid = LLMChunker(
                 llm_client,
                 token_counter=llm_counter,
-                embed_fn=embedder.embed,
                 halving_retries=config.indexing.chunker.halving_retries,
                 fallback_enabled=config.indexing.chunker.fallback,
             )
@@ -487,8 +483,8 @@ async def cmd_rebuild_km(config_path: str) -> None:
         model=config.llm.model,
         api_key=config.llm.api_key,
         timeout=config.llm.timeout,
-        max_retries=config.llm.retry.max_retries,
-        max_rpm=config.llm.max_rpm,
+        max_retries=config.llm.max_retries,
+        max_concurrent=config.llm.max_concurrent,
         model_wait_seconds=config.llm.model_wait_seconds,
         model_wait_retries=config.llm.model_wait_retries,
         enable_thinking=config.llm.enable_thinking,

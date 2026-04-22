@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
+from typing import Literal
+
 from pydantic import BaseModel, model_validator
 
 
@@ -26,6 +28,12 @@ class ConfluenceConfig(BaseModel):
     ancestor_ids: list[str] = []       # фильтр по ancestor page id; пусто — без фильтра
     skip_ancestor_ids: list[str] = []  # исключить страницы и всех их потомков
     min_image_size_bytes: int | None = None  # пропускать изображения меньше этого размера (байт); None — без фильтрации
+    data_url_handling: Literal['skip', 'vision'] = 'skip'  # data:image base64 в HTML:
+    # 'skip' (default) — дропаем (обычно декорации из плагинов: флаги, иконки, smileys)
+    # 'vision' — отправляем в vision LLM как обычные картинки
+    decorative_image_patterns: list[str] = [
+        r'/images/icons/emoticons/',  # Confluence built-in emoticons: smile.svg, warning.svg, star_yellow.svg, etc.
+    ]  # regex-патёрны URL картинок которые считаются декоративными — дропаем без vision-вызова
     timeout: int = 180  # таймаут HTTP-запросов к Confluence API и скачивания изображений (секунды)
     max_retries: int = 3  # количество повторных попыток при сетевых ошибках (urllib3 Retry); 0 = без retry
     attachments: AttachmentsConfig = AttachmentsConfig()     # обработка вложений (PDF и др.)
@@ -54,10 +62,6 @@ class QdrantConfig(BaseModel):
     collection_chunks: str = 'chunks'
 
 
-class RetryConfig(BaseModel):
-    max_retries: int = 3    # количество повторных попыток (0 = без retry)
-
-
 class DocTitleConfig(BaseModel):
     max_tokens: int | None = None  # лимит токенов ответа LLM; None — генерация названия отключена
     scan_tokens: int = 32768       # глубина просмотра документа (токены от начала)
@@ -76,11 +80,12 @@ class LLMConfig(BaseModel):
     timeout: int = 180  # таймаут HTTP-запросов к LLM (секунды)
     context_window: int = 32768   # контекстное окно модели (токенов)
     max_tokens: int | None = None  # лимит токенов ответа; None — без ограничения
-    retry: RetryConfig = RetryConfig()
+    max_retries: int = 3          # повторы запросов SDK на 429/5xx/connect-errors
     model_wait_seconds: int = 0   # ожидание перезагрузки модели (сек); 0 = не ждать
     model_wait_retries: int = 0   # количество попыток ожидания модели
     enable_thinking: bool | None = None  # включить/выключить thinking; None = поведение модели по умолчанию
-    max_rpm: int | None = None    # лимит запросов в минуту; None = без ограничения
+    max_concurrent: int | None = None  # потолок одновременных in-flight запросов; None = без ограничения.
+    # Шарится между клиентами с одинаковым (base_url, model) — например llm и llm_vision на один провайдер.
 
 
 class DenseEmbedderConfig(BaseModel):
@@ -91,8 +96,10 @@ class DenseEmbedderConfig(BaseModel):
     document_template: str = '{text}'  # формат входа для embed(); {text} заменяется на текст чанка
     query_template: str = '{text}'     # формат входа для embed_query(); {text} заменяется на текст запроса
     timeout: int = 30             # таймаут HTTP-запросов (секунды)
-    retry: RetryConfig = RetryConfig()  # политика повторных попыток
+    max_retries: int = 3          # повторы запросов SDK на 429/5xx/connect-errors
     max_rpm: int | None = None    # лимит запросов в минуту; None = без ограничения
+    max_concurrent: int | None = None  # потолок одновременных in-flight запросов; None = без ограничения.
+    # Шарится с LLMClient через registry по (base_url, model) — например Ollama-сервер с одной GPU.
 
     @model_validator(mode='after')
     def _validate_http_dim(self) -> 'DenseEmbedderConfig':
@@ -108,7 +115,7 @@ class SparseEmbedderConfig(BaseModel):
     model: str = 'Alibaba-NLP/gte-multilingual-base'
     base_url: str | None = None   # OpenAI-совместимый endpoint; обязателен для индексации
     timeout: int = 30             # таймаут HTTP-запросов (секунды)
-    retry: RetryConfig = RetryConfig()  # политика повторных попыток
+    max_retries: int = 3          # повторы запросов на ошибки соединения
     max_rpm: int | None = None    # лимит запросов в минуту; None = без ограничения
 
 

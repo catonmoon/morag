@@ -69,7 +69,7 @@ indexing:
   dense_embedder:
     model: qwen3-embedding:4b
     tokenizer: Qwen/Qwen3-Embedding-4B  # нативный токенизатор (HF) для точного подсчёта
-    base_url: http://localhost:11434    # Ollama локально, или host.docker.internal:11434 из Docker
+    base_url: http://localhost:11434/v1  # Ollama OpenAI-compat (натив; Docker — host.docker.internal:11434/v1)
     dim: 2560
     timeout: 180
     document_template: '{text}'

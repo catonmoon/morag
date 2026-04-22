@@ -224,27 +224,6 @@ class TestLLMChunkerFallback:
         assert len(result) > 1
         assert client.complete_json.call_count == 2
 
-    async def test_semantic_fallback_with_embed_fn(self):
-        """С embed_fn — использует SemanticSplitter в цепочке."""
-        client = AsyncMock()
-        client.complete_json.side_effect = ValueError('invalid JSON')
-        counter = TiktokenCounter()
-
-        def fake_embed(text: str) -> list[float]:
-            h = hash(text) % 1000
-            return [float(h % (i + 1)) for i in range(10)]
-
-        chunker = LLMChunker(
-            client, token_counter=counter, embed_fn=fake_embed, fallback_enabled=True,
-        )
-
-        block = 'Слово. ' * 500
-        result = await chunker.chunk(block)
-
-        assert len(result) > 1
-        for chunk in result:
-            assert counter.count(chunk) <= 512
-
     async def test_fallback_markdown_headers_respected(self):
         """Fallback разрезает по заголовкам Markdown."""
         client = AsyncMock()
@@ -405,10 +384,10 @@ class TestLLMChunkerHalving:
 # ---------------------------------------------------------------------------
 
 def _make_batch_embed_fn(topic_vectors: dict[str, list[float]]):
-    """Мок батчевый embed_fn: возвращает вектор по первому найденному ключевому слову."""
+    """Мок батчевый async embed_fn: возвращает вектор по первому найденному ключевому слову."""
     default = [1.0, 0.0, 0.0]
 
-    def embed_fn(texts: list[str]) -> list[list[float]]:
+    async def embed_fn(texts: list[str]) -> list[list[float]]:
         result = []
         for text in texts:
             vec = default
@@ -424,7 +403,7 @@ def _make_batch_embed_fn(topic_vectors: dict[str, list[float]]):
 
 class TestSemanticChunker:
     def test_is_chunker(self):
-        def noop(texts: list[str]) -> list[list[float]]:
+        async def noop(texts: list[str]) -> list[list[float]]:
             return [[1.0, 0.0]] * len(texts)
 
         chunker = SemanticChunker(embed_fn=noop, counter=TiktokenCounter())
@@ -432,7 +411,7 @@ class TestSemanticChunker:
 
     async def test_short_block_returns_single_chunk(self):
         """Блок короче max_tokens возвращается целиком."""
-        def noop(texts: list[str]) -> list[list[float]]:
+        async def noop(texts: list[str]) -> list[list[float]]:
             return [[1.0, 0.0]] * len(texts)
 
         chunker = SemanticChunker(
@@ -470,7 +449,7 @@ class TestSemanticChunker:
 
     async def test_chunks_within_size_limits(self):
         """Все чанки (кроме, возможно, последнего) в пределах [min, max] токенов."""
-        def embed_fn(texts: list[str]) -> list[list[float]]:
+        async def embed_fn(texts: list[str]) -> list[list[float]]:
             return [
                 [float(hash(t) % 1000 % (i + 1)) for i in range(10)]
                 for t in texts
@@ -499,7 +478,7 @@ class TestSemanticChunker:
 
     async def test_preserves_all_content(self):
         """Все предложения сохраняются после разбиения."""
-        def embed_fn(texts: list[str]) -> list[list[float]]:
+        async def embed_fn(texts: list[str]) -> list[list[float]]:
             return [[1.0, 0.0]] * len(texts)
 
         counter = TiktokenCounter()
@@ -519,7 +498,7 @@ class TestSemanticChunker:
         """embed_fn вызывается батчем, а не по одному."""
         calls: list[int] = []
 
-        def tracking_embed_fn(texts: list[str]) -> list[list[float]]:
+        async def tracking_embed_fn(texts: list[str]) -> list[list[float]]:
             calls.append(len(texts))
             return [[1.0, 0.0, 0.0]] * len(texts)
 
@@ -563,7 +542,7 @@ class TestSemanticChunker:
 
     async def test_accept_pair_rejects_oversized_right(self):
         """accept_pair=True не принимает правый чанк > max_tokens (баг 873KB)."""
-        def embed_fn(texts: list[str]) -> list[list[float]]:
+        async def embed_fn(texts: list[str]) -> list[list[float]]:
             # Возвращаем максимально различные вектора для любых пар
             return [[float(i)] * 3 for i in range(len(texts))]
 
@@ -594,7 +573,7 @@ class TestSemanticChunker:
         """accept_pair=True принимает правый чанк когда он <= max_tokens."""
         call_count = [0]
 
-        def embed_fn(texts: list[str]) -> list[list[float]]:
+        async def embed_fn(texts: list[str]) -> list[list[float]]:
             call_count[0] += 1
             return [[float(i)] * 3 for i in range(len(texts))]
 
@@ -623,7 +602,7 @@ class TestSemanticChunker:
 
     async def test_candidate_ends_gap(self):
         """Если между min и max нет кандидатов — greedy_end берёт до max."""
-        def embed_fn(texts: list[str]) -> list[list[float]]:
+        async def embed_fn(texts: list[str]) -> list[list[float]]:
             return [[1.0, 0.0]] * len(texts)
 
         counter = TiktokenCounter()

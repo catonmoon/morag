@@ -117,7 +117,7 @@ indexing:
   dense_embedder:
     model: qwen3-embedding:4b               # Ollama-нотация, идёт в body
     tokenizer: Qwen/Qwen3-Embedding-4B      # нативный HF-токенизатор для точного подсчёта в чанкере
-    base_url: http://host.docker.internal:11434   # Docker; для локального прогона: http://localhost:11434
+    base_url: http://host.docker.internal:11434/v1   # Docker; для локального прогона: http://localhost:11434/v1
     dim: 2560                                # native dim Qwen3-Embedding-4B
     timeout: 180                             # первый прогрев Ollama может быть 30-60 сек
     document_template: '{text}'              # Qwen3 не требует префикса на документах

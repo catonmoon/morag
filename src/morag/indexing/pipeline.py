@@ -349,14 +349,12 @@ class IndexingPipeline:
             chunks.append(chunk)
 
         # Применяем процессоры и сохраняем батчами.
-        # process_batch — синхронный (HTTP через httpx.Client, блокирует event loop).
-        # Оборачиваем в asyncio.to_thread, чтобы при concurrency>1 документы реально
-        # эмбеддились параллельно (httpx.Client thread-safe, GIL освобождается на I/O).
-        # TODO: полная миграция на httpx.AsyncClient — задача #25.
+        # process_batch — async (AsyncOpenAI / httpx.AsyncClient), параллелизм
+        # при concurrency>1 достигается естественно через event loop.
         for batch_start in range(0, len(chunks), self._embed_batch_size):
             batch = chunks[batch_start:batch_start + self._embed_batch_size]
             for processor in self._chunk_processors:
-                batch = await asyncio.to_thread(processor.process_batch, batch, document)
+                batch = await processor.process_batch(batch, document)
             for chunk in batch:
                 vec_summary = ', '.join(
                     f"{k}:dense({len(v)})" if isinstance(v, list)

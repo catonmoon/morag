@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import logging
 import re
 from abc import ABC, abstractmethod
-from typing import Callable
+from typing import Awaitable, Callable
 
 import numpy as np
 
@@ -13,7 +12,6 @@ from morag.indexing.splitter import (
     FixedSizeSplitter,
     MarkdownHeaderSplitter,
     RecursiveSplitter,
-    SemanticSplitter,
     TableRowSplitter,
     _split_by_headers,
     _top_level_blocks,
@@ -207,7 +205,6 @@ class LLMChunker(Chunker):
         client,
         max_retries: int = 3,
         token_counter: TokenCounter | None = None,
-        embed_fn: Callable[[str], list[float]] | None = None,
         fallback_token_limit: int = _FALLBACK_TOKEN_LIMIT,
         halving_retries: int = 0,
         fallback_enabled: bool = False,
@@ -215,7 +212,6 @@ class LLMChunker(Chunker):
         self._client = client
         self._max_retries = max_retries
         self._token_counter = token_counter
-        self._embed_fn = embed_fn
         self._fallback_token_limit = fallback_token_limit
         self._halving_retries = halving_retries
         self._fallback_enabled = fallback_enabled
@@ -318,21 +314,18 @@ class LLMChunker(Chunker):
             return [block]
 
         limit = self._fallback_token_limit
-        splitters = [MarkdownHeaderSplitter()]
-        if self._embed_fn is not None:
-            splitters.append(SemanticSplitter(
-                embed_fn=self._embed_fn, breakpoint_percentile=90, min_sentences=3,
-            ))
-        splitters.append(FixedSizeSplitter(self._token_counter, limit))
+        splitters = [
+            MarkdownHeaderSplitter(),
+            FixedSizeSplitter(self._token_counter, limit),
+        ]
 
         recursive = RecursiveSplitter(self._token_counter, limit, splitters)
         chunks = recursive.split(block)
 
-        mode = 'semantic' if self._embed_fn is not None else 'fixed-size'
         logger.warning(
             'LLMChunker: all attempts failed for block (%d chars), '
-            '%s fallback split into %d chunk(s) of ≤%d tokens',
-            len(block), mode, len(chunks), limit,
+            'fixed-size fallback split into %d chunk(s) of ≤%d tokens',
+            len(block), len(chunks), limit,
         )
         return chunks
 
@@ -396,7 +389,7 @@ class SemanticChunker(Chunker):
 
     def __init__(
         self,
-        embed_fn: Callable[[list[str]], list[list[float]]],
+        embed_fn: Callable[[list[str]], Awaitable[list[list[float]]]],
         counter: TokenCounter,
         min_tokens: int = 50,
         max_tokens: int = 250,
@@ -484,10 +477,9 @@ class SemanticChunker(Chunker):
                 pos = end
                 continue
 
-            # Батчевый embed всех уникальных текстов (в потоке, чтобы не блокировать event loop)
+            # Батчевый embed всех уникальных текстов
             unique_texts = list({t for _, _, lt, rt in pairs for t in (lt, rt)})
-            loop = asyncio.get_event_loop()
-            embeddings = await loop.run_in_executor(None, self._embed_fn, unique_texts)
+            embeddings = await self._embed_fn(unique_texts)
             text_to_emb = dict(zip(unique_texts, embeddings))
 
             # Выбрать пару с максимальным cosine distance
@@ -629,7 +621,7 @@ class HybridChunker(Chunker):
         min_tokens: int = 50,
         max_tokens: int = 250,
         oversized_strategies: dict[str, str] | None = None,
-        embed_fn: Callable[[list[str]], list[list[float]]] | None = None,
+        embed_fn: Callable[[list[str]], Awaitable[list[list[float]]]] | None = None,
         llm_chunker: LLMChunker | None = None,
     ) -> None:
         self._counter = counter

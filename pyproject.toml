@@ -22,7 +22,6 @@ dependencies = [
     "pymupdf>=1.25.0",
     "markdown-it-py>=3.0.0",
     "beautifulsoup4>=4.12.0",
-    "aiolimiter>=1.1.0",
 ]
 
 

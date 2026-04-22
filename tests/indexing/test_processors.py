@@ -16,13 +16,13 @@ from morag.sources.base import Chunk, Document
 class FakeSparseEmbedder(SparseEmbedder):
     """Детерминированный sparse-эмбеддер для тестов."""
 
-    def embed(self, text: str) -> tuple[list[int], list[float]]:
+    async def embed(self, text: str) -> tuple[list[int], list[float]]:
         indices = [hash(text) % 1000, (hash(text) + 1) % 1000]
         values = [0.7, 0.3]
         return indices, values
 
-    def embed_query(self, text: str) -> tuple[list[int], list[float]]:
-        return self.embed(text)
+    async def embed_query(self, text: str) -> tuple[list[int], list[float]]:
+        return await self.embed(text)
 
 
 class FakeEmbedder(Embedder):
@@ -30,11 +30,11 @@ class FakeEmbedder(Embedder):
 
     DIM = 4
 
-    def embed(self, text: str) -> list[float]:
+    async def embed(self, text: str) -> list[float]:
         h = float(hash(text) % 100000)
         return [h, float(len(text)), 1.0, 0.0]
 
-    def embed_query(self, text: str) -> list[float]:
+    async def embed_query(self, text: str) -> list[float]:
         h = float(hash(text) % 100000)
         return [0.0, h, float(len(text)), 1.0]
 
@@ -111,41 +111,41 @@ class TestChunkProcessor:
         with pytest.raises(TypeError):
             ChunkProcessor()  # нельзя создать напрямую
 
-    def test_concrete_implementation_works(self):
+    async def test_concrete_implementation_works(self):
         class LengthProcessor(ChunkProcessor):
-            def process(self, chunk: Chunk, document: Document) -> Chunk:
+            async def process(self, chunk: Chunk, document: Document) -> Chunk:
                 chunk.payload['char_count'] = len(chunk.text)
                 return chunk
 
         processor = LengthProcessor()
         chunk = make_chunk()
         doc = make_document()
-        result = processor.process(chunk, doc)
+        result = await processor.process(chunk, doc)
         assert result.payload.get('char_count') == len(chunk.text)
 
-    def test_processor_can_add_vector(self):
+    async def test_processor_can_add_vector(self):
         class FakeEmbedProcessor(ChunkProcessor):
-            def process(self, chunk: Chunk, document: Document) -> Chunk:
+            async def process(self, chunk: Chunk, document: Document) -> Chunk:
                 chunk.vectors['text'] = [0.1, 0.2, 0.3]
                 return chunk
 
         processor = FakeEmbedProcessor()
         chunk = make_chunk()
-        result = processor.process(chunk, make_document())
+        result = await processor.process(chunk, make_document())
         assert 'text' in result.vectors
         assert result.vectors['text'] == [0.1, 0.2, 0.3]
 
-    def test_processor_receives_document_context(self):
+    async def test_processor_receives_document_context(self):
         """Процессор может использовать данные документа при обработке чанка."""
         class SourceTypeProcessor(ChunkProcessor):
-            def process(self, chunk: Chunk, document: Document) -> Chunk:
+            async def process(self, chunk: Chunk, document: Document) -> Chunk:
                 chunk.payload['source_type'] = document.source_type
                 return chunk
 
         processor = SourceTypeProcessor()
         doc = make_document()
         chunk = make_chunk()
-        result = processor.process(chunk, doc)
+        result = await processor.process(chunk, doc)
         assert result.payload.get('source_type') == 'markdown'
 
 
@@ -157,28 +157,28 @@ class TestDenseEmbeddingProcessor:
     def test_is_chunk_processor(self):
         assert isinstance(DenseEmbeddingProcessor(FakeEmbedder()), ChunkProcessor)
 
-    def test_adds_full_vector(self):
+    async def test_adds_full_vector(self):
         processor = DenseEmbeddingProcessor(FakeEmbedder())
         chunk = make_chunk()
-        result = processor.process(chunk, make_document())
+        result = await processor.process(chunk, make_document())
         assert 'full' in result.vectors
 
-    def test_vector_is_list_of_floats(self):
+    async def test_vector_is_list_of_floats(self):
         processor = DenseEmbeddingProcessor(FakeEmbedder())
         chunk = make_chunk()
-        result = processor.process(chunk, make_document())
+        result = await processor.process(chunk, make_document())
         vec = result.vectors['full']
         assert isinstance(vec, list)
         assert all(isinstance(v, float) for v in vec)
 
-    def test_vector_length_matches_embedder_dim(self):
+    async def test_vector_length_matches_embedder_dim(self):
         embedder = FakeEmbedder()
         processor = DenseEmbeddingProcessor(embedder)
         chunk = make_chunk()
-        result = processor.process(chunk, make_document())
+        result = await processor.process(chunk, make_document())
         assert len(result.vectors['full']) == embedder.dim
 
-    def test_full_text_includes_path(self):
+    async def test_full_text_includes_path(self):
         """Вектор зависит от path чанка."""
         embedder = FakeEmbedder()
         processor = DenseEmbeddingProcessor(embedder)
@@ -188,11 +188,11 @@ class TestDenseEmbeddingProcessor:
         chunk_b = make_chunk()
         chunk_b.path = ['docs/faq.md']
 
-        result_a = processor.process(chunk_a, make_document())
-        result_b = processor.process(chunk_b, make_document())
+        result_a = await processor.process(chunk_a, make_document())
+        result_b = await processor.process(chunk_b, make_document())
         assert result_a.vectors['full'] != result_b.vectors['full']
 
-    def test_full_text_includes_context(self):
+    async def test_full_text_includes_context(self):
         """Вектор зависит от context чанка."""
         embedder = FakeEmbedder()
         processor = DenseEmbeddingProcessor(embedder)
@@ -202,16 +202,16 @@ class TestDenseEmbeddingProcessor:
         chunk_b = make_chunk()
         chunk_b.context = 'Контекст Б'
 
-        result_a = processor.process(chunk_a, make_document())
-        result_b = processor.process(chunk_b, make_document())
+        result_a = await processor.process(chunk_a, make_document())
+        result_b = await processor.process(chunk_b, make_document())
         assert result_a.vectors['full'] != result_b.vectors['full']
 
-    def test_does_not_overwrite_other_vectors(self):
+    async def test_does_not_overwrite_other_vectors(self):
         """Процессор не затирает уже существующие векторы."""
         processor = DenseEmbeddingProcessor(FakeEmbedder())
         chunk = make_chunk()
         chunk.vectors['existing'] = [9.0, 8.0, 7.0, 6.0]
-        result = processor.process(chunk, make_document())
+        result = await processor.process(chunk, make_document())
         assert result.vectors['existing'] == [9.0, 8.0, 7.0, 6.0]
         assert 'full' in result.vectors
 
@@ -224,35 +224,35 @@ class TestSparseEmbeddingProcessor:
     def test_is_chunk_processor(self):
         assert isinstance(SparseEmbeddingProcessor(FakeSparseEmbedder()), ChunkProcessor)
 
-    def test_adds_keywords_vector(self):
+    async def test_adds_keywords_vector(self):
         processor = SparseEmbeddingProcessor(FakeSparseEmbedder())
         chunk = make_chunk()
-        result = processor.process(chunk, make_document())
+        result = await processor.process(chunk, make_document())
         assert 'keywords' in result.vectors
 
-    def test_keywords_vector_is_dict(self):
+    async def test_keywords_vector_is_dict(self):
         processor = SparseEmbeddingProcessor(FakeSparseEmbedder())
         chunk = make_chunk()
-        result = processor.process(chunk, make_document())
+        result = await processor.process(chunk, make_document())
         vec = result.vectors['keywords']
         assert isinstance(vec, dict)
 
-    def test_keywords_vector_has_indices_and_values(self):
+    async def test_keywords_vector_has_indices_and_values(self):
         processor = SparseEmbeddingProcessor(FakeSparseEmbedder())
         chunk = make_chunk()
-        result = processor.process(chunk, make_document())
+        result = await processor.process(chunk, make_document())
         vec = result.vectors['keywords']
         assert 'indices' in vec
         assert 'values' in vec
 
-    def test_keywords_indices_and_values_same_length(self):
+    async def test_keywords_indices_and_values_same_length(self):
         processor = SparseEmbeddingProcessor(FakeSparseEmbedder())
         chunk = make_chunk()
-        result = processor.process(chunk, make_document())
+        result = await processor.process(chunk, make_document())
         vec = result.vectors['keywords']
         assert len(vec['indices']) == len(vec['values'])
 
-    def test_keywords_uses_chunk_text(self):
+    async def test_keywords_uses_chunk_text(self):
         """Sparse-вектор зависит от текста чанка."""
         embedder = FakeSparseEmbedder()
         processor = SparseEmbeddingProcessor(embedder)
@@ -262,16 +262,16 @@ class TestSparseEmbeddingProcessor:
         chunk_b = make_chunk()
         chunk_b.text = 'Второй текст'
 
-        result_a = processor.process(chunk_a, make_document())
-        result_b = processor.process(chunk_b, make_document())
+        result_a = await processor.process(chunk_a, make_document())
+        result_b = await processor.process(chunk_b, make_document())
         assert result_a.vectors['keywords'] != result_b.vectors['keywords']
 
-    def test_does_not_overwrite_other_vectors(self):
+    async def test_does_not_overwrite_other_vectors(self):
         """Процессор не затирает уже существующие векторы."""
         processor = SparseEmbeddingProcessor(FakeSparseEmbedder())
         chunk = make_chunk()
         chunk.vectors['full'] = [1.0, 2.0, 3.0, 4.0]
-        result = processor.process(chunk, make_document())
+        result = await processor.process(chunk, make_document())
         assert result.vectors['full'] == [1.0, 2.0, 3.0, 4.0]
         assert 'keywords' in result.vectors
 
@@ -281,41 +281,41 @@ class TestSparseEmbeddingProcessor:
 # ---------------------------------------------------------------------------
 
 class TestPageMarkerProcessor:
-    def test_extracts_single_page(self):
+    async def test_extracts_single_page(self):
         processor = PageMarkerProcessor()
         chunk = make_chunk()
         chunk.text = '<!-- page:3 -->\nТекст третьей страницы.'
-        result = processor.process(chunk, make_document())
+        result = await processor.process(chunk, make_document())
         assert result.payload['pages'] == [3]
         assert '<!-- page' not in result.text
         assert result.text == 'Текст третьей страницы.'
 
-    def test_extracts_multiple_pages(self):
+    async def test_extracts_multiple_pages(self):
         processor = PageMarkerProcessor()
         chunk = make_chunk()
         chunk.text = '<!-- page:2 -->\nНачало.\n\n<!-- page:3 -->\nПродолжение.'
-        result = processor.process(chunk, make_document())
+        result = await processor.process(chunk, make_document())
         assert result.payload['pages'] == [2, 3]
         assert '<!-- page' not in result.text
 
-    def test_no_markers_no_pages_key(self):
+    async def test_no_markers_no_pages_key(self):
         processor = PageMarkerProcessor()
         chunk = make_chunk()
         chunk.text = 'Обычный текст без маркеров.'
-        result = processor.process(chunk, make_document())
+        result = await processor.process(chunk, make_document())
         assert 'pages' not in result.payload
         assert result.text == 'Обычный текст без маркеров.'
 
-    def test_deduplicates_page_numbers(self):
+    async def test_deduplicates_page_numbers(self):
         processor = PageMarkerProcessor()
         chunk = make_chunk()
         chunk.text = '<!-- page:5 -->\nА.\n<!-- page:5 -->\nБ.'
-        result = processor.process(chunk, make_document())
+        result = await processor.process(chunk, make_document())
         assert result.payload['pages'] == [5]
 
-    def test_strips_marker_newline(self):
+    async def test_strips_marker_newline(self):
         processor = PageMarkerProcessor()
         chunk = make_chunk()
         chunk.text = '<!-- page:1 -->\nТекст.'
-        result = processor.process(chunk, make_document())
+        result = await processor.process(chunk, make_document())
         assert result.text == 'Текст.'
