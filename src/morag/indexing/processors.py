@@ -454,3 +454,59 @@ class MetadataProcessor(ChunkProcessor):
         if document.url is not None:
             chunk.payload['url'] = document.url
         return chunk
+
+
+class DocVectorProcessor(DocumentProcessor):
+    """Doc-level dense + sparse эмбеддинги на полном тексте документа.
+
+    Нужен для section-level retrieval (tool `find_relevant_sections` в pipeline):
+    агент сначала ищет релевантные РАЗДЕЛЫ по doc-level векторам, потом делает
+    целенаправленный chunk-search с `section_ids`.
+
+    Записывает в `document.vectors`:
+    - `full`: dense-эмбеддинг `path + text` (тот же embedder что для чанков)
+    - `keywords`: sparse GTE
+
+    BM25 (`bm25`, `bm25_trigram`) доливается post-indexing через `build_bm25_index(docs)`.
+
+    Длинные документы (>32K токенов): embedder сам обрежет по своему context window.
+    Если начнут сыпаться ошибки — добавить head-heavy truncation (TODO в CLAUDE.md).
+    """
+
+    def __init__(
+        self,
+        dense_embedder: Embedder,
+        sparse_embedder: SparseEmbedder,
+        token_counter: TokenCounter,
+        max_tokens: int,
+    ) -> None:
+        self._dense = dense_embedder
+        self._sparse = sparse_embedder
+        self._token_counter = token_counter
+        self._max_tokens = max_tokens
+
+    def _doc_text(self, document: Document) -> str:
+        """`path + text`, обрезан до max_tokens (head-heavy). Qwen3 ctx=32K."""
+        path_str = '\n'.join(document.path)
+        full = f'{path_str}\n{document.text}'
+        if self._token_counter.count(full) <= self._max_tokens:
+            return full
+        truncated = self._token_counter.truncate(full, self._max_tokens)
+        logger.info(
+            'DocVectorProcessor: truncated %s from %d to ~%d tokens',
+            document.id, self._token_counter.count(full), self._max_tokens,
+        )
+        return truncated
+
+    async def process(self, document: Document) -> Document:
+        if document.structural or not document.text.strip():
+            return document
+        text = self._doc_text(document)
+        # Fail hard: если doc-level embed не удался — документ не должен upsert'иться,
+        # иначе в docs остаётся запись без векторов и документ становится невидим для
+        # section-level retrieval. Семантика как у DocSummaryProcessor / chunk embeddings.
+        dense_vec = await self._dense.embed(text)
+        sparse_idx, sparse_val = await self._sparse.embed(text)
+        document.vectors['full'] = dense_vec
+        document.vectors['keywords'] = {'indices': sparse_idx, 'values': sparse_val}
+        return document

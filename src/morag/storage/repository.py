@@ -101,9 +101,12 @@ class DocRepository:
             payload['creator'] = document.creator
         if document.created_at is not None:
             payload['created_at'] = document.created_at.isoformat()
+        # document.vectors заполняются DocVectorProcessor'ом (dense 'full' + sparse 'keywords')
+        # для section-level retrieval. BM25 sparse (bm25, bm25_trigram) доливаются
+        # post-indexing через build_bm25_index(collection=docs).
         await self._client.upsert(
             collection_name=self._collection,
-            points=[PointStruct(id=point_id, vector={}, payload=payload)],
+            points=[PointStruct(id=point_id, vector=document.vectors or {}, payload=payload)],
         )
 
     async def delete(self, doc_id: str) -> None:

@@ -4,11 +4,19 @@ from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, PayloadSchemaType, SparseVectorParams, VectorParams
 
 
-async def ensure_docs_collection(client: AsyncQdrantClient, name: str = 'docs') -> None:
+async def ensure_docs_collection(
+    client: AsyncQdrantClient,
+    name: str = 'docs',
+    vectors_config: dict[str, VectorParams] | None = None,
+    sparse_vectors_config: dict[str, SparseVectorParams] | None = None,
+) -> None:
     """Создать коллекцию документов если не существует.
 
-    Хранит полный текст документов и метаданные без векторов.
-    Payload-индекс на поле 'id' для быстрых idempotency-проверок.
+    По умолчанию — payload-only (без векторов). Если переданы vectors_config /
+    sparse_vectors_config — создаётся с именованными векторами для section-level
+    retrieval (doc-level embeddings: полный текст документа эмбеддится как один чанк).
+
+    Payload-индексы: 'id' для idempotency + 'parent_doc_ids' для section aggregation.
     """
     existing = {c.name for c in (await client.get_collections()).collections}
     if name in existing:
@@ -16,7 +24,8 @@ async def ensure_docs_collection(client: AsyncQdrantClient, name: str = 'docs') 
 
     await client.create_collection(
         collection_name=name,
-        vectors_config={},  # документы хранятся без векторов
+        vectors_config=vectors_config or {},
+        sparse_vectors_config=sparse_vectors_config,
     )
     await client.create_payload_index(
         collection_name=name,

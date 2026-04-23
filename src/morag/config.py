@@ -73,10 +73,14 @@ class DocSummaryConfig(BaseModel):
     mode: str = 'default'  # режим промпта: 'default' (универсальный) или 'legal' (юридические документы)
 
 
+class DocVectorConfig(BaseModel):
+    max_tokens: int = 28672  # head-heavy truncation: embedder рубит на этой границе (Qwen3-Embedding-4B ctx=32K, резерв 3584)
+
+
 class LLMConfig(BaseModel):
-    base_url: str = 'http://localhost:11434/v1'
-    model: str = 'qwen2.5-coder:7b'
-    api_key: str = 'ollama'
+    base_url: str            # OpenAI-совместимый endpoint, обязателен — silent default опасен (молчаливо подхватит слабую модель)
+    model: str               # идентификатор модели, обязателен
+    api_key: str             # API-ключ провайдера, обязателен (для Ollama можно 'ollama', но должно быть указано явно)
     timeout: int = 180  # таймаут HTTP-запросов к LLM (секунды)
     context_window: int = 32768   # контекстное окно модели (токенов)
     max_tokens: int | None = None  # лимит токенов ответа; None — без ограничения
@@ -89,7 +93,7 @@ class LLMConfig(BaseModel):
 
 
 class DenseEmbedderConfig(BaseModel):
-    model: str = 'qwen3-embedding:4b'  # отправляется в /v1/embeddings body (Ollama-нотация или HF-имя)
+    model: str                    # идентификатор модели, обязателен — silent default опасен (разные провайдеры, разные модели)
     tokenizer: str | None = None  # HF-имя или 'tiktoken' для счёта токенов чанкером; None → использовать model
     base_url: str | None = None   # OpenAI-совместимый endpoint: Ollama / vLLM / OpenAI. Обязателен для индексации.
     dim: int | None = None        # обязателен для индексации: размерность эмбеддинга
@@ -184,13 +188,14 @@ class IndexingConfig(BaseModel):
     embed_batch_size: int = 64            # размер батча для embed + upsert чанков
     lexical_doc_summary: bool = False     # добавлять doc_summary к тексту чанка для лексических векторов (GTE keywords, BM25)
     lexical_chunk_context: bool = False   # добавлять chunk.context к тексту чанка для лексических векторов (Anthropic «Contextual BM25»)
-    dense_embedder: DenseEmbedderConfig = DenseEmbedderConfig()
+    dense_embedder: DenseEmbedderConfig   # обязательна: silent default опасен
     sparse_embedder: SparseEmbedderConfig = SparseEmbedderConfig()
     vision_max_tokens: int = 1024  # лимит токенов ответа Vision LLM (изображения, формулы)
     concurrency: int = 1  # количество документов, обрабатываемых параллельно
     schedule: str | None = None  # cron-выражение для serve-режима (например '0 */6 * * *')
     doc_title: DocTitleConfig = DocTitleConfig()  # генерация названия документа; max_tokens=None — отключено
     doc_summary: DocSummaryConfig = DocSummaryConfig()  # генерация саммари документов; max_tokens=None — отключено
+    doc_vector: DocVectorConfig = DocVectorConfig()  # doc-level векторы: head-heavy truncation перед embedding
     knowledge_map: KnowledgeMapConfig = KnowledgeMapConfig()  # карта документации (ADR-0010)
 
 
@@ -228,10 +233,10 @@ class PdfConfig(BaseModel):
 class Config(BaseModel):
     sources: SourcesConfig
     qdrant: QdrantConfig = QdrantConfig()
-    llm: LLMConfig = LLMConfig()
+    llm: LLMConfig   # обязательна: silent default опасен (дефолтная модель могла бы молча подмениться на слабую)
     llm_vision: LLMConfig | None = None  # multimodal LLM для распознавания изображений (опционально)
     pdf: PdfConfig | None = None         # конвертация PDF → Markdown (опционально; mode: docling | vision)
-    indexing: IndexingConfig = IndexingConfig()
+    indexing: IndexingConfig | None = None  # секция индексации; None для retrieval-only конфигов (pipelines без cli.main index)
 
 
 def load_config(path: str | Path = 'config.yml') -> Config:

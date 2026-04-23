@@ -31,6 +31,7 @@ from morag.indexing.processors import (
     DenseEmbeddingProcessor,
     DocSummaryProcessor,
     DocTitleProcessor,
+    DocVectorProcessor,
     LegalDocSummaryProcessor,
     MetadataProcessor,
     PageMarkerProcessor,
@@ -150,6 +151,8 @@ logger = logging.getLogger(__name__)
 async def cmd_index(config_path: str, reset: bool = False) -> None:
     """Индексировать документы из источника в Qdrant."""
     config = load_config(config_path)
+    if config.indexing is None:
+        raise ValueError(f'{config_path}: секция `indexing` обязательна для команды `index`')
 
     logger.info('Connecting to Qdrant %s:%d', config.qdrant.host, config.qdrant.port)
     client = AsyncQdrantClient(
@@ -167,7 +170,11 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
     embedder = _make_dense_embedder(config.indexing.dense_embedder)
 
     logger.info('Ensuring collections...')
-    await ensure_docs_collection(client, config.qdrant.collection_docs)
+    await ensure_docs_collection(
+        client, config.qdrant.collection_docs,
+        vectors_config=frida_vectors_config(embedder.dim),
+        sparse_vectors_config=gte_sparse_vectors_config(),
+    )
     await ensure_chunks_collection(
         client, config.qdrant.collection_chunks,
         vectors_config=frida_vectors_config(embedder.dim),
@@ -327,6 +334,12 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
             max_tokens=config.indexing.doc_summary.max_tokens,
             token_counter=llm_counter,
         ))
+    doc_processors.append(DocVectorProcessor(
+        dense_embedder=embedder,
+        sparse_embedder=sparse_embedder,
+        token_counter=embed_counter,
+        max_tokens=config.indexing.doc_vector.max_tokens,
+    ))
 
     chunk_processors = [
         PageMarkerProcessor(),
@@ -422,7 +435,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         else:
             logger.info('No Jira issues found in indexed documents, skipping Jira indexing')
 
-    # Post-indexing: upgrade sparse vectors schema + build BM25
+    # Post-indexing: upgrade sparse vectors schema + build BM25 для chunks и docs
     from morag.storage.collections import upgrade_sparse_vectors
     await upgrade_sparse_vectors(client, config.qdrant.collection_chunks)
     await build_bm25_index(
@@ -430,6 +443,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         include_doc_summary=config.indexing.lexical_doc_summary,
         include_chunk_context=config.indexing.lexical_chunk_context,
     )
+    await build_bm25_index(client, config.qdrant.collection_docs)
 
     # Post-indexing: Knowledge Map
     if config.indexing.knowledge_map.enabled:
@@ -466,6 +480,8 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
 async def cmd_rebuild_km(config_path: str) -> None:
     """Перестроить только Knowledge Map из существующих документов в Qdrant."""
     config = load_config(config_path)
+    if config.indexing is None:
+        raise ValueError(f'{config_path}: секция `indexing` обязательна для команды `rebuild-km`')
 
     if not config.indexing.knowledge_map.enabled:
         logger.error('knowledge_map.enabled is false in config — nothing to rebuild')
@@ -526,6 +542,9 @@ async def cmd_rebuild_km(config_path: str) -> None:
 async def cmd_serve(config_path: str) -> None:
     """Запустить daemon-режим: индексация по cron-расписанию из конфига."""
     config = load_config(config_path)
+    if config.indexing is None:
+        logger.error(f'{config_path}: секция `indexing` обязательна для команды `serve`')
+        sys.exit(1)
     if not config.indexing.schedule:
         logger.error('indexing.schedule is not set in config.yml — cannot start serve mode')
         sys.exit(1)

@@ -25,6 +25,7 @@ class Document:
     structural: bool = False                               # структурный (навигационный) документ без полезного тела; не чанкуется
     paged: bool = False                                    # страничный документ (PDF, DOCX, PPTX); чанки обязаны иметь pages
     payload: dict = field(default_factory=dict)  # метаданные от DocumentProcessor-ов
+    vectors: dict[str, list[float] | dict] = field(default_factory=dict)  # doc-level именованные векторы (для section-level retrieval через DocVectorProcessor)
 
 
 @dataclass
