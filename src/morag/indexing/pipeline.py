@@ -85,6 +85,7 @@ class IndexingPipeline:
         skip_presplit: bool = False,
         passthrough_threshold: int | None = None,
         embed_batch_size: int = 64,
+        max_table_rows: int = 0,
     ) -> None:
         self._doc_repo = doc_repo
         self._chunk_repo = chunk_repo
@@ -98,6 +99,7 @@ class IndexingPipeline:
         self._skip_presplit = skip_presplit
         self._passthrough_threshold = passthrough_threshold
         self._embed_batch_size = embed_batch_size
+        self._max_table_rows = max_table_rows
         if not skip_presplit or passthrough_threshold:
             self._splitter = RecursiveSplitter(
                 self._token_counter,
@@ -347,6 +349,20 @@ class IndexingPipeline:
             if cr.pages:
                 chunk.payload['pages'] = cr.pages
             chunks.append(chunk)
+
+        # Post-chunk: разрезать чанки, содержащие большие markdown-таблицы.
+        # Делаем ДО ChunkProcessors — embeddings/metadata считаются уже по
+        # финальному набору sub-чанков. Перенумеровывает order/total.
+        if self._max_table_rows > 0:
+            from morag.indexing.chunk_splitter import split_table_chunks
+            before = len(chunks)
+            chunks = split_table_chunks(chunks, self._max_table_rows)
+            total = len(chunks)
+            if total != before:
+                logger.info(
+                    '%s  Table split: %d → %d chunks (max_table_rows=%d)',
+                    w, before, total, self._max_table_rows,
+                )
 
         # Применяем процессоры и сохраняем батчами.
         # process_batch — async (AsyncOpenAI / httpx.AsyncClient), параллелизм

@@ -380,6 +380,7 @@ async def cmd_index(config_path: str, reset: bool = False) -> None:
         skip_presplit=skip_presplit,
         passthrough_threshold=config.indexing.chunker.passthrough_threshold,
         embed_batch_size=config.indexing.embed_batch_size,
+        max_table_rows=config.indexing.chunker.max_table_rows,
     )
 
     logger.info(

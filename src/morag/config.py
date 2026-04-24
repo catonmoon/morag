@@ -150,6 +150,7 @@ class ChunkerConfig(BaseModel):
     accept_pair: bool = False            # принимать оба чанка пары (left+right) за одну итерацию (2x быстрее)
     passthrough_threshold: int | None = None  # если документ > N токенов → passthrough вместо semantic; None = отключено
     oversized: OversizedConfig = OversizedConfig()  # стратегии по типу блока (hybrid)
+    max_table_rows: int = 0             # forced row-based split больших markdown-таблиц (с дупликацией header). 0 = выкл; рекомендуется 15-20 для таблиц-справочников/глоссариев
 
 
 class ContextConfig(BaseModel):

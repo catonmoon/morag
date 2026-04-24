@@ -8,6 +8,7 @@ import re
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from typing import AsyncIterator
 
 from openai import AsyncOpenAI
 
@@ -272,6 +273,57 @@ class LLMClient:
             kwargs['max_tokens'] = max_tokens
         response = await self._create(**kwargs)
         return _extract_content(response.choices[0].message)
+
+    async def stream_complete(
+        self,
+        messages: list[dict],
+        params: GenerationParams | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[dict]:
+        """Stream chat completion chunk-by-chunk.
+
+        Yield'ит словари `{'kind': 'content' | 'reasoning', 'text': str}` —
+        reasoning отделён от основного контента для UI-side рендеринга
+        (<think>…</think> обрамление).
+
+        Retry на connect-errors и 429/5xx — через AsyncOpenAI SDK (`max_retries`).
+        Mid-stream обрыв (после установления connection) не ретраится — LLM
+        generation не идемпотентна; потребитель должен обработать исключение.
+        """
+        params = self._resolve_params(params)
+        kwargs: dict = dict(
+            model=self._model,
+            messages=messages,
+            stream=True,
+            temperature=params.temperature,
+            top_p=params.top_p,
+            **self._penalty_kwargs(params),
+        )
+        if params.seed is not None:
+            kwargs['seed'] = params.seed
+        extra_body = _build_extra_body(params)
+        if extra_body:
+            kwargs['extra_body'] = extra_body
+        if max_tokens is not None:
+            kwargs['max_tokens'] = max_tokens
+
+        async with self._inflight_cap():
+            stream = await self._client.chat.completions.create(**kwargs)
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                delta = chunk.choices[0].delta
+                # reasoning_content (vLLM) или reasoning (OpenRouter) — не в типизированной
+                # схеме SDK, достаём через getattr. Оба поля может не быть.
+                reasoning = (
+                    getattr(delta, 'reasoning_content', None)
+                    or getattr(delta, 'reasoning', None)
+                    or ''
+                )
+                if reasoning:
+                    yield {'kind': 'reasoning', 'text': reasoning}
+                if delta.content:
+                    yield {'kind': 'content', 'text': delta.content}
 
     async def complete_with_tools(
         self,

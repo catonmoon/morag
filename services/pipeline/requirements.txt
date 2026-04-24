@@ -1,3 +1,3 @@
-requests
 numpy
 nltk
+qdrant-client~=1.17

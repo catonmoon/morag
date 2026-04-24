@@ -7,22 +7,26 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import json
 import logging
 import os
-import requests
 from typing import Any, Coroutine, Dict, Generator, Iterator, List, TypeVar, Union
 
 from markdown_it import MarkdownIt
-import numpy as np
 from pydantic import BaseModel
+from qdrant_client import AsyncQdrantClient
 
 # Импорт из installed morag-пакета (ставится через services/pipeline/Dockerfile).
 # Файл специально назван morag_pipeline.py (не morag.py) чтобы избежать коллизии с
 # пакетом в sys.modules — OWUI регистрирует файл по filename как имя модуля.
 from morag.llm.client import GenerationParams, LLMClient
 from morag.indexing.embedder import HttpEmbedder, HttpGteSparseEmbedder
+from morag.retrieval import (
+    FindSectionConfig,
+    HybridSearcher,
+    LLMReranker,
+    find_section,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +44,6 @@ def _required_env(name: str) -> str:
     return value
 
 _md = MarkdownIt()
-
-_MD5_MOD = 4_294_967_295  # DO NOT CHANGE — ломает индекс
 
 # ── Tool definitions (OpenAI function calling) ───────────────────────────────
 
@@ -142,46 +144,47 @@ _SYSTEM_PROMPT = (
     'Используй их для поиска информации.\n\n'
     '## ГЛАВНОЕ ПРАВИЛО\n'
     'ЗАПРЕЩЕНО отвечать без поиска. И ЗАПРЕЩЕНО делать search() без предварительного find_section(). '
-    'Твой ПЕРВЫЙ ход — ВСЕГДА `find_section(query)`, затем для каждого аспекта из плана — '
-    '`search(query, section_ids=[...])` с section_ids ИЗ результата find_section. '
-    'Без исключений, даже если вопрос кажется простым.\n\n'
+    'Твой ПЕРВЫЙ ход — ВСЕГДА `find_section(query)`, затем `search(query, section_ids=[...])` '
+    'с section_ids ИЗ результата find_section. Без исключений, даже если вопрос кажется простым.\n\n'
     'Почему так: find_section работает по doc-level эмбеддингам полного текста каждого документа '
     'и агрегирует результаты по родительскому разделу. Без него search бьёт по всему корпусу — '
     'выдача шумная, из 10+ разных документов. С ним search прицельный и релевантный.\n\n'
-    '## Алгоритм работы: Plan → Find → Execute → Verify\n\n'
-    '### 1. ПЛАН (перед поиском)\n'
-    'Проанализируй вопрос и составь план поиска:\n'
-    '- Выдели 2-4 СМЫСЛОВЫХ АСПЕКТА вопроса (не переформулировки, а разные грани).\n'
-    '- Аспекты должны покрывать вопрос С РАЗНЫХ СТОРОН.\n'
-    'Пример для «Какие роли у менеджера продукта?»:\n'
-    '  а) Оргструктура и должности\n'
-    '  б) Обязанности и процессы\n'
-    '  в) Отличия от смежных ролей\n\n'
-    '### 2. FIND SECTION (обязательный шаг)\n'
-    'Вызови `find_section(query)` один-два раза — для основного запроса и/или ключевых аспектов. '
-    'Получишь готовые `section_ids` для последующих search().\n\n'
-    '### 3. ВЫПОЛНЕНИЕ\n'
-    '- Делай search() для КАЖДОГО аспекта из плана, используя section_ids и/или doc_ids из find_section.\n'
+    '## Алгоритм работы: Find → Execute → Verify\n\n'
+    '### 1. FIND SECTION (обязательный шаг)\n'
+    'Вызови `find_section(query)` **минимум два раза** с разными формулировками:\n'
+    '  1) первый — по оригинальному вопросу (как задал пользователь);\n'
+    '  2) второй — по альтернативным формулировкам / ключевым терминам / смежным понятиям.\n'
+    'Например для «Каким термином называется способ X?» — первый find_section по самому вопросу, '
+    'второй по «глоссарий термин X», «определение X» или другим формулировкам.\n'
+    '⚠️ **ОБЪЕДИНЯЙ** результаты всех find_section — не замещай. '
+    'В search передавай union section_ids и doc_ids от всех вызовов.\n'
+    'Это нужно потому, что один find_section может пропустить релевантный раздел из-за формулировки. '
+    'Второй-третий вызов расширяет охват.\n\n'
+    '### 2. ВЫПОЛНЕНИЕ\n'
+    '- Ищи тщательно. Старайся покрыть вопрос с разных сторон — делай несколько search\'ей '
+    'под РАЗНЫЕ грани (процесс vs инструменты vs ответственные), не повторяя один запрос в переформулировках.\n'
+    '- ⚠️ ЯЗЫК ЗАПРОСА: сохраняй ключевые русские слова из исходного вопроса. '
+    'Документация на русском — поиск на английском не сработает. '
+    'Если в вопросе «доверие к сервису распознавания» — так и пиши в search, не переводи на «trust recognition service». '
+    'Синонимы/переформулировки допустимы, но на русском.\n'
     '- `section_ids` — рекурсивный поиск (раздел + все его подстраницы). Для широких тем.\n'
     '- `doc_ids` — точечный поиск (только указанные страницы, БЕЗ потомков). Для случаев когда ответ '
     'прямо на странице-разделе (например, страница «Люди» сама перечисляет отделы — её подстраницы не нужны).\n'
     '- find_section подскажет что использовать: «раздел рекурсивно» → section_ids; «страница точечно» → doc_ids.\n'
     '- Если для разных аспектов релевантны разные секции — дополнительно вызови find_section под аспект.\n'
-    '- Не ищи один аспект 3 раза — ищи 3 разных аспекта.\n'
     '- Используй get_neighbors() чтобы увидеть контекст вокруг найденного чанка.\n'
     '- ⚠️ ШУМ ПРИ ШИРОКОМ ПОИСКЕ: если search вернул результаты из 10+ разных документов — '
     'это сигнал что запрос слишком общий, выдача шумная. Сузь следующий шаг: '
     'переформулируй запрос точнее (более специфичные термины) ИЛИ ограничь section_ids '
     'двумя-тремя самыми релевантными разделами из карты. '
     'Не пытайся «прочитать все 10» — выбери top-2-3 документа и углубляйся через get_neighbors().\n\n'
-    '### 4. ПРОВЕРКА ПОЛНОТЫ\n'
+    '### 3. ПРОВЕРКА ПОЛНОТЫ\n'
     'После поисков проверь:\n'
-    '- Все ли аспекты из плана покрыты?\n'
     '- Найдена ли информация из РАЗНЫХ разделов/документов?\n'
     '- ⚠️ КРАСНЫЙ ФЛАГ: если все результаты из одного раздела — '
     'почти наверняка ты пропустил информацию в других местах. Ищи шире.\n'
-    '- Если аспект не покрыт — ищи в оставшихся разделах.\n'
-    '- Делай 3-6 поисков. Качество важнее скорости.\n\n'
+    '- Если какая-то грань вопроса не покрыта — ищи в оставшихся разделах.\n'
+    '- Делай несколько поисков. Качество важнее скорости.\n\n'
     'Правила ответа:\n'
     '- Отвечай КРАТКО и по существу. Не пересказывай всё найденное — '
     'выбери только то, что прямо отвечает на вопрос.\n'
@@ -279,12 +282,6 @@ class Pipeline:
                 'по всей базе знаний.',
             ),
         )
-        self._knowledge_map: str | None = None
-        self._doc_titles: dict[str, str] = {}  # doc_id → title (кеш)
-        self._doc_tree: dict[str, list[str]] | None = None  # parent_id → [child_ids]
-        self._indexed_doc_ids: set[str] | None = None       # id всех документов в docs collection (для фильтра out-of-corpus предков)
-        self._cluster_membership: dict[str, list[str]] | None = None  # cluster_id → [doc_id]
-
         # Persistent event loop для async LLMClient/embedders из morag-пакета.
         # OWUI Pipelines pipe() — sync-генератор, поэтому каждый async-вызов
         # пробрасываем через self._run(coro).
@@ -317,6 +314,29 @@ class Pipeline:
         self._sparse_embedder = HttpGteSparseEmbedder(
             base_url=self.valves.SPARSE_EMBED_URL,
             timeout=self.valves.HTTP_TIMEOUT,
+        )
+        # Qdrant-клиент: единый с indexing, вместо ручных requests.post.
+        # Встроенный retry на network-errors + типизированные Prefetch/Filter.
+        self._qdrant = AsyncQdrantClient(
+            url=self.valves.QDRANT_URL,
+            timeout=self.valves.HTTP_TIMEOUT,
+        )
+        # HybridSearcher — инкапсулирует RRF-поиск и Qdrant-fetch хелперы
+        # + ведёт кеши (sparse names, doc tree, titles, knowledge map, cluster).
+        self._searcher = HybridSearcher(
+            qdrant=self._qdrant,
+            dense_embedder=self._dense_embedder,
+            sparse_embedder=self._sparse_embedder,
+            chunks_collection=self.valves.QDRANT_COLLECTION,
+            docs_collection=self.valves.QDRANT_DOCS_COLLECTION,
+            knowledge_map_collection=self.valves.QDRANT_KNOWLEDGE_MAP_COLLECTION,
+        )
+        self._reranker = LLMReranker(self._llm)
+        self._find_section_config = FindSectionConfig(
+            sections_limit=self.valves.SECTIONS_LIMIT,
+            doc_pool=self.valves.FIND_SECTION_DOC_POOL,
+            descent_threshold=self.valves.FIND_SECTION_DESCENT_THRESHOLD,
+            top_docs=self.valves.FIND_SECTION_TOP_DOCS,
         )
 
     def _run(self, coro: Coroutine[Any, Any, _T]) -> _T:
@@ -613,306 +633,53 @@ class Pipeline:
 
     # ── Section-level retrieval (find_section) ────────────────────────────────
 
-    def _search_docs(self, text: str, limit: int) -> list[dict]:
-        """RRF-поиск по коллекции docs (doc-level эмбеддинги полного текста).
-
-        Возвращает список документов с payload-полями: id, title, path,
-        parent_doc_ids, doc_summary, score. Аналог _search но на docs,
-        без фильтра по section_ids (секции тут мы как раз и определяем).
-        """
-        dense = self._embed_dense(text)
-        indices, values = self._embed_sparse(text)
-        available_sparse = self._get_sparse_vector_names(self.valves.QDRANT_DOCS_COLLECTION)
-
-        lexical_prefetch = []
-        if 'keywords' in available_sparse:
-            lexical_prefetch.append(
-                {'query': {'indices': indices, 'values': values}, 'using': 'keywords', 'limit': limit * 2},
-            )
-        for vec_fn, vec_name in [
-            (_bm25_query_vector, 'bm25'),
-            (_bm25_trigram_query_vector, 'bm25_trigram'),
-        ]:
-            if vec_name not in available_sparse:
-                continue
-            idx, val = vec_fn(text)
-            if idx:
-                lexical_prefetch.append({
-                    'query': {'indices': idx, 'values': val},
-                    'using': vec_name,
-                    'limit': limit * 2,
-                })
-
-        prefetch = [{'query': dense, 'using': 'full', 'limit': limit * 2}]
-        if lexical_prefetch:
-            prefetch.append({
-                'prefetch': lexical_prefetch,
-                'query': {'fusion': 'rrf'},
-                'limit': limit * 2,
-            })
-
-        payload = {
-            'prefetch': prefetch,
-            'query': {'fusion': 'rrf'},
-            'limit': limit,
-            'with_payload': True,
-        }
-        url = f'{self.valves.QDRANT_URL}/collections/{self.valves.QDRANT_DOCS_COLLECTION}/points/query'
-        resp = requests.post(url, json=payload, timeout=self.valves.HTTP_TIMEOUT)
-        resp.raise_for_status()
-        points = resp.json().get('result', {}).get('points', [])
-        docs: list[dict] = []
-        for p in points:
-            pl = p.get('payload', {})
-            path_raw = pl.get('path', '')
-            paths: list[str] = path_raw if isinstance(path_raw, list) else ([path_raw] if path_raw else [])
-            docs.append({
-                'doc_id': pl.get('id', ''),
-                'title': pl.get('title') or pl.get('id', ''),
-                'path': paths,
-                'parent_doc_ids': pl.get('parent_doc_ids', []) or [],
-                'doc_summary': pl.get('doc_summary', ''),
-                'score': p.get('score', 0.0),
-            })
-        return docs
-
-    @staticmethod
-    def _aggregate_to_sections(
-        docs: list[dict],
-        valid_doc_ids: set[str] | None = None,
-    ) -> list[tuple[str, list[dict]]]:
-        """Vote counting: группируем документы по immediate parent в пределах корпуса.
-
-        parent_doc_ids в Confluence-docs содержит цепочку ВСЕХ предков, включая
-        страницы выше настроенных ancestor_ids (out-of-corpus). Такие parent_id
-        в нашей коллекции docs отсутствуют — рендерятся как голые id и не имеют
-        title/summary. Для каждого документа идём от immediate parent вверх и
-        берём первого предка, который реально проиндексирован (`valid_doc_ids`).
-        Если ни один предок не в корпусе (документ — сам корень) — он сам
-        становится секцией.
-
-        Возвращает [(section_id, [docs]), ...] отсортированный по votes desc,
-        затем по score_sum desc. Список docs нужен для adaptive descent.
-        """
-        from collections import defaultdict
-        buckets: dict[str, list[dict]] = defaultdict(list)
-        for d in docs:
-            parents = d.get('parent_doc_ids') or []
-            section_id: str | None = None
-            if valid_doc_ids is not None:
-                for pid in reversed(parents):
-                    if pid in valid_doc_ids:
-                        section_id = pid
-                        break
-            elif parents:
-                section_id = parents[-1]
-            if section_id is None:
-                section_id = d.get('doc_id', '')
-            if not section_id:
-                continue
-            buckets[section_id].append(d)
-        items = list(buckets.items())
-        items.sort(
-            key=lambda kv: (-len(kv[1]), -sum(d.get('score', 0.0) for d in kv[1])),
-        )
-        return items
-
-    @staticmethod
-    def _descend_section(
-        section_id: str,
-        voting_docs: list[dict],
-        tree: dict[str, list[str]],
-        threshold: float,
-    ) -> tuple[str, bool]:
-        """Adaptive descent: спускаемся к ребёнку секции, если тот покрывает ≥threshold% votes.
-
-        Возвращает (final_section_id, self_voted):
-        - self_voted=True, если сама страница-секция (doc с id=final_section_id)
-          была среди voting_docs — её текст релевантен, агенту имеет смысл
-          передать её как `doc_ids` (точечно, без потомков). Типичный случай —
-          «Люди» перечисляет отделы прямо на своей странице, в подпапках этой
-          информации нет.
-        - self_voted=False → секция-контейнер: в voting_docs только её потомки,
-          сама страница не содержит ответа. Передавать агенту как `section_ids`
-          (рекурсивно — раздел + подстраницы).
-
-        Descent останавливается: при self-vote, при отсутствии детей, или когда
-        ни один ребёнок не набрал threshold votes.
-        """
-        current = section_id
-        current_docs = voting_docs
-        while True:
-            self_voted = any(d.get('doc_id') == current for d in current_docs)
-            # Если сама страница-секция попала в voting_docs — её собственный
-            # текст релевантен; descent бы вырезал эту страницу из scope
-            # (_get_descendant_doc_ids разворачивает только вниз).
-            if self_voted:
-                return current, True
-            if len(current_docs) < 2:  # descent бессмыслен для 1 документа
-                return current, False
-            children = tree.get(current, [])
-            if not children:
-                return current, False
-            best_child: str | None = None
-            best_docs: list[dict] = []
-            for child in children:
-                matched = [
-                    d for d in current_docs
-                    if child in (d.get('parent_doc_ids') or [])
-                    or d.get('doc_id') == child
-                ]
-                if len(matched) > len(best_docs):
-                    best_child = child
-                    best_docs = matched
-            if best_child is None or len(best_docs) < threshold * len(current_docs):
-                return current, False
-            current = best_child
-            current_docs = best_docs
-
     def _tool_find_section(self, query: str) -> tuple[str, list[dict]]:
         """Найти релевантные РАЗДЕЛЫ документации для запроса.
 
-        1. _search_docs(limit=FIND_SECTION_DOC_POOL) — top-N документов.
-        2. _aggregate_to_sections — vote counting по immediate parent.
-        3. Top SECTIONS_LIMIT секций → enrich title+doc_summary.
-        4. Возвращаем готовые section_ids для последующего search().
+        Вся retrieval-логика (RRF по docs + vote counting + adaptive descent +
+        top-K safety + enrichment) живёт в `morag.retrieval.find_section`.
+        Pipeline только форматирует SectionResult как markdown для LLM-агента.
         """
-        pool = self.valves.FIND_SECTION_DOC_POOL
-        top = self.valves.SECTIONS_LIMIT
-        docs = self._search_docs(query, pool)
-        if not docs:
+        result = self._run(find_section(query, self._searcher, self._find_section_config))
+        if result.error == 'no_docs':
             return 'Не удалось найти релевантные документы для определения разделов.', []
-
-        valid_doc_ids = self._get_indexed_doc_ids()
-        aggregated = self._aggregate_to_sections(docs, valid_doc_ids=valid_doc_ids)
-        if not aggregated:
+        if result.error == 'no_sections' or not (result.refined or result.extra_docs):
             return (
                 'Не удалось определить разделы для запроса. '
                 'Используй обычный search() без section_ids.'
             ), []
 
-        # Adaptive descent: для каждой секции спускаемся вглубь пока найдётся
-        # ребёнок, покрывающий большинство votes (threshold default 0.5).
-        # Возвращает также self_voted — была ли сама страница-секция в voting_docs.
-        tree = self._build_doc_tree()
-        threshold = self.valves.FIND_SECTION_DESCENT_THRESHOLD
-        # kind: 'section' (раздел, искать рекурсивно) или 'doc' (сама страница, искать точечно)
-        refined: list[tuple[str, int, str]] = []  # (id, votes, kind)
-        seen: set[str] = set()
-        for sid, section_docs in aggregated:
-            if threshold > 0:
-                final_sid, self_voted = self._descend_section(sid, section_docs, tree, threshold)
-            else:
-                final_sid = sid
-                self_voted = any(d.get('doc_id') == sid for d in section_docs)
-            if final_sid in seen:
-                continue
-            seen.add(final_sid)
-            kind = 'doc' if self_voted else 'section'
-            refined.append((final_sid, len(section_docs), kind))
-            if len(refined) >= top:
-                break
+        lines = [f'Релевантные разделы (топ-{len(result.refined)}):']
+        for i, e in enumerate(result.refined, 1):
+            type_label = 'раздел рекурсивно' if e.kind == 'section' else 'страница точечно'
+            lines.append(f'[{i}] {e.title} ({type_label}, id={e.section_id}, {e.votes} dom doc(s))')
+            if e.summary:
+                snippet = (e.summary[:300] + '…') if len(e.summary) > 300 else e.summary
+                lines.append(f'    {snippet}')
 
-        # Top-K топ-документы из _search_docs — страховка от «одинокого чемпиона»:
-        # документ с высоким score может оказаться единственным voter'ом своей
-        # секции, и секция проиграет по votes другим бакетам. Явно добавляем
-        # top-K документов как doc_ids, если их id не покрыты уже refined.
-        top_docs_limit = self.valves.FIND_SECTION_TOP_DOCS
-        refined_ids = {sid for sid, _, _ in refined}
-        extra_docs: list[dict] = []
-        for d in docs:
-            if len(extra_docs) >= top_docs_limit:
-                break
-            did = d['doc_id']
-            if not did or did in refined_ids:
-                continue
-            extra_docs.append(d)
-            refined_ids.add(did)
-
-        section_ids = [sid for sid, _, kind in refined if kind == 'section']
-        doc_ids = [sid for sid, _, kind in refined if kind == 'doc']
-        doc_ids.extend(d['doc_id'] for d in extra_docs)
-
-        summaries = self._fetch_doc_summaries([sid for sid, _, _ in refined] + [d['doc_id'] for d in extra_docs])
-
-        lines = [f'Релевантные разделы (топ-{len(refined)}):']
-        for i, (sid, vote, kind) in enumerate(refined, 1):
-            title = self._get_doc_title(sid)
-            summary = (summaries.get(sid) or '').strip()
-            summary_snippet = (summary[:300] + '…') if len(summary) > 300 else summary
-            type_label = 'раздел рекурсивно' if kind == 'section' else 'страница точечно'
-            lines.append(f'[{i}] {title} ({type_label}, id={sid}, {vote} dom doc(s))')
-            if summary_snippet:
-                lines.append(f'    {summary_snippet}')
-
-        if extra_docs:
+        if result.extra_docs:
             lines.append('')
-            lines.append(f'Дополнительно — топ-документы по прямому score (страховка):')
-            for i, d in enumerate(extra_docs, 1):
-                title = d.get('title') or d['doc_id']
-                summary = (summaries.get(d['doc_id']) or '').strip()
-                summary_snippet = (summary[:300] + '…') if len(summary) > 300 else summary
-                lines.append(f"[T{i}] {title} (страница точечно, id={d['doc_id']}, score={d.get('score', 0.0):.3f})")
-                if summary_snippet:
-                    lines.append(f'    {summary_snippet}')
+            lines.append('Дополнительно — топ-документы по прямому score (страховка):')
+            for i, d in enumerate(result.extra_docs, 1):
+                lines.append(f"[T{i}] {d.title} (страница точечно, id={d.doc_id}, score={d.score:.3f})")
+                if d.summary:
+                    snippet = (d.summary[:300] + '…') if len(d.summary) > 300 else d.summary
+                    lines.append(f'    {snippet}')
 
         lines.append('')
         call_parts = ['search(query="..."']
-        if section_ids:
-            call_parts.append(f'section_ids={json.dumps(section_ids, ensure_ascii=False)}')
-        if doc_ids:
-            call_parts.append(f'doc_ids={json.dumps(doc_ids, ensure_ascii=False)}')
+        if result.section_ids:
+            call_parts.append(f'section_ids={json.dumps(result.section_ids, ensure_ascii=False)}')
+        if result.doc_ids:
+            call_parts.append(f'doc_ids={json.dumps(result.doc_ids, ensure_ascii=False)}')
         lines.append('Готово к использованию: ' + ', '.join(call_parts) + ')')
         return '\n'.join(lines), []
 
     # ── Reranker ──────────────────────────────────────────────────────────────
 
     def _rerank(self, query: str, chunks: list[dict]) -> list[dict]:
-        """LLM reranker: отфильтровать нерелевантные чанки одним вызовом."""
-        # Собираем список чанков для оценки
-        items = []
-        for i, c in enumerate(chunks):
-            path_display = ' | '.join(c['path']) if c['path'] else c['doc_id']
-            context = c.get('context', '')
-            updated_at = c.get('updated_at', '')
-            lines = [f'[{i}] {path_display}']
-            if updated_at:
-                lines.append(f'Обновлён: {updated_at}')
-            if context:
-                lines.append(f'Контекст: {context}')
-            lines.append(c['text'])
-            items.append('\n'.join(lines))
-
-        prompt = (
-            f'Вопрос: "{query}"\n\n'
-            f'Чанки:\n' + '\n---\n'.join(items) + '\n\n'
-            'Какие из этих чанков могут быть полезны для ответа на вопрос? '
-            'Для оценки сымсла предпочитай более свежие чанки (по дате «Обновлён»).\n'
-            'Верни ТОЛЬКО номера чанков через запятую, '
-            'В ПОРЯДКЕ РЕЛЕВАНТНОСТИ — более полезные первыми. '
-            'Например: 3, 0, 5\n'
-            'Если ни один не релевантен — верни: none'
-        )
-        # SDK сам ретраит 429/5xx (max_retries=3 в конструкторе), парсит Retry-After.
-        # enable_thinking=False для rerank даже если глобально включён thinking.
-        try:
-            answer = self._run(self._llm.complete(
-                [{'role': 'user', 'content': prompt}],
-                params=GenerationParams(temperature=0.0, enable_thinking=False),
-                max_tokens=100,
-            )).strip()
-        except Exception as exc:
-            logger.warning('rerank failed, returning all chunks: %s', exc)
-            return chunks
-
-        if 'none' in answer.lower():
-            return []
-
-        # Парсим номера
-        import re
-        indices = [int(x) for x in re.findall(r'\d+', answer)]
-        filtered = [chunks[i] for i in indices if 0 <= i < len(chunks)]
-        return filtered or chunks  # fallback: если парсинг сломался, вернуть всё
+        """Тонкая обёртка над LLMReranker (sync↔async через self._run)."""
+        return self._run(self._reranker.rerank(query, chunks))
 
     # ── LLM calls ─────────────────────────────────────────────────────────────
 
@@ -930,15 +697,16 @@ class Pipeline:
         ))
 
     def _stream_final(self, messages: list[dict]) -> Generator:
-        """Streaming финального ответа с thinking.
+        """Streaming финального ответа через LLMClient (AsyncOpenAI).
 
-        ВНИМАНИЕ: единственное место в pipeline где остался ручной requests.post(stream=True)
-        с парсингом SSE. Причина — pipe() синхронный (OWUI Pipelines не поддерживает
-        async-генераторы), а AsyncOpenAI стриминг → sync iterator потребовал бы моста через
-        thread + queue.Queue. Остальные LLM-вызовы (rerank, tool-calls) переведены на
-        LLMClient. Если когда-то появится OWUI async support — мигрировать.
+        SDK сам ретраит connect-errors и 429/5xx через `max_retries`.
+        Mid-stream обрыв (после установления соединения) не ретраится — LLM
+        generation не идемпотентна. На такой обрыв выдаём graceful-сообщение.
+
+        Sync↔async мост: `pipe()` синхронный (OWUI Pipelines требование),
+        async-итератор stream_complete преобразуем пошагово через
+        `self._loop.run_until_complete(agen.__anext__())`.
         """
-        # Добавить инструкцию что tools больше нет — отвечай на основе собранного
         final_messages = messages + [{
             'role': 'user',
             'content': (
@@ -954,337 +722,66 @@ class Pipeline:
                 'таблицы. Разбивай информацию на логические блоки. Избегай сплошного текста.'
             ),
         }]
-        payload = {
-            'model': self.valves.LLM_MODEL,
-            'messages': final_messages,
-            'temperature': self.valves.LLM_TEMPERATURE,
-            'stream': True,
-        }
-        if self.valves.LLM_ANSWER_MAX_TOKENS > 0:
-            payload['max_tokens'] = self.valves.LLM_ANSWER_MAX_TOKENS
-        if self.valves.ENABLE_THINKING:
-            payload['reasoning_budget'] = 4096
-        else:
-            payload['chat_template_kwargs'] = {'enable_thinking': False}
-        resp = requests.post(
-            f'{self.valves.LLM_URL.rstrip("/")}/chat/completions',
-            headers={
-                'Authorization': f'Bearer {self.valves.LLM_API_KEY}',
-                'Content-Type': 'application/json',
-            },
-            json=payload,
-            stream=True,
-            timeout=self.valves.HTTP_TIMEOUT,
+        max_tokens = self.valves.LLM_ANSWER_MAX_TOKENS if self.valves.LLM_ANSWER_MAX_TOKENS > 0 else None
+        agen = self._llm.stream_complete(
+            final_messages,
+            params=GenerationParams(temperature=self.valves.LLM_TEMPERATURE),
+            max_tokens=max_tokens,
         )
-        resp.raise_for_status()
-        resp.encoding = 'utf-8'
         in_thinking = False
-        for line in resp.iter_lines(decode_unicode=True):
-            if not line or not line.startswith('data: '):
-                continue
-            data_str = line[6:]
-            if data_str == '[DONE]':
-                break
-            try:
-                data = json.loads(data_str)
-                delta = data['choices'][0]['delta']
-                # Thinking (reasoning_content или reasoning — зависит от провайдера)
-                reasoning = delta.get('reasoning_content') or delta.get('reasoning') or ''
-                if reasoning:
+        try:
+            while True:
+                try:
+                    chunk = self._loop.run_until_complete(agen.__anext__())
+                except StopAsyncIteration:
+                    break
+                kind = chunk['kind']
+                text = chunk['text']
+                if kind == 'reasoning':
                     if not in_thinking:
                         yield '<think>'
                         in_thinking = True
-                    yield reasoning
-                # Content
-                content = delta.get('content') or ''
-                if content:
+                    yield text
+                else:  # content
                     if in_thinking:
                         yield '</think>'
                         in_thinking = False
-                    yield content
-            except Exception:
-                continue
+                    yield text
+        except Exception as exc:
+            logger.warning('stream_final failed: %s', exc, exc_info=True)
+            if in_thinking:
+                yield '</think>'
+                in_thinking = False
+            yield f'\n\n⚠️ Связь с LLM сорвалась, ответ может быть неполным. Попробуйте повторить запрос.\n\n_Техническая деталь: {type(exc).__name__}: {exc}_'
+            return
         if in_thinking:
             yield '</think>'
 
-    # ── Embeddings ────────────────────────────────────────────────────────────
-
-    def _embed_dense(self, text: str) -> list:
-        """Dense query embedding через morag.HttpEmbedder (тот же путь что в indexing)."""
-        return self._run(self._dense_embedder.embed_query(text))
-
-    def _embed_sparse(self, text: str) -> tuple[list, list]:
-        """Sparse query embedding через morag.HttpGteSparseEmbedder."""
-        return self._run(self._sparse_embedder.embed_query(text))
-
-    # ── Qdrant ────────────────────────────────────────────────────────────────
-
-    def _get_sparse_vector_names(self, collection: str | None = None) -> set[str]:
-        """Получить имена sparse-векторов коллекции (с кешем per-collection)."""
-        collection = collection or self.valves.QDRANT_COLLECTION
-        if not hasattr(self, '_sparse_vector_names_cache'):
-            self._sparse_vector_names_cache: dict[str, set[str]] = {}
-        if collection in self._sparse_vector_names_cache:
-            return self._sparse_vector_names_cache[collection]
-        names: set[str] = set()
-        try:
-            url = f'{self.valves.QDRANT_URL}/collections/{collection}'
-            resp = requests.get(url, timeout=10)
-            resp.raise_for_status()
-            sparse = resp.json().get('result', {}).get('config', {}).get(
-                'params', {},
-            ).get('sparse_vectors', {})
-            names = set(sparse.keys())
-        except Exception as exc:
-            print(f'[morag-agent] failed to get sparse vector names for {collection}: {exc}')
-        self._sparse_vector_names_cache[collection] = names
-        return names
+    # ── Qdrant + retrieval — тонкие sync-обёртки над HybridSearcher ──────────
 
     def _search(self, text: str, limit: int) -> list[dict]:
-        dense = self._embed_dense(text)
-        indices, values = self._embed_sparse(text)
-        available_sparse = self._get_sparse_vector_names()
-
-        # Лексический сигнал: GTE keywords + BM25 stem + BM25 trigram → nested RRF
-        lexical_prefetch = []
-        if 'keywords' in available_sparse:
-            lexical_prefetch.append(
-                {'query': {'indices': indices, 'values': values}, 'using': 'keywords', 'limit': limit * 2},
-            )
-        for vec_fn, vec_name in [
-            (_bm25_query_vector, 'bm25'),
-            (_bm25_trigram_query_vector, 'bm25_trigram'),
-        ]:
-            if vec_name not in available_sparse:
-                continue
-            idx, val = vec_fn(text)
-            if idx:
-                lexical_prefetch.append({
-                    'query': {'indices': idx, 'values': val},
-                    'using': vec_name,
-                    'limit': limit * 2,
-                })
-
-        # Двухуровневый RRF: семантика (1 голос) vs лексика (1 голос)
-        prefetch = [{'query': dense, 'using': 'full', 'limit': limit * 2}]
-        if lexical_prefetch:
-            prefetch.append({
-                'prefetch': lexical_prefetch,
-                'query': {'fusion': 'rrf'},
-                'limit': limit * 2,
-            })
-
-        payload = {
-            'prefetch': prefetch,
-            'query': {'fusion': 'rrf'},
-            'limit': limit,
-            'with_payload': True,
-        }
-        url = f'{self.valves.QDRANT_URL}/collections/{self.valves.QDRANT_COLLECTION}/points/query'
-        resp = requests.post(url, json=payload, timeout=self.valves.HTTP_TIMEOUT)
-        resp.raise_for_status()
-        points = resp.json().get('result', {}).get('points', [])
-        return [_point_to_chunk(p) for p in points]
+        return self._run(self._searcher.search_chunks(text, limit))
 
     def _fetch_chunk_by_order(self, doc_id: str, order: int) -> dict | None:
-        payload = {
-            'filter': {
-                'must': [
-                    {'key': 'doc_id', 'match': {'value': doc_id}},
-                    {'key': 'order', 'match': {'value': order}},
-                ]
-            },
-            'limit': 1,
-            'with_payload': True,
-        }
-        url = f'{self.valves.QDRANT_URL}/collections/{self.valves.QDRANT_COLLECTION}/points/scroll'
-        resp = requests.post(url, json=payload, timeout=self.valves.HTTP_TIMEOUT)
-        resp.raise_for_status()
-        points = resp.json().get('result', {}).get('points', [])
-        if not points:
-            return None
-        chunk = _point_to_chunk(points[0])
-        chunk['score'] = 0.0
-        return chunk
+        return self._run(self._searcher.fetch_chunk_by_order(doc_id, order))
 
     def _fetch_doc_summaries(self, doc_ids: list[str]) -> dict[str, str]:
-        if not doc_ids:
-            return {}
-        payload = {
-            'filter': {'must': [{'key': 'id', 'match': {'any': doc_ids}}]},
-            'with_payload': ['id', 'doc_summary'],
-            'with_vectors': False,
-            'limit': len(doc_ids),
-        }
-        url = f'{self.valves.QDRANT_URL}/collections/{self.valves.QDRANT_DOCS_COLLECTION}/points/scroll'
-        try:
-            resp = requests.post(url, json=payload, timeout=self.valves.HTTP_TIMEOUT)
-            resp.raise_for_status()
-        except Exception as exc:
-            print(f'[morag-agent] _fetch_doc_summaries failed: {exc}')
-            return {}
-        summaries: dict[str, str] = {}
-        for point in resp.json().get('result', {}).get('points', []):
-            p = point.get('payload', {})
-            doc_id = p.get('id')
-            summary = p.get('doc_summary')
-            if doc_id and summary:
-                summaries[doc_id] = summary
-        return summaries
-
-    def _build_doc_tree(self) -> dict[str, list[str]]:
-        """Построить дерево parent→children + set всех indexed doc_id (с кешированием)."""
-        if self._doc_tree is not None:
-            return self._doc_tree
-        tree: dict[str, list[str]] = {}
-        indexed: set[str] = set()
-        offset = None
-        while True:
-            payload: dict = {
-                'with_payload': ['id', 'parent_doc_ids'],
-                'with_vectors': False,
-                'limit': 100,
-            }
-            if offset is not None:
-                payload['offset'] = offset
-            url = f'{self.valves.QDRANT_URL}/collections/{self.valves.QDRANT_DOCS_COLLECTION}/points/scroll'
-            try:
-                resp = requests.post(url, json=payload, timeout=self.valves.HTTP_TIMEOUT)
-                resp.raise_for_status()
-                result = resp.json().get('result', {})
-                points = result.get('points', [])
-                if not points:
-                    break
-                for p in points:
-                    pl = p.get('payload', {})
-                    doc_id = pl.get('id', '')
-                    if doc_id:
-                        indexed.add(doc_id)
-                    for parent_id in pl.get('parent_doc_ids', []):
-                        tree.setdefault(parent_id, []).append(doc_id)
-                offset = result.get('next_page_offset')
-                if offset is None:
-                    break
-            except Exception as exc:
-                print(f'[morag-agent] _build_doc_tree failed: {exc}')
-                break
-        self._doc_tree = tree
-        self._indexed_doc_ids = indexed
-        return self._doc_tree
+        return self._run(self._searcher.fetch_doc_summaries(doc_ids))
 
     def _get_indexed_doc_ids(self) -> set[str]:
-        """Вернуть id всех документов в docs collection (через _build_doc_tree-кеш)."""
-        if self._indexed_doc_ids is None:
-            self._build_doc_tree()
-        return self._indexed_doc_ids or set()
+        return self._run(self._searcher.get_indexed_doc_ids())
 
     def _get_descendant_doc_ids(self, section_ids: list[str]) -> set[str]:
-        """Развернуть section_ids в set конкретных doc_id.
-
-        Сначала смотрим в cluster_membership (flat_topics): если id — ключ,
-        подставляем список. Остальные id идут по старой BFS-логике через
-        дерево parent_doc_ids. Для fixed/weighted membership пустой, ветка
-        не активируется.
-        """
-        membership = self._fetch_cluster_membership()
-        result: set[str] = set()
-        tree_ids: list[str] = []
-        for sid in section_ids:
-            if sid in membership:
-                result.update(membership[sid])
-            else:
-                tree_ids.append(sid)
-        if tree_ids:
-            tree = self._build_doc_tree()
-            result.update(tree_ids)
-            queue = list(tree_ids)
-            while queue:
-                parent = queue.pop(0)
-                for child in tree.get(parent, []):
-                    if child not in result:
-                        result.add(child)
-                        queue.append(child)
-        return result
+        return self._run(self._searcher.get_descendant_doc_ids(section_ids))
 
     def _fetch_knowledge_map(self) -> str:
-        if self._knowledge_map is not None:
-            return self._knowledge_map
-        payload = {
-            'filter': {'must': [{'key': 'doc_id', 'match': {'value': '_system_prompt'}}]},
-            'with_payload': ['map_text'],
-            'with_vectors': False,
-            'limit': 1,
-        }
-        url = f'{self.valves.QDRANT_URL}/collections/{self.valves.QDRANT_KNOWLEDGE_MAP_COLLECTION}/points/scroll'
-        try:
-            resp = requests.post(url, json=payload, timeout=self.valves.HTTP_TIMEOUT)
-            resp.raise_for_status()
-            points = resp.json().get('result', {}).get('points', [])
-            if points:
-                self._knowledge_map = points[0]['payload'].get('map_text', '')
-            else:
-                self._knowledge_map = ''
-        except Exception as exc:
-            print(f'[morag-agent] _fetch_knowledge_map failed: {exc}')
-            self._knowledge_map = ''
-        return self._knowledge_map
+        return self._run(self._searcher.fetch_knowledge_map())
 
     def _fetch_cluster_membership(self) -> dict[str, list[str]]:
-        """Загрузить cluster_membership из knowledge_map collection (ленивый кеш).
-
-        Возвращает {cluster_id: [doc_id, ...]}. Пустой dict если точки нет
-        (например, стратегия fixed/weighted).
-        """
-        if self._cluster_membership is not None:
-            return self._cluster_membership
-        payload = {
-            'filter': {'must': [{'key': 'doc_id', 'match': {'value': '_cluster_membership'}}]},
-            'with_payload': ['cluster_membership'],
-            'with_vectors': False,
-            'limit': 1,
-        }
-        url = f'{self.valves.QDRANT_URL}/collections/{self.valves.QDRANT_KNOWLEDGE_MAP_COLLECTION}/points/scroll'
-        try:
-            resp = requests.post(url, json=payload, timeout=self.valves.HTTP_TIMEOUT)
-            resp.raise_for_status()
-            points = resp.json().get('result', {}).get('points', [])
-            if points:
-                raw = points[0]['payload'].get('cluster_membership') or {}
-                # Санитарная проверка типов
-                self._cluster_membership = {
-                    k: list(v) for k, v in raw.items()
-                    if isinstance(k, str) and isinstance(v, list)
-                }
-            else:
-                self._cluster_membership = {}
-        except Exception as exc:
-            print(f'[morag-agent] _fetch_cluster_membership failed: {exc}')
-            self._cluster_membership = {}
-        return self._cluster_membership
+        return self._run(self._searcher.fetch_cluster_membership())
 
     def _get_doc_title(self, doc_id: str) -> str:
-        """Получить title документа из Qdrant (с кешем)."""
-        if doc_id in self._doc_titles:
-            return self._doc_titles[doc_id]
-        payload = {
-            'filter': {'must': [{'key': 'id', 'match': {'value': doc_id}}]},
-            'with_payload': ['title'],
-            'with_vectors': False,
-            'limit': 1,
-        }
-        url = f'{self.valves.QDRANT_URL}/collections/{self.valves.QDRANT_DOCS_COLLECTION}/points/scroll'
-        try:
-            resp = requests.post(url, json=payload, timeout=10)
-            resp.raise_for_status()
-            points = resp.json().get('result', {}).get('points', [])
-            if points:
-                title = points[0]['payload'].get('title', doc_id)
-                self._doc_titles[doc_id] = title
-                return title
-        except Exception:
-            pass
-        self._doc_titles[doc_id] = doc_id
-        return doc_id
+        return self._run(self._searcher.get_doc_title(doc_id))
 
     # ── Citations ─────────────────────────────────────────────────────────────
 
@@ -1362,7 +859,7 @@ def _format_tool_status(fn_name: str, fn_args: dict, resolve_title=None) -> str:
     _title = resolve_title or (lambda x: x)
     if fn_name == 'find_section':
         query = fn_args.get('query', '')
-        return f'⌞{query}⌝ поиск раздела'
+        return f'[{query}] поиск раздела'
     if fn_name == 'search':
         query = fn_args.get('query', '')
         section_ids = fn_args.get('section_ids') or []
@@ -1373,91 +870,13 @@ def _format_tool_status(fn_name: str, fn_args: dict, resolve_title=None) -> str:
         if doc_ids:
             scope.append('на страницах: ' + ', '.join(_title(did) for did in doc_ids))
         suffix = '; '.join(scope) if scope else 'по всей базе'
-        return f'⌊{query}⌉ {suffix}'
+        return f'[{query}] {suffix}'
     if fn_name == 'get_neighbors':
         doc_id = fn_args.get('doc_id', '')
         order = fn_args.get('order', 0)
         window = fn_args.get('window', 2)
         title = _title(doc_id)
-        return f'【{title}】 блок #{order} (±{window}) — расширение контекста'
+        return f'[{title}] блок #{order} (±{window}) — расширение контекста'
     return f'{fn_name}({json.dumps(fn_args, ensure_ascii=False)})'
 
 
-# ── Module-level helpers ─────────────────────────────────────────────────────
-
-import re
-
-from nltk.corpus import stopwords
-from nltk.stem.snowball import SnowballStemmer
-
-_WORD_RE = re.compile(r'\w+')
-_CYRILLIC_RE = re.compile(r'[а-яё]')
-
-_STOP_WORDS: frozenset[str] = frozenset(
-    stopwords.words('russian') + stopwords.words('english')
-)
-
-_stemmer_ru = SnowballStemmer('russian')
-_stemmer_en = SnowballStemmer('english')
-
-
-def _stem(word: str) -> str:
-    """Стемминг с автоопределением языка по кириллице."""
-    if _CYRILLIC_RE.search(word):
-        return _stemmer_ru.stem(word)
-    return _stemmer_en.stem(word)
-
-
-def _tokens_to_vector(tokens: list[str]) -> tuple[list, list]:
-    """Список токенов → (indices, values) sparse vector. Веса = 1.0."""
-    if not tokens:
-        return [], []
-    seen: dict[int, float] = {}
-    for token in tokens:
-        idx = int(hashlib.md5(token.encode('utf-8')).hexdigest(), 16) % _MD5_MOD
-        seen[idx] = 1.0
-    return list(seen.keys()), list(seen.values())
-
-
-def _bm25_query_vector(text: str) -> tuple[list, list]:
-    """BM25 query vector: стемминг."""
-    words = [_stem(w) for w in _WORD_RE.findall(text.lower()) if w not in _STOP_WORDS]
-    return _tokens_to_vector(words)
-
-
-# ── Триграммы ─────────────────────────────────────────────────────────────
-
-def _trigrams(word: str) -> list[str]:
-    padded = f'__{word}__'
-    return [padded[i:i + 3] for i in range(len(padded) - 2)]
-
-
-def _bm25_trigram_query_vector(text: str) -> tuple[list, list]:
-    """BM25 trigram query vector: символьные триграммы оригинальных слов."""
-    tokens = []
-    for w in _WORD_RE.findall(text.lower()):
-        if w in _STOP_WORDS:
-            continue
-        for tri in _trigrams(w):
-            tokens.append(tri)
-    return _tokens_to_vector(tokens)
-
-
-def _point_to_chunk(p: dict) -> dict:
-    payload = p.get('payload', {})
-    path_raw = payload.get('path', '')
-    paths: list[str] = path_raw if isinstance(path_raw, list) else ([path_raw] if path_raw else [])
-    return {
-        'chunk_id': str(p['id']),
-        'doc_id': payload.get('doc_id', ''),
-        'path': paths,
-        'order': payload.get('order', 0),
-        'total': payload.get('total', 0),
-        'text': payload.get('text', ''),
-        'context': payload.get('context', ''),
-        'updated_at': payload.get('updated_at', ''),
-        'creator': payload.get('creator', ''),
-        'url': payload.get('url'),
-        'source_type': payload.get('source_type', ''),
-        'score': p.get('score', 0.0),
-    }

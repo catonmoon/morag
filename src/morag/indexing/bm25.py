@@ -11,7 +11,6 @@ sparse vectors в Qdrant. Запускается как post-indexing шаг,
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import math
 import re
@@ -22,7 +21,10 @@ from nltk.stem.snowball import SnowballStemmer
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import PointVectors
 
-from morag.indexing.embedder import _MD5_MOD
+# Единая точка истины для токен-хэша (md5 % _MD5_MOD) — общая с GTE sparse.
+# Если разнести определения — query и document sparse ранжируются по разным
+# индексам и sparse-поиск перестаёт работать. Не дублируем.
+from morag.indexing.embedder import _word_to_index
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +55,6 @@ def _stem(word: str) -> str:
     return _stemmer_en.stem(word)
 
 
-def _word_to_index(word: str) -> int:
-    """Хэш токена → индекс sparse-вектора. Совместимо с GTE sparse."""
-    return int(hashlib.md5(word.encode('utf-8')).hexdigest(), 16) % _MD5_MOD
-
-
 def tokenize(text: str) -> list[str]:
     """Токенизация: lowercase + стоп-слова + Snowball stemming (ru/en)."""
     return [_stem(w) for w in _WORD_RE.findall(text.lower()) if w not in _STOP_WORDS]
@@ -76,6 +73,24 @@ def tokenize_trigram(text: str) -> list[str]:
         for tri in _trigrams(w):
             tokens.append(tri)
     return tokens
+
+
+def to_sparse_vector(tokens: list[str]) -> tuple[list[int], list[float]]:
+    """Токены → (indices, values) sparse-вектор для query-side BM25.
+
+    Единая точка истины для хэш-функции (`_word_to_index` через md5 % _MD5_MOD) —
+    общая с indexing-стороной (через `build_bm25_vectors`). Все веса=1.0;
+    дубликаты токенов схлопываются по индексу (OR-семантика).
+
+    Используется в retrieval pipeline для построения query-векторов
+    `keywords`/`bm25`/`bm25_trigram`.
+    """
+    if not tokens:
+        return [], []
+    seen: dict[int, float] = {}
+    for token in tokens:
+        seen[_word_to_index(token)] = 1.0
+    return list(seen.keys()), list(seen.values())
 
 
 def build_bm25_vectors(
