@@ -240,8 +240,37 @@ class Config(BaseModel):
     indexing: IndexingConfig | None = None  # секция индексации; None для retrieval-only конфигов (pipelines без cli.main index)
 
 
+def _deep_merge(base: dict, overlay: dict) -> dict:
+    """Глубокий мёрж двух dict'ов: вложенные dict — рекурсивно, остальное — overlay перекрывает.
+
+    Списки заменяются целиком (а не конкатенируются) — это даёт предсказуемое поведение
+    overlay'а для типа `ancestor_ids: [1,2,3]` (хочется заменить, а не добавить).
+    """
+    merged = dict(base)
+    for key, overlay_value in overlay.items():
+        base_value = merged.get(key)
+        if isinstance(base_value, dict) and isinstance(overlay_value, dict):
+            merged[key] = _deep_merge(base_value, overlay_value)
+        else:
+            merged[key] = overlay_value
+    return merged
+
+
 def load_config(path: str | Path = 'config.yml') -> Config:
-    """Загрузить и валидировать конфиг из YAML-файла."""
-    with open(path, encoding='utf-8') as f:
-        data = yaml.safe_load(f)
+    """Загрузить и валидировать конфиг из YAML-файла.
+
+    Если рядом с основным конфигом лежит `config.local.yml` — он deep-мёржится поверх.
+    Это позволяет хранить базовый конфиг под git, а секреты и user-overrides —
+    в `config.local.yml` (gitignored). Console API пишет правки только в local-файл.
+    """
+    primary_path = Path(path)
+    with open(primary_path, encoding='utf-8') as f:
+        data = yaml.safe_load(f) or {}
+
+    local_path = primary_path.with_name('config.local.yml')
+    if local_path.exists():
+        with open(local_path, encoding='utf-8') as f:
+            local_data = yaml.safe_load(f) or {}
+        data = _deep_merge(data, local_data)
+
     return Config.model_validate(data)

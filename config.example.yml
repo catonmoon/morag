@@ -1,3 +1,14 @@
+# ============================================================================
+# Шаблон конфига morag.
+#
+# 1. Скопируй: cp config.example.yml config.yml
+# 2. Создай overlay для секретов:  touch config.local.yml
+# 3. Любая правка через Console UI (http://localhost:8000) или вручную в
+#    config.local.yml — её содержимое deep-merge'ится поверх config.yml.
+#
+# config.yml и config.local.yml — оба gitignored (см. .gitignore).
+# ============================================================================
+
 sources:
   local_documents:
     path: examples              # готовые тестовые документы; замените на свой путь

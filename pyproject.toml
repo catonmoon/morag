@@ -29,6 +29,10 @@ indexing = [
     "pymupdf>=1.25.0",
     "markdown-it-py>=3.0.0",
     "beautifulsoup4>=4.12.0",
+    # Control-plane HTTP в cmd_serve. Console обращается через эти эндпоинты
+    # вместо спавна subprocess'ов.
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
 ]
 
 

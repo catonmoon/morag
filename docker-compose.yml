@@ -33,6 +33,16 @@ services:
       context: .
       network: host
     command: serve
+    extra_hosts:
+      # Доступ к Ollama на хосте — embedder/LLM могут ходить через host.docker.internal.
+      - "host.docker.internal:host-gateway"
+    expose:
+      # Control-plane HTTP только в docker-network. Console обращается по этому порту.
+      - "9090"
+    environment:
+      # Control-plane HTTP-сервер для приёма команд от console (start/stop/status).
+      - MORAG_CONTROL_PORT=9090
+      - MORAG_STATUS_FILE=/app/data/morag_state/index_status.json
     depends_on:
       qdrant:
         condition: service_healthy
@@ -40,7 +50,36 @@ services:
         condition: service_healthy
     volumes:
       - ./config.yml:/app/config.yml:ro
-      - ./data:/app/data:ro
+      # config.local.yml — overlay редактируемый через console UI. Если файла нет на хосте,
+      # перед `docker compose up` сделай `touch config.local.yml` (иначе docker создаст директорию).
+      - ./config.local.yml:/app/config.local.yml:ro
+      # data: рw для записи state-file (./data/morag_state/index_status.json), чанки
+      # источников читаются из подкаталогов как обычно.
+      - ./data:/app/data:rw
+    restart: unless-stopped
+
+  morag-console:
+    build:
+      context: .
+      dockerfile: services/console/Dockerfile
+      network: host
+    ports:
+      # Bind ТОЛЬКО на localhost — UI без auth, наружу выставлять опасно.
+      - "127.0.0.1:8000:8000"
+    environment:
+      - MORAG_CONFIG_PATH=/data/config.yml
+      # HTTP control-plane индексера в docker-network
+      - MORAG_INDEXER_URL=http://morag-indexer:9090
+      - QDRANT_DASHBOARD_URL=http://localhost:6333/dashboard
+      - OPENWEBUI_URL=http://localhost:3000
+    volumes:
+      # Только конфиги — console больше не запускает subprocess'ы и не пишет state.
+      # config.local.yml mount должен указывать на существующий файл (touch заранее).
+      - ./config.yml:/data/config.yml:ro
+      - ./config.local.yml:/data/config.local.yml:rw
+    depends_on:
+      morag-indexer:
+        condition: service_started
     restart: unless-stopped
 
   embedder-gte:
