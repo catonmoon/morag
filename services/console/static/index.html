@@ -1,0 +1,879 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>morag console</title>
+  <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js"></script>
+  <style>
+    :root {
+      --bg: #fafafa;
+      --fg: #111;
+      --muted: #777;
+      --border: #ddd;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --success: #16a34a;
+      --danger: #dc2626;
+      --warn: #d97706;
+      --code-bg: #f3f4f6;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 1.5rem;
+      padding: 0.75rem 1.5rem;
+      background: white;
+      border-bottom: 1px solid var(--border);
+    }
+    header h1 { font-size: 1.1rem; margin: 0; font-weight: 600; }
+    nav { display: flex; gap: 0.25rem; }
+    nav button {
+      background: none;
+      border: none;
+      padding: 0.5rem 0.85rem;
+      color: var(--muted);
+      cursor: pointer;
+      border-radius: 6px;
+      font-size: 0.92rem;
+    }
+    nav button.active { color: var(--fg); background: var(--code-bg); font-weight: 500; }
+    nav button:hover:not(.active) { color: var(--fg); }
+    .pill {
+      margin-left: auto;
+      padding: 0.25rem 0.7rem;
+      border-radius: 999px;
+      font-size: 0.78rem;
+      font-weight: 500;
+      background: var(--code-bg);
+      color: var(--muted);
+    }
+    .pill.running { background: #dbeafe; color: var(--accent); }
+    .pill.completed { background: #dcfce7; color: var(--success); }
+    .pill.cancelled { background: #fef3c7; color: var(--warn); }
+    .pill.failed { background: #fee2e2; color: var(--danger); }
+    main { max-width: 980px; margin: 1.5rem auto; padding: 0 1.5rem; }
+    section.view { display: none; }
+    section.view.active { display: block; }
+    .grid { display: grid; gap: 1rem; grid-template-columns: 1fr 1fr; }
+    .card {
+      background: white;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+    }
+    .card h2 {
+      font-size: 0.95rem;
+      margin: 0 0 0.75rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .stat { display: flex; justify-content: space-between; padding: 0.35rem 0; }
+    .stat .label { color: var(--muted); }
+    .stat .value { font-weight: 500; font-variant-numeric: tabular-nums; }
+    .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }
+    button.btn {
+      background: var(--accent);
+      color: white;
+      border: none;
+      padding: 0.55rem 1rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+    button.btn:hover:not(:disabled) { background: var(--accent-hover); }
+    button.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.btn.secondary { background: white; color: var(--fg); border: 1px solid var(--border); }
+    button.btn.secondary:hover:not(:disabled) { background: var(--code-bg); }
+    button.btn.danger { background: var(--danger); }
+    button.btn.warn { background: var(--warn); }
+    .progress {
+      margin-top: 1rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      height: 8px;
+      background: var(--code-bg);
+    }
+    .progress-fill {
+      height: 100%;
+      background: var(--accent);
+      transition: width 0.5s ease;
+    }
+    .meta {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.85rem;
+      color: var(--muted);
+      margin-top: 0.4rem;
+    }
+    a.ext {
+      color: var(--accent);
+      text-decoration: none;
+      display: block;
+      padding: 0.3rem 0;
+    }
+    a.ext:hover { text-decoration: underline; }
+    label { display: block; margin: 0.85rem 0 0.3rem; font-size: 0.88rem; color: var(--muted); }
+    input[type=text], input[type=password], input[type=number], select, textarea {
+      width: 100%;
+      padding: 0.5rem 0.65rem;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      font: inherit;
+      background: white;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: 2px solid var(--accent);
+      outline-offset: -1px;
+    }
+    .help { font-size: 0.8rem; color: var(--muted); margin-top: 0.25rem; }
+    textarea {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.85rem;
+      min-height: 280px;
+      resize: vertical;
+    }
+    pre {
+      background: var(--code-bg);
+      padding: 0.85rem;
+      border-radius: 6px;
+      font-size: 0.82rem;
+      overflow: auto;
+      max-height: 320px;
+      margin: 0;
+    }
+    .toast {
+      position: fixed;
+      bottom: 1.25rem;
+      right: 1.25rem;
+      padding: 0.7rem 1rem;
+      border-radius: 6px;
+      background: var(--fg);
+      color: white;
+      max-width: 380px;
+      font-size: 0.88rem;
+    }
+    .toast.error { background: var(--danger); }
+    .toast.success { background: var(--success); }
+    /* In-card результат — рядом с кнопкой, не плавающий toast */
+    .result {
+      margin-top: 0.85rem;
+      padding: 0.55rem 0.75rem;
+      border-radius: 5px;
+      font-size: 0.85rem;
+      line-height: 1.4;
+      background: var(--code-bg);
+      color: var(--fg);
+      white-space: pre-wrap;
+    }
+    .result.success { background: #dcfce7; color: #14532d; }
+    .result.error { background: #fee2e2; color: #7f1d1d; }
+    .result.info { background: #dbeafe; color: #1e3a8a; }
+    .busy-spinner {
+      font-size: 0.85rem;
+      color: var(--muted);
+      align-self: center;
+    }
+    /* Markdown content (KM viewer) */
+    .md-body {
+      font-size: 0.92rem;
+      line-height: 1.55;
+      color: var(--fg);
+    }
+    .md-body h1, .md-body h2, .md-body h3, .md-body h4 {
+      margin: 1.1em 0 0.5em;
+      line-height: 1.25;
+      font-weight: 600;
+    }
+    .md-body h1 { font-size: 1.35rem; border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }
+    .md-body h2 { font-size: 1.15rem; }
+    .md-body h3 { font-size: 1.0rem; color: var(--muted); }
+    .md-body h4 { font-size: 0.95rem; color: var(--muted); }
+    .md-body p { margin: 0.5em 0; }
+    .md-body ul, .md-body ol { margin: 0.4em 0; padding-left: 1.4em; }
+    .md-body li { margin: 0.15em 0; }
+    .md-body code {
+      background: var(--code-bg);
+      padding: 0.1em 0.35em;
+      border-radius: 3px;
+      font-size: 0.86em;
+    }
+    .md-body pre {
+      background: var(--code-bg);
+      padding: 0.7em 0.9em;
+      border-radius: 5px;
+      overflow-x: auto;
+      max-height: none;
+    }
+    .md-body pre code { background: transparent; padding: 0; }
+    .md-body hr { border: none; border-top: 1px solid var(--border); margin: 1.2em 0; }
+    .md-body blockquote {
+      margin: 0.5em 0;
+      padding-left: 0.85em;
+      border-left: 3px solid var(--border);
+      color: var(--muted);
+    }
+    .md-preview {
+      position: relative;
+      max-height: 280px;
+      overflow: hidden;
+    }
+    .md-preview::after {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 80px;
+      pointer-events: none;
+      background: linear-gradient(to bottom, transparent, white);
+    }
+    .md-full {
+      max-height: 70vh;
+      overflow-y: auto;
+      padding-right: 0.5rem;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      padding-top: 0.85rem;
+      padding-bottom: 0.85rem;
+    }
+    .row-2 { display: grid; gap: 0.75rem; grid-template-columns: 1fr 1fr; }
+    .empty { color: var(--muted); padding: 1rem 0; }
+  </style>
+</head>
+<body x-data="app()" x-init="init()">
+
+  <header>
+    <h1>morag console</h1>
+    <nav>
+      <button :class="{active: tab==='dashboard'}" @click="tab='dashboard'">Dashboard</button>
+      <button :class="{active: tab==='setup'}" @click="setupOpen()">Setup</button>
+      <button :class="{active: tab==='settings'}" @click="settingsOpen()">Settings</button>
+    </nav>
+    <div class="pill" :class="status?.progress?.state || 'idle'"
+         x-text="status?.is_running ? `Indexing — ${status?.progress?.state || '...'}` : (status?.progress?.state || 'idle')"></div>
+  </header>
+
+  <main>
+
+    <!-- ============ DASHBOARD ============ -->
+    <section class="view" :class="{active: tab==='dashboard'}">
+
+      <div class="grid">
+        <div class="card">
+          <h2>Stats</h2>
+          <div class="stat"><span class="label">Documents</span><span class="value" x-text="stats?.docs ?? '—'"></span></div>
+          <div class="stat"><span class="label">Chunks</span><span class="value" x-text="stats?.chunks ?? '—'"></span></div>
+          <div class="stat"><span class="label">Knowledge Map nodes</span><span class="value" x-text="stats?.knowledge_map_nodes ?? '—'"></span></div>
+          <div class="stat" x-show="stats?.last_indexed_at">
+            <span class="label">Newest document</span>
+            <span class="value" :title="stats?.last_indexed_at" x-text="formatLastIndexed(stats?.last_indexed_at)"></span>
+          </div>
+          <div x-show="stats && !stats.qdrant_reachable"
+               style="margin-top:0.5rem; padding:0.6rem 0.75rem; background:#fef3c7; color:#78350f; border-radius:5px; font-size:0.82rem; line-height:1.45">
+            <div style="font-weight:500; margin-bottom:0.35rem">⚠ Qdrant недоступен: <span x-text="stats?.qdrant_error"></span></div>
+            <div>Если запускаешь консоль <b>локально</b> (uvicorn) — открой <a href="#" @click.prevent="tab='settings'" style="color:inherit; text-decoration:underline">Settings</a> и добавь в overlay:</div>
+            <pre style="margin:0.4rem 0 0.2rem; padding:0.4rem 0.55rem; background:rgba(0,0,0,0.05); border-radius:4px; font-size:0.78rem">qdrant:
+  host: localhost</pre>
+            <div style="margin-top:0.35rem">Если в <b>docker compose</b> — проверь что сервис <code>qdrant</code> поднят (<code>docker compose ps</code>).</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Links</h2>
+          <a class="ext" :href="links?.qdrant" target="_blank" x-show="links?.qdrant">→ Qdrant Dashboard</a>
+          <a class="ext" :href="links?.open_webui" target="_blank" x-show="links?.open_webui">→ Open WebUI</a>
+          <div class="empty" x-show="!links?.open_webui">Open WebUI URL не задан (env <code>OPENWEBUI_URL</code>)</div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:1rem">
+        <h2>Indexing</h2>
+
+        <template x-if="!status?.is_running">
+          <div>
+            <div class="actions">
+              <button class="btn" @click="startIndex(false)">Start</button>
+              <button class="btn warn" @click="startIndex(true)">Reset & Start</button>
+              <button class="btn secondary" @click="rebuildKM()">Rebuild Knowledge Map</button>
+            </div>
+            <template x-if="status?.progress && status.progress.state !== 'idle'">
+              <div style="margin-top:1rem; padding:0.75rem 0.9rem; background:var(--code-bg); border-radius:6px">
+                <div style="font-weight:500; margin-bottom:0.35rem">
+                  <span x-text="lastRunIcon()"></span>
+                  <span x-text="lastRunTitle()"></span>
+                </div>
+                <div class="meta" style="margin:0">
+                  <span>Phase: <code x-text="status.progress.phase || '—'"></code></span>
+                  <span x-text="`${status.progress.processed} of ${status.progress.total}`"></span>
+                </div>
+                <div class="meta" style="margin:0">
+                  <span x-text="lastRunStartedAgo()"></span>
+                  <span x-show="status.run?.reset" style="color:var(--warn)">↻ was reset</span>
+                </div>
+                <div x-show="status.progress.error"
+                     style="margin-top:0.5rem; padding:0.4rem 0.55rem; background:#fee2e2; color:#7f1d1d; border-radius:4px; font-size:0.82rem"
+                     x-text="status.progress.error"></div>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <template x-if="status?.is_running">
+          <div>
+            <div class="meta">
+              <span><b x-text="status.progress?.phase || 'starting...'"></b></span>
+              <span x-text="status.progress ? `${status.progress.processed}/${status.progress.total}` : ''"></span>
+            </div>
+            <div class="progress">
+              <div class="progress-fill"
+                   :style="`width: ${progressPercent()}%`"></div>
+            </div>
+            <div class="meta">
+              <span><b>⏱ <span x-text="runningFor()"></span></b><span x-show="etaText()" x-text="' • ' + etaText()"></span></span>
+              <span x-text="status.progress?.current_doc_id ? `Current: ${status.progress.current_doc_id}` : ''"></span>
+            </div>
+            <div class="actions" style="margin-top:1rem">
+              <button class="btn" :disabled="stopState !== ''" @click="stopIndex(false)">Stop (graceful)</button>
+              <button class="btn danger" :disabled="stopState === 'killing'" @click="stopIndex(true)">Force Stop</button>
+            </div>
+            <div x-show="stopMessage"
+                 :class="'result ' + (stopResultKind || 'info')"
+                 x-text="stopMessage"></div>
+          </div>
+        </template>
+      </div>
+
+      <!-- ============ KNOWLEDGE MAP CARD ============ -->
+      <div class="card" style="margin-top:1rem">
+        <h2>Knowledge Map</h2>
+
+        <template x-if="!km">
+          <div class="empty">Loading...</div>
+        </template>
+
+        <template x-if="km && km.error">
+          <div class="empty" x-text="km.error"></div>
+        </template>
+
+        <template x-if="km && !km.error && km.full_text">
+          <div>
+            <div class="meta" style="margin-bottom:0.5rem">
+              <span x-text="`${km.nodes.length} root section(s) — ${km.full_text.length.toLocaleString()} chars`"></span>
+              <span class="empty" x-show="!kmExpanded">показано начало карты</span>
+            </div>
+
+            <!-- Превью (свёрнуто) — fade-out снизу -->
+            <div x-show="!kmExpanded" class="md-preview md-body" x-html="renderMd(km.full_text)"></div>
+
+            <!-- Полная версия (развёрнуто) — scrollable -->
+            <div x-show="kmExpanded" class="md-full md-body" x-html="renderMd(km.full_text)"></div>
+
+            <div class="actions" style="margin-top:1rem">
+              <button class="btn secondary" @click="kmExpanded = !kmExpanded"
+                      x-text="kmExpanded ? '↑ Collapse' : '↓ Show full'"></button>
+              <button class="btn secondary" @click="refreshKM()" :disabled="kmRefreshing">
+                <span x-show="!kmRefreshing">↻ Refresh</span>
+                <span x-show="kmRefreshing">⏳ loading...</span>
+              </button>
+              <span class="empty" style="align-self:center">встраивается в system prompt агента — то что LLM видит для навигации</span>
+            </div>
+          </div>
+        </template>
+      </div>
+
+    </section>
+
+
+    <!-- ============ SETUP WIZARD ============ -->
+    <section class="view" :class="{active: tab==='setup'}">
+
+      <template x-for="target in ['llm', 'dense_embedder']" :key="target">
+        <div class="card" style="margin-bottom:1rem">
+          <h2 x-text="target === 'llm' ? '1. LLM' : '2. Embedder (dense)'"></h2>
+
+          <label>Provider</label>
+          <select x-model="setup[target].preset_id" @change="setup[target].form = {}">
+            <template x-for="p in (presets?.[target] || [])" :key="p.id">
+              <option :value="p.id" x-text="p.name"></option>
+            </template>
+          </select>
+
+          <template x-for="field in selectedFields(target)" :key="field.name">
+            <div>
+              <label x-text="field.label + (field.required ? ' *' : '')"></label>
+              <input :type="field.kind === 'password' ? 'password' : (field.kind === 'number' ? 'number' : 'text')"
+                     :placeholder="field.placeholder || ''"
+                     :value="setup[target].form[field.name] ?? field.default ?? ''"
+                     @input="setup[target].form[field.name] = $event.target.value">
+              <div class="help" x-show="field.help" x-text="field.help"></div>
+            </div>
+          </template>
+
+          <div class="actions" style="margin-top:1rem">
+            <button class="btn" :disabled="setup[target].busy" @click="applyPreset(target)">Save</button>
+            <button class="btn secondary" :disabled="setup[target].busy"
+                    @click="testProvider(target === 'llm' ? 'llm' : 'dense_embedder')">
+              Test connection
+            </button>
+            <span x-show="setup[target].busy" class="busy-spinner">⏳ working...</span>
+          </div>
+          <div x-show="setup[target].result"
+               x-transition
+               :class="'result ' + (setup[target].resultKind || '')"
+               x-text="setup[target].result"></div>
+        </div>
+      </template>
+
+      <div class="card" style="margin-bottom:1rem">
+        <h2>3. Documents path</h2>
+        <label>Local docs path (внутри контейнера)</label>
+        <input type="text" x-model="setup.docs_path" placeholder="/data/docs">
+        <div class="help">Куда монтированы твои markdown'ы внутри docker-compose.</div>
+        <div class="actions" style="margin-top:1rem">
+          <button class="btn" :disabled="setup.docs_busy" @click="saveDocsPath()">Save</button>
+          <span x-show="setup.docs_busy" class="busy-spinner">⏳</span>
+        </div>
+        <div x-show="setup.docs_result" :class="'result ' + (setup.docs_resultKind || '')"
+             x-text="setup.docs_result"></div>
+      </div>
+    </section>
+
+
+    <!-- ============ SETTINGS (raw YAML) ============ -->
+    <section class="view" :class="{active: tab==='settings'}">
+
+      <div class="card" style="margin-bottom:1rem">
+        <h2>Effective config (read-only)</h2>
+        <pre x-text="dumpYaml(config)"></pre>
+        <div class="help">Это результат merge: <code>config.yml</code> + <code>config.local.yml</code>. Секреты замаскированы.</div>
+      </div>
+
+      <div class="card">
+        <h2>Local overlay (config.local.yml)</h2>
+        <textarea x-model="settings.localYaml" placeholder="# YAML overlay для config.yml; пишется через API"></textarea>
+        <div class="help">Полный overlay будет применён через PUT /api/config. Поля со значением <code>***</code> игнорируются — реальные секреты не перезаписываются.</div>
+        <div class="actions" style="margin-top:1rem">
+          <button class="btn" :disabled="settings.busy" @click="saveLocalYaml()">Save overlay</button>
+          <button class="btn secondary" :disabled="settings.busy" @click="loadLocalYaml()">Reload</button>
+          <span x-show="settings.busy" class="busy-spinner">⏳</span>
+        </div>
+        <div x-show="settings.result" :class="'result ' + (settings.resultKind || '')"
+             x-text="settings.result"></div>
+      </div>
+    </section>
+
+  </main>
+
+  <div class="toast" :class="toast.kind" x-show="toast.text" x-transition x-text="toast.text"></div>
+
+  <script>
+    function app() {
+      return {
+        tab: 'dashboard',
+        status: null,
+        stats: null,
+        config: null,
+        links: null,
+        presets: null,
+
+        setup: {
+          llm: { preset_id: 'grok', form: {}, result: '', resultKind: '', busy: false },
+          dense_embedder: { preset_id: 'ollama-qwen3', form: {}, result: '', resultKind: '', busy: false },
+          docs_path: '',
+          docs_result: '',
+          docs_resultKind: '',
+          docs_busy: false,
+        },
+
+        settings: {
+          localYaml: '',
+          result: '',
+          resultKind: '',
+          busy: false,
+        },
+
+        toast: { text: '', kind: '' },
+        // Stop UX: показывает «⏳ Stopping...» сразу при клике, чтобы юзер
+        // понимал что запрос ушёл — даже если сам stop ждёт минуту-две до
+        // завершения текущего документа.
+        stopState: '',          // '' | 'graceful' | 'killing'
+        stopMessage: '',
+        stopResultKind: '',
+
+        // Knowledge Map viewer (read-only, expandable)
+        km: null,               // {nodes, full_text, error, qdrant_reachable}
+        kmExpanded: false,
+        kmRefreshing: false,
+        _pollTimer: null,
+        // Тикает раз в секунду — чтобы runningFor() обновлялся плавно между
+        // поллами /status (которые раз в 2 сек). Alpine реактивно пересчитывает
+        // когда геттер читает _now_tick.
+        _now_tick: 0,
+        _tickTimer: null,
+
+        async init() {
+          await this.loadAll();
+          this.startPolling();
+        },
+
+        async loadAll() {
+          await Promise.all([
+            this.refreshStatus(),
+            this.refreshStats(),
+            this.refreshConfig(),
+            this.loadPresets(),
+            this.refreshLinks(),
+            this.refreshKM(),
+          ]);
+        },
+
+        startPolling() {
+          if (this._pollTimer) return;
+          this._pollTimer = setInterval(() => {
+            this.refreshStatus();
+            // Stats реже — раз в 10 секунд
+            if (Date.now() % 10000 < 2000) this.refreshStats();
+          }, 2000);
+          // Секундный тикер для плавного обновления elapsed-таймера.
+          this._tickTimer = setInterval(() => { this._now_tick++; }, 1000);
+        },
+
+        async fetchJson(url, opts) {
+          const r = await fetch(url, opts);
+          if (!r.ok) {
+            const text = await r.text();
+            throw new Error(`${r.status}: ${text}`);
+          }
+          return r.json();
+        },
+
+        async refreshStatus() {
+          try { this.status = await this.fetchJson('/api/index/status'); }
+          catch (e) { this.showToast('status: ' + e.message, 'error'); }
+        },
+
+        async refreshStats() {
+          try { this.stats = await this.fetchJson('/api/stats'); }
+          catch (e) { /* silent — Qdrant может быть down */ }
+        },
+
+        async refreshConfig() {
+          try { this.config = await this.fetchJson('/api/config'); }
+          catch (e) { this.showToast('config: ' + e.message, 'error'); }
+        },
+
+        async refreshLinks() {
+          try { this.links = await this.fetchJson('/api/links'); }
+          catch (e) { /* silent */ }
+        },
+
+        async loadPresets() {
+          try { this.presets = await this.fetchJson('/api/presets'); }
+          catch (e) { this.showToast('presets: ' + e.message, 'error'); }
+        },
+
+        async refreshKM() {
+          this.kmRefreshing = true;
+          try {
+            this.km = await this.fetchJson('/api/knowledge-map');
+          } catch (e) {
+            this.km = { nodes: [], full_text: '', error: 'Failed to load: ' + e.message };
+          } finally {
+            this.kmRefreshing = false;
+          }
+        },
+
+        renderMd(text) {
+          if (!text) return '';
+          if (typeof marked === 'undefined') return text;  // CDN ещё не загрузился
+          // marked v13: marked.parse(text, options). Без sanitize — мы доверяем
+          // содержимому (своё, сгенерировано локальной LLM, нет user-input на эту часть).
+          return marked.parse(text, { breaks: false, gfm: true });
+        },
+
+        selectedFields(target) {
+          if (!this.presets) return [];
+          const list = this.presets[target] || [];
+          const preset = list.find(p => p.id === this.setup[target].preset_id);
+          return preset ? preset.fields : [];
+        },
+
+        async startIndex(reset) {
+          try {
+            await this.fetchJson('/api/index/start', {
+              method: 'POST',
+              headers: {'content-type': 'application/json'},
+              body: JSON.stringify({reset}),
+            });
+            this.showToast(reset ? 'Reset & started' : 'Indexing started', 'success');
+            await this.refreshStatus();
+          } catch (e) { this.showToast('start: ' + e.message, 'error'); }
+        },
+
+        async stopIndex(force) {
+          const url = force ? '/api/index/kill' : '/api/index/stop';
+          const body = force ? null : JSON.stringify({grace_seconds: 180});
+          this.stopState = force ? 'killing' : 'graceful';
+          this.stopResultKind = 'info';
+          this.stopMessage = force
+            ? '⏳ Force stopping — task будет прерван мгновенно. Текущий документ может остаться недозаписанным; на следующем Start он будет обработан заново благодаря идемпотентности Qdrant.'
+            : '⏳ Stopping (graceful) — ждём пока завершится обработка текущего документа. Может занять несколько минут на больших файлах. Если нужно немедленно — нажми Force Stop.';
+          try {
+            const r = await this.fetchJson(url, {
+              method: 'POST',
+              headers: {'content-type': 'application/json'},
+              body,
+            });
+            this.stopMessage = `✓ Stop result: ${r.result}`;
+            this.stopResultKind = 'success';
+            await this.refreshStatus();
+          } catch (e) {
+            this.stopMessage = '✗ stop failed: ' + e.message;
+            this.stopResultKind = 'error';
+          } finally {
+            this.stopState = '';
+            // Сбросить сообщение через 6 сек после завершения, чтобы при следующем
+            // Start блок не показывал устаревшие данные.
+            setTimeout(() => {
+              if (!this.status?.is_running) {
+                this.stopMessage = '';
+                this.stopResultKind = '';
+              }
+            }, 6000);
+          }
+        },
+
+        async rebuildKM() {
+          try {
+            await this.fetchJson('/api/knowledge-map/rebuild', {method: 'POST'});
+            this.showToast('Knowledge Map rebuild started', 'success');
+            await this.refreshStatus();
+          } catch (e) { this.showToast('rebuild: ' + e.message, 'error'); }
+        },
+
+        async applyPreset(target) {
+          this._setSetupResult(target, '', '');
+          this.setup[target].busy = true;
+          try {
+            await this.fetchJson('/api/presets/apply', {
+              method: 'POST',
+              headers: {'content-type': 'application/json'},
+              body: JSON.stringify({
+                target,
+                preset_id: this.setup[target].preset_id,
+                form: this.setup[target].form,
+              }),
+            });
+            this._setSetupResult(target, `✓ Saved (config.local.yml updated)`, 'success');
+            await this.refreshConfig();
+          } catch (e) {
+            this._setSetupResult(target, '✗ ' + e.message, 'error');
+          } finally {
+            this.setup[target].busy = false;
+          }
+        },
+
+        async testProvider(target) {
+          this._setSetupResult(target, 'Testing...', 'info');
+          this.setup[target].busy = true;
+          try {
+            const r = await this.fetchJson('/api/config/test', {
+              method: 'POST',
+              headers: {'content-type': 'application/json'},
+              body: JSON.stringify({target}),
+            });
+            this._setSetupResult(
+              target,
+              r.ok ? `✓ ${r.detail}` : `✗ ${r.detail}`,
+              r.ok ? 'success' : 'error',
+            );
+          } catch (e) {
+            this._setSetupResult(target, '✗ ' + e.message, 'error');
+          } finally {
+            this.setup[target].busy = false;
+          }
+        },
+
+        async saveDocsPath() {
+          if (!this.setup.docs_path) {
+            this.setup.docs_result = 'Укажи путь';
+            this.setup.docs_resultKind = 'error';
+            return;
+          }
+          this.setup.docs_result = '';
+          this.setup.docs_busy = true;
+          try {
+            await this.fetchJson('/api/config', {
+              method: 'PUT',
+              headers: {'content-type': 'application/json'},
+              body: JSON.stringify({patch: {sources: {local_documents: {path: this.setup.docs_path}}}}),
+            });
+            this.setup.docs_result = '✓ Saved';
+            this.setup.docs_resultKind = 'success';
+            await this.refreshConfig();
+          } catch (e) {
+            this.setup.docs_result = '✗ ' + e.message;
+            this.setup.docs_resultKind = 'error';
+          } finally {
+            this.setup.docs_busy = false;
+          }
+        },
+
+        async saveLocalYaml() {
+          let parsed;
+          try { parsed = jsyaml.load(this.settings.localYaml) || {}; }
+          catch (e) {
+            this.settings.result = '✗ YAML parse: ' + e.message;
+            this.settings.resultKind = 'error';
+            return;
+          }
+          this.settings.result = '';
+          this.settings.busy = true;
+          try {
+            await this.fetchJson('/api/config', {
+              method: 'PUT',
+              headers: {'content-type': 'application/json'},
+              body: JSON.stringify({patch: parsed}),
+            });
+            this.settings.result = '✓ Saved';
+            this.settings.resultKind = 'success';
+            await this.refreshConfig();
+          } catch (e) {
+            this.settings.result = '✗ ' + e.message;
+            this.settings.resultKind = 'error';
+          } finally {
+            this.settings.busy = false;
+          }
+        },
+
+        _setSetupResult(target, text, kind) {
+          this.setup[target].result = text;
+          this.setup[target].resultKind = kind;
+        },
+
+        async loadLocalYaml() {
+          // GET /api/config возвращает merged. Local-only — пока не выставлен endpoint;
+          // для v1 просто грузим merged как стартовую точку — пользователь редактирует overlay.
+          await this.refreshConfig();
+          // Минимальная заглушка: не выставлять секреты, пусть пишет с нуля
+          this.settings.localYaml = '# overlay для config.yml; см. effective выше\n';
+        },
+
+        setupOpen() {
+          this.tab = 'setup';
+          if (!this.presets) this.loadPresets();
+        },
+
+        settingsOpen() {
+          this.tab = 'settings';
+          if (!this.settings.localYaml) this.loadLocalYaml();
+        },
+
+        progressPercent() {
+          const p = this.status?.progress;
+          if (!p || !p.total) return 0;
+          return Math.min(100, Math.round((p.processed / p.total) * 100));
+        },
+
+        lastRunIcon() {
+          const s = this.status?.progress?.state;
+          return ({
+            completed: '✓',
+            cancelled: '⊘',
+            failed: '✗',
+            running: '⏳',
+          })[s] || '·';
+        },
+
+        lastRunTitle() {
+          const s = this.status?.progress?.state;
+          return ({
+            completed: 'Last run: completed successfully',
+            cancelled: 'Last run: cancelled',
+            failed: 'Last run: failed',
+            running: 'Last run: still running',
+          })[s] || `Last run: ${s || 'unknown'}`;
+        },
+
+        runningFor() {
+          // Использует _now_tick чтобы Alpine пересчитывал каждую секунду между поллами,
+          // иначе таймер дёргался бы только раз в 2 сек (на каждом /status).
+          this._now_tick;  // dependency
+          const startedAt = this.status?.run?.started_at || this.status?.progress?.started_at;
+          if (!startedAt) return '';
+          const sec = Math.max(0, (Date.now() - Date.parse(startedAt)) / 1000);
+          return formatDuration(sec) + ' elapsed';
+        },
+
+        formatLastIndexed(iso) {
+          if (!iso) return '—';
+          const ms = Date.now() - Date.parse(iso);
+          if (isNaN(ms) || ms < 0) return iso;
+          // human-readable: 5m ago / 3h ago / 2d ago. Полная ISO в title — для tooltip.
+          if (ms < 60_000) return 'just now';
+          if (ms < 3_600_000) return `${Math.round(ms / 60_000)}m ago`;
+          if (ms < 86_400_000) return `${Math.round(ms / 3_600_000)}h ago`;
+          return `${Math.round(ms / 86_400_000)}d ago`;
+        },
+
+        lastRunStartedAgo() {
+          const p = this.status?.progress;
+          if (!p?.started_at) return '';
+          const startedMs = Date.parse(p.started_at);
+          if (isNaN(startedMs)) return '';
+          // Для завершённых прогонов считаем длительность по updated_at (момент завершения),
+          // не Date.now() — иначе счётчик продолжает тикать после cancel/complete/fail.
+          const isTerminal = ['completed', 'cancelled', 'failed'].includes(p.state);
+          const endMs = (isTerminal && p.updated_at) ? Date.parse(p.updated_at) : Date.now();
+          const durationSec = Math.max(0, (endMs - startedMs) / 1000);
+          return isTerminal
+            ? `Ran for ${formatDuration(durationSec)}`
+            : `Running for ${formatDuration(durationSec)}`;
+        },
+
+        etaText() {
+          const p = this.status?.progress;
+          if (!p || !p.started_at || !p.total || !p.processed) return '';
+          const startedMs = Date.parse(p.started_at);
+          if (isNaN(startedMs)) return '';
+          const elapsed = (Date.now() - startedMs) / 1000;
+          const rate = p.processed / elapsed;
+          if (rate <= 0) return '';
+          const remaining = (p.total - p.processed) / rate;
+          if (!isFinite(remaining)) return '';
+          return `ETA ~${formatDuration(remaining)}`;
+        },
+
+        dumpYaml(obj) {
+          if (!obj) return '';
+          try { return jsyaml.dump(obj, {sortKeys: false, lineWidth: 120}); }
+          catch (e) { return '# yaml dump failed: ' + e.message; }
+        },
+
+        showToast(text, kind = '') {
+          this.toast = { text, kind };
+          if (text) setTimeout(() => { if (this.toast.text === text) this.toast = { text: '', kind: '' }; }, 4000);
+        },
+      };
+    }
+
+    function formatDuration(seconds) {
+      if (seconds < 60) return `${Math.round(seconds)}s`;
+      if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+      return `${(seconds / 3600).toFixed(1)}h`;
+    }
+  </script>
+
+</body>
+</html>

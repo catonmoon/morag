@@ -23,6 +23,14 @@ RUN python -c "import nltk; nltk.download('stopwords', download_dir='/usr/local/
 # Без этого первый запуск индексатора будет тянуть ~6 MB с HuggingFace.
 RUN python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('Qwen/Qwen3-Embedding-4B')"
 
+# Запретить runtime-вызовы к HuggingFace Hub. Транспортная связность с huggingface.co
+# не нужна — токенайзер уже в локальном кэше выше. Без этого `transformers` ≥5
+# при каждом from_pretrained() делает скрытые network-проверки (`_patch_mistral_regex`
+# → `is_base_mistral` → `model_info`), которые падают при любых DNS-проблемах
+# и роняют индексацию (см. cron-job DNS error 2026-05-01).
+ENV HF_HUB_OFFLINE=1
+ENV TRANSFORMERS_OFFLINE=1
+
 # Embedding-модели (dense и sparse) сами раздаются через HTTP:
 #   - dense: Qwen3-Embedding-4B через Ollama на хосте (host.docker.internal:11434)
 #   - sparse: embedder-gte сервис из docker-compose

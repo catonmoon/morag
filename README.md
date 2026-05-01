@@ -14,6 +14,7 @@
 - **Цитаты и ссылки** — URL источников в ответах, группировка по документам
 - **PDF и Vision LLM** — конвертация PDF через Vision LLM или docling-serve
 - **Русский язык** — нативная поддержка русского в embeddings, стемминге и сегментации
+- **Console UI** — web-интерфейс для настройки индексации RAG
 
 ## Публикации
 - [habr: Юридическое поле экспериментов для RAG](https://habr.com/ru/articles/1014690/)
@@ -38,26 +39,30 @@ ollama serve
 
 # 2. Конфиг
 cp config.example.yml config.yml
-# отредактировать config.yml — указать путь к документам в sources.local_documents.path
+touch config.local.yml             # overlay для секретов и UI-правок
+# минимальный config.yml — только sources.local_documents.path, остальное настроишь через console
 
-# 3. Положить документы в папку из config.yml (по умолчанию examples/)
+# 3. Положить документы в папку из config.yml (по умолчанию data/)
 
 # 4. Собрать и запустить
 docker compose build
 docker compose up -d
 ```
 
-Откройте http://localhost:3000 и задавайте вопросы.
+Дальше — два URL:
+- **http://localhost:8000** — Console UI: конфигурация провайдеров, запуск индексации, статус, Knowledge Map.
+- **http://localhost:3000** — Open WebUI: задавать вопросы (после того как что-то проиндексировано).
 
-`docker compose up` поднимает: Qdrant, GTE sparse-эмбеддер, pipeline и запускает индексацию.
+`docker compose up` поднимает: Qdrant, GTE sparse-embedder, indexer (daemon с cron), console и pipeline.
 
 ### Индексация
 
-`morag-indexer` работает в daemon-режиме: при старте выполняет полную индексацию, затем переиндексирует по cron-расписанию из `config.yml` (секция `indexing.schedule`). Новые и изменённые документы подхватываются автоматически, удалённые — каскадно удаляются.
+`morag-indexer` работает в daemon-режиме: ждёт cron-триггер из `config.yml` (`indexing.schedule`) либо on-demand-вызов из Console. Initial run при старте контейнера НЕ запускается — конфиг сначала надо завершить через UI. Новые и изменённые документы подхватываются на следующем прогоне, удалённые — каскадно удаляются.
 
 ```bash
-# Принудительная переиндексация с нуля
+# Принудительная переиндексация с нуля (через CLI)
 docker compose run morag-indexer index --reset
+# либо в Console UI: Dashboard → "Reset & Start"
 ```
 
 ### Dense embedder
@@ -75,6 +80,18 @@ indexing:
     document_template: '{text}'
     query_template: "Instruct: Given a user question, retrieve passages that answer the question\nQuery:{text}"
 ```
+
+## Console UI
+
+Web-интерфейс на http://localhost:8000 для настройки и управления.
+
+- **Dashboard** — счётчики, ссылки на Qdrant и Open WebUI, кнопки Start/Stop индексации с прогресс-баром, превью Knowledge Map.
+- **Setup** — пошаговая настройка LLM и embedder через готовые пресеты (Grok, OpenRouter, Ollama, custom). Test connection per provider.
+- **Settings** — текущий конфиг (read-only) + редактируемый overlay в `config.local.yml`.
+
+Типичный поток: открыл Setup → выбрал провайдер из пресетов → ввёл api_key → Save → перешёл на Dashboard → Start. Прогресс смотришь в реальном времени, Stop останавливает после завершения текущего документа, Force Stop — сразу.
+
+Console и индексатор работают в изолированных контейнерах. Console доступен только на localhost (без auth, не выставляй наружу).
 
 ## Источники данных
 

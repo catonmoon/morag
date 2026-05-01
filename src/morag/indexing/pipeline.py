@@ -14,6 +14,7 @@ from morag.indexing.splitter import (
     TableRowSplitter,
     pack_blocks,
 )
+from morag.indexing.status_reporter import NullStatusReporter, StatusReporter
 from morag.indexing.token_counter import TokenCounter, TiktokenCounter
 from morag.sources.base import Chunk, Document, Source
 from morag.storage.repository import ChunkRepository, DocRepository
@@ -86,6 +87,8 @@ class IndexingPipeline:
         passthrough_threshold: int | None = None,
         embed_batch_size: int = 64,
         max_table_rows: int = 0,
+        status_reporter: StatusReporter | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> None:
         self._doc_repo = doc_repo
         self._chunk_repo = chunk_repo
@@ -100,6 +103,8 @@ class IndexingPipeline:
         self._passthrough_threshold = passthrough_threshold
         self._embed_batch_size = embed_batch_size
         self._max_table_rows = max_table_rows
+        self._status_reporter: StatusReporter = status_reporter or NullStatusReporter()
+        self._cancel_event = cancel_event or asyncio.Event()
         if not skip_presplit or passthrough_threshold:
             self._splitter = RecursiveSplitter(
                 self._token_counter,
@@ -173,6 +178,7 @@ class IndexingPipeline:
         stubs = await source.get_metadata()
         total = len(stubs)
         logger.info('Loaded metadata for %d document(s) from source (concurrency=%d)', total, self._concurrency)
+        self._status_reporter.start_phase(f'indexing_{source.source_type}', total)
 
         # Full sync: удалить документы, которых больше нет в источнике
         current_ids = {stub.id for stub in stubs}
@@ -189,28 +195,38 @@ class IndexingPipeline:
             """Обработать один документ. Возвращает True если был проиндексирован."""
             w = f'[{i}/{total}] '
             async with sem:
+                # Cancel может прийти после планирования gather, но до acquire
+                # этого конкретного слота семафора — выходим сразу, не делая работу.
+                if self._cancel_event.is_set():
+                    logger.info('%sCancelled before start: %s', w, stub.id)
+                    return False
                 try:
                     logger.info('%sChecking [%d/%d]: %s', w, i, total, stub.id)
                     if await self._is_up_to_date(stub):
                         logger.info('%sDocument up to date, skipping: %s', w, stub.id)
+                        self._status_reporter.document_done(stub.id)
                         return False
 
                     document = await source.load_one(stub.id)
                     if document is None:
                         logger.warning('%sFailed to load document: %s', w, stub.id)
+                        self._status_reporter.document_done(stub.id)
                         return False
 
                     prepared = await self._prepare_document(document, w=w)
                     if prepared is None:
+                        self._status_reporter.document_done(stub.id)
                         return False
 
                     if prepared.structural:
                         logger.info('%sStructural document, skipping chunking: %s', w, prepared.id)
                     else:
                         await self._chunk_document(prepared, w=w)
+                    self._status_reporter.document_done(stub.id)
                     return True
                 except Exception:
                     logger.exception('%sDocument failed, skipping: %s', w, stub.id)
+                    self._status_reporter.document_done(stub.id)
                     return False
 
         levels = _topological_levels(stubs)
@@ -219,6 +235,9 @@ class IndexingPipeline:
         results: list[bool] = []
         stub_idx = 0
         for level_num, level in enumerate(levels):
+            if self._cancel_event.is_set():
+                logger.info('Cancel requested — stopping before level %d', level_num)
+                break
             logger.info('Level %d: %d document(s)', level_num, len(level))
             level_results = await asyncio.gather(
                 *[process_one(stub_idx + i + 1, stub) for i, stub in enumerate(level)]
@@ -227,7 +246,10 @@ class IndexingPipeline:
             stub_idx += len(level)
 
         indexed = sum(results)
-        logger.info('Indexing complete: %d indexed, %d skipped', indexed, total - indexed)
+        if self._cancel_event.is_set():
+            logger.info('Indexing cancelled: %d indexed before stop, %d not processed', indexed, total - len(results))
+        else:
+            logger.info('Indexing complete: %d indexed, %d skipped', indexed, total - indexed)
 
     async def _presplit_and_chunk(self, document: Document, w: str = '') -> list[str]:
         """Pre-split на блоки + жадная упаковка + chunker для каждой пачки."""
