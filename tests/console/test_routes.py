@@ -24,7 +24,8 @@ PRIMARY_CONFIG = {
         {'name': 'main', 'base_url': 'http://primary/v1',
          'model': 'primary-model', 'api_key': 'primary-secret'},
         {'name': 'vision', 'base_url': 'http://primary/v1',
-         'model': 'vision-model', 'api_key': 'primary-secret'},
+         'model': 'vision-model', 'api_key': 'primary-secret',
+         'capabilities': ['text', 'vision']},
     ],
     'indexing': {
         'llm': 'main',

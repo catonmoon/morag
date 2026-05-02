@@ -76,6 +76,7 @@ MINIMAL_CONFIG = {
             'base_url': 'http://primary.example/v1',
             'model': 'vision-model',
             'api_key': 'primary-key',
+            'capabilities': ['text', 'vision'],
         },
     ],
     'indexing': {
@@ -127,7 +128,8 @@ class TestLoadConfigOverlay:
         write_yaml(local_path, {
             'llms': [
                 {'name': 'main', 'base_url': 'http://new/v1', 'model': 'new-m', 'api_key': 'k'},
-                {'name': 'vision', 'base_url': 'http://new/v1', 'model': 'new-v', 'api_key': 'k'},
+                {'name': 'vision', 'base_url': 'http://new/v1', 'model': 'new-v', 'api_key': 'k',
+                 'capabilities': ['text', 'vision']},
             ],
         })
 
@@ -364,7 +366,8 @@ class TestLLMRoleMapping:
             'sources': [{'kind': 'local', 'name': 'd', 'path': 'a'}],
             'llms': [
                 {'name': 'main', 'base_url': 'x', 'model': 'm', 'api_key': 'k'},
-                {'name': 'vision', 'base_url': 'x', 'model': 'v', 'api_key': 'k'},
+                {'name': 'vision', 'base_url': 'x', 'model': 'v', 'api_key': 'k',
+                 'capabilities': ['text', 'vision']},
             ],
             'indexing': {
                 'llm': 'main',  # короткая форма
@@ -402,6 +405,94 @@ class TestLLMRoleMapping:
                     'dense_embedder': {'model': 'm'},
                 },
             })
+
+
+class TestLLMCapabilities:
+    """LLMInstance.capabilities + Config-level валидация что vision-роль
+    указывает на LLM с capability 'vision'."""
+
+    def test_default_capabilities_is_text_only(self):
+        from morag.config import LLMInstance
+        llm = LLMInstance(name='m', base_url='x', model='m', api_key='k')
+        assert llm.capabilities == ['text']
+
+    def test_explicit_multimodal(self):
+        from morag.config import LLMInstance
+        llm = LLMInstance(
+            name='m', base_url='x', model='m', api_key='k',
+            capabilities=['text', 'vision'],
+        )
+        assert 'vision' in llm.capabilities
+
+    def test_empty_capabilities_rejected(self):
+        from morag.config import LLMInstance
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            LLMInstance(
+                name='m', base_url='x', model='m', api_key='k',
+                capabilities=[],
+            )
+
+    def test_unknown_capability_rejected(self):
+        from morag.config import LLMInstance
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            LLMInstance(
+                name='m', base_url='x', model='m', api_key='k',
+                capabilities=['text', 'audio'],  # 'audio' не литерал
+            )
+
+    def test_indexing_vision_must_have_vision_capability(self):
+        from morag.config import Config
+        from pydantic import ValidationError
+        # main — text-only (default), указан как vision-роль → должен упасть
+        with pytest.raises(ValidationError, match="не объявляет capability 'vision'"):
+            Config.model_validate({
+                'sources': [{'kind': 'local', 'name': 'd', 'path': 'a'}],
+                'llms': [
+                    {'name': 'main', 'base_url': 'x', 'model': 'm', 'api_key': 'k'},
+                ],
+                'indexing': {
+                    'llm': 'main',
+                    'vision': 'main',  # ← не имеет capability vision
+                    'dense_embedder': {'model': 'm'},
+                },
+            })
+
+    def test_multimodal_llm_can_serve_both_roles(self):
+        from morag.config import Config
+        cfg = Config.model_validate({
+            'sources': [{'kind': 'local', 'name': 'd', 'path': 'a'}],
+            'llms': [
+                {'name': 'qwen', 'base_url': 'x', 'model': 'qwen-vl', 'api_key': 'k',
+                 'capabilities': ['text', 'vision']},
+            ],
+            'indexing': {
+                'llm': 'qwen',     # text-role
+                'vision': 'qwen',  # vision-role — тот же LLM
+                'dense_embedder': {'model': 'm'},
+            },
+        })
+        # один LLM в пуле, обе роли указывают на него
+        assert cfg.indexing.llm.default == 'qwen'
+        assert cfg.indexing.vision == 'qwen'
+
+    def test_dedicated_vision_llm(self):
+        from morag.config import Config
+        cfg = Config.model_validate({
+            'sources': [{'kind': 'local', 'name': 'd', 'path': 'a'}],
+            'llms': [
+                {'name': 'grok', 'base_url': 'x', 'model': 'grok-4', 'api_key': 'k'},
+                {'name': 'qwen-vl', 'base_url': 'y', 'model': 'qwen2.5-vl', 'api_key': 'k',
+                 'capabilities': ['vision']},  # only vision
+            ],
+            'indexing': {
+                'llm': 'grok',
+                'vision': 'qwen-vl',
+                'dense_embedder': {'model': 'm'},
+            },
+        })
+        assert cfg.indexing.vision == 'qwen-vl'
 
 
 class TestSchemaVersion:

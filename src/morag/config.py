@@ -94,12 +94,26 @@ Source = Annotated[
 # LLMs — named pool + role mapping
 # ============================================================================
 
+LLMCapability = Literal['text', 'vision']
+
+
 class LLMInstance(BaseModel):
-    """Один инстанс LLM в пуле. Уникальный по name."""
+    """Один инстанс LLM в пуле. Уникальный по name.
+
+    `capabilities` — declarative объявление что модель умеет.
+    Используется только для config-time валидации (Config.model_validator
+    проверяет что indexing.vision указывает на LLM с capability 'vision').
+    На runtime ничего не меняет — обычный LLMClient. Default = ['text'].
+
+    Multimodal-модель (Qwen2.5-VL, Claude Haiku) — `capabilities: [text, vision]`.
+    Тогда её можно использовать одновременно для indexing.llm И indexing.vision —
+    из пула возьмётся один и тот же LLMClient (общий semaphore, общий HTTP-pool).
+    """
     name: str = Field(min_length=1, pattern=r'^[a-z0-9][a-z0-9_-]*$')
     base_url: str
     model: str
     api_key: str
+    capabilities: list[LLMCapability] = Field(default_factory=lambda: ['text'])
     timeout: int = 180
     context_window: int = 32768
     max_tokens: int | None = None
@@ -108,6 +122,12 @@ class LLMInstance(BaseModel):
     model_wait_retries: int = 0
     enable_thinking: bool | None = None
     max_concurrent: int | None = None
+
+    @model_validator(mode='after')
+    def _validate_capabilities_non_empty(self) -> 'LLMInstance':
+        if not self.capabilities:
+            raise ValueError(f'LLMInstance[{self.name}]: capabilities не может быть пустым')
+        return self
 
 
 class LLMRoleMapping(BaseModel):
@@ -366,6 +386,30 @@ class Config(BaseModel):
             raise ValueError(
                 f'LLM reference(s) not found in llms pool: {", ".join(unknown)}. '
                 f'Available: {available}'
+            )
+        return self
+
+    @model_validator(mode='after')
+    def _validate_role_capabilities(self) -> 'Config':
+        """Каждая роль должна указывать на LLM с подходящим capability.
+
+        - indexing.vision → должен иметь 'vision' в capabilities
+        - indexing.llm.* → text-роли, дефолт capability='text' покрывает (не требует валидации)
+
+        Валидация делается перед любой работой с провайдером — misconfig
+        ловится при load_config(), а не на 47-й странице PDF.
+        """
+        if self.indexing is None:
+            return self
+
+        vision_llm = self.llm_by_name(self.indexing.vision)
+        if 'vision' not in vision_llm.capabilities:
+            raise ValueError(
+                f'indexing.vision={self.indexing.vision!r} → model={vision_llm.model!r}: '
+                f"этот LLM не объявляет capability 'vision'. "
+                f"Добавь `capabilities: [text, vision]` в llms[name='{vision_llm.name}'], "
+                f'либо укажи другой multimodal-инстанс. '
+                f"Текущие capabilities: {vision_llm.capabilities}"
             )
         return self
 

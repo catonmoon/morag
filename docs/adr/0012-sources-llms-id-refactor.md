@@ -214,11 +214,14 @@ indexing:
 Pydantic:
 
 ```python
+LLMCapability = Literal['text', 'vision']
+
 class LLMInstance(BaseModel):
     name: str
     base_url: str
     model: str
     api_key: str
+    capabilities: list[LLMCapability] = ['text']  # см. ниже
     context_window: int = 32768
     enable_thinking: bool | None = None
     max_concurrent: int | None = None
@@ -246,17 +249,48 @@ class IndexingConfig(BaseModel):
 
 В коде — resolver:
 
-```python
-class LLMResolver:
-    def __init__(self, pool: dict[str, LLMInstance]):
-        self._pool = pool
+В `cmd_index` — простой dict-pool без отдельного Resolver-класса:
 
-    def for_role(self, mapping: LLMRoleMapping, role: str) -> LLMInstance:
-        name = mapping.overrides.get(role, mapping.default)
-        return self._pool[name]
+```python
+clients = {
+    llm.name: LLMClient(base_url=llm.base_url, model=llm.model, ...)
+    for llm in config.llms
+}
+
+text_client = clients[config.indexing.llm.name_for('default')]
+vision_client = clients[config.indexing.vision]
 ```
 
-`cmd_index` строит `LLMClient` из resolver'а для каждой роли.
+**`LLMInstance.capabilities`** — declarative объявление того что модель умеет.
+Default = `['text']`. Multimodal — `[text, vision]`.
+
+```yaml
+llms:
+  - name: grok                       # text-only (default)
+    base_url: https://api.x.ai/v1
+    model: grok-4-1-fast
+    api_key: ...
+    # capabilities не указано → ['text']
+
+  - name: qwen-vl                    # multimodal — обе capability
+    base_url: ...
+    model: qwen2.5-vl-7b
+    api_key: ...
+    capabilities: [text, vision]
+```
+
+`Config.model_validator` проверяет что `indexing.vision` указывает на LLM с
+`'vision'` в capabilities. Иначе `ValidationError` при `load_config()` — до
+открытия Qdrant и любых API-вызовов. Нет «cryptic ошибок на 47-й странице PDF».
+
+`text`-роли валидировать не нужно — `text` всегда default.
+
+Multimodal-LLM можно использовать одновременно для `indexing.llm: qwen-vl` И
+`indexing.vision: qwen-vl` — из пула возьмётся **один и тот же LLMClient**
+(общий semaphore, общий HTTP-pool). Никакого дублирования в YAML.
+
+`capabilities` — config-time guardrail, runtime ничего не делает (LLMClient,
+VisionPdfConverter, ConfluenceSource._describe_image работают как раньше).
 
 ### 3. Document ID convention: `<kind>:<name>:<external-id>`
 

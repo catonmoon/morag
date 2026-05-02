@@ -16,6 +16,7 @@ from morag.indexing.splitter import (
 )
 from morag.indexing.status_reporter import NullStatusReporter, StatusReporter
 from morag.indexing.token_counter import TokenCounter, TiktokenCounter
+from morag.run_context import RunContext
 from morag.sources.base import Chunk, Document, Source
 from morag.storage.repository import ChunkRepository, DocRepository
 
@@ -89,6 +90,8 @@ class IndexingPipeline:
         max_table_rows: int = 0,
         status_reporter: StatusReporter | None = None,
         cancel_event: asyncio.Event | None = None,
+        run_context: RunContext | None = None,
+        embedder_fingerprint: str | None = None,
     ) -> None:
         self._doc_repo = doc_repo
         self._chunk_repo = chunk_repo
@@ -105,6 +108,11 @@ class IndexingPipeline:
         self._max_table_rows = max_table_rows
         self._status_reporter: StatusReporter = status_reporter or NullStatusReporter()
         self._cancel_event = cancel_event or asyncio.Event()
+        # Run versioning + embedder fingerprint (см. ADR-0012). None для CLI-режимов
+        # без RunContext / без явного fingerprint — payload-fields просто не
+        # пишутся, fingerprint-mismatch не проверяется.
+        self._run_context = run_context
+        self._embedder_fingerprint = embedder_fingerprint
         if not skip_presplit or passthrough_threshold:
             self._splitter = RecursiveSplitter(
                 self._token_counter,
@@ -125,6 +133,17 @@ class IndexingPipeline:
         if existing.updated_at != stub.updated_at:
             return False
 
+        # Embedder fingerprint mismatch → переиндексировать (векторы stale).
+        # Защита от silent staleness при смене embedder-модели.
+        if self._embedder_fingerprint is not None:
+            existing_fp = existing.payload.get('embedder_fingerprint')
+            if existing_fp != self._embedder_fingerprint:
+                logger.info(
+                    'Embedder fingerprint changed for %s: %r → %r — reindexing',
+                    stub.id, existing_fp, self._embedder_fingerprint,
+                )
+                return False
+
         # Структурные документы не имеют чанков — достаточно совпадения метаданных
         if existing.structural:
             return True
@@ -139,12 +158,22 @@ class IndexingPipeline:
         """Проверить idempotency, удалить устаревшее, сохранить документ.
 
         Возвращает обработанный документ или None если документ актуален.
+        Stamps payload с run_number/indexed_at/version/embedder_fingerprint
+        перед upsert (если RunContext/fingerprint передан в конструктор).
         """
         logger.info('%sPreparing document: %s (size=%d)', w, document.id, document.size)
         existing = await self._doc_repo.get_by_id(document.id)
 
+        prev_version = 0
         if existing is not None:
-            if existing.updated_at == document.updated_at:
+            # Embedder fingerprint mismatch проверяется в _is_up_to_date;
+            # здесь — fallback path для уже-загруженного документа.
+            fingerprint_ok = (
+                self._embedder_fingerprint is None
+                or existing.payload.get('embedder_fingerprint') == self._embedder_fingerprint
+            )
+
+            if existing.updated_at == document.updated_at and fingerprint_ok:
                 status = await self._chunk_repo.get_index_status(document.id)
                 if status is not None:
                     count, total = status
@@ -152,21 +181,42 @@ class IndexingPipeline:
                         logger.info('%sDocument up to date, skipping: %s', w, document.id)
                         return None
 
-            # Документ изменился или индексация была прервана — удаляем attached-детей и сам документ
-            logger.info('%sRe-indexing document: %s', w, document.id)
+            # Документ изменился / индексация прервана / сменился embedder —
+            # удаляем attached-детей и сам документ. Сохраняем prev_version для
+            # инкрементации.
+            prev_version = int(existing.payload.get('version', 0))
+            logger.info('%sRe-indexing document: %s (prev_version=%d)', w, document.id, prev_version)
             await self._doc_repo.delete_attached(document.id, self._chunk_repo)
             await self._chunk_repo.delete_by_doc_id(document.id)
             await self._doc_repo.delete(document.id)
 
-        # Прогоняем через цепочку процессоров
+        # Прогоняем через цепочку процессоров (LLM-операции живут здесь)
         for processor in self._doc_processors:
             document = await processor.process(document)
 
+        # Stamp run-versioning + fingerprint в payload
+        self._stamp_payload(document.payload, version=prev_version + 1)
+
         # Сохраняем документ до начала чанкования
         await self._doc_repo.upsert(document)
-        logger.info('%sDocument saved: %s', w, document.id)
+        logger.info('%sDocument saved: %s (version=%d)', w, document.id, prev_version + 1)
 
         return document
+
+    def _stamp_payload(self, payload: dict, version: int | None = None) -> None:
+        """Добавить run_number/indexed_at/version/embedder_fingerprint в payload.
+
+        Шарится между документами и чанками одного прогона: indexed_at заморожен
+        при RunContext.begin(), run_number = одно значение на весь прогон.
+        version — per-document, для чанков наследуется из родительского документа.
+        """
+        if self._run_context is not None:
+            payload['run_number'] = self._run_context.run_number
+            payload['indexed_at'] = self._run_context.indexed_at
+        if version is not None:
+            payload['version'] = version
+        if self._embedder_fingerprint is not None:
+            payload['embedder_fingerprint'] = self._embedder_fingerprint
 
     async def run(self, source: Source) -> None:
         """Полный цикл индексации с параллельной обработкой документов.
@@ -343,6 +393,9 @@ class IndexingPipeline:
         total = len(chunk_results)
         logger.info('%s  Total chunks: %d', w, total)
 
+        # Чанки наследуют version от родительского документа (атомарность прогона)
+        doc_version = document.payload.get('version')
+
         # Собираем Chunk-объекты с order/total, генерируем context
         chunks: list[Chunk] = []
         for order, cr in enumerate(chunk_results):
@@ -370,6 +423,8 @@ class IndexingPipeline:
             chunk.payload['char_offset'] = cr.char_offset
             if cr.pages:
                 chunk.payload['pages'] = cr.pages
+            # Stamp run-versioning + fingerprint (наследуем version от документа)
+            self._stamp_payload(chunk.payload, version=doc_version)
             chunks.append(chunk)
 
         # Post-chunk: разрезать чанки, содержащие большие markdown-таблицы.

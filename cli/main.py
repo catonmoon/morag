@@ -29,6 +29,7 @@ from morag.indexing.embedder import (
     HttpGteSparseEmbedder,
     SparseEmbedder,
 )
+from morag.indexing.embedder_fingerprint import compute_embedder_fingerprint
 from morag.indexing.pipeline import IndexingPipeline
 from morag.indexing.status_reporter import (
     FileStatusReporter,
@@ -48,6 +49,7 @@ from morag.indexing.processors import (
 from morag.indexing.token_counter import HuggingFaceTokenCounter, TiktokenCounter
 from morag.llm.client import GenerationParams, LLMClient
 from morag.llm.retry import RetryPolicy
+from morag.run_context import RunContext
 from morag.sources.confluence import ConfluenceSource
 from morag.sources.confluence_pdf import ConfluencePdfSource
 from morag.sources.jira import JiraSource
@@ -105,6 +107,30 @@ def _make_sparse_embedder(cfg: SparseEmbedderConfig) -> SparseEmbedder:
         retry_policy=RetryPolicy(max_retries=cfg.max_retries),
         max_rpm=cfg.max_rpm,
     )
+
+
+def _build_llm_clients(llms: list) -> dict[str, LLMClient]:
+    """Билд pool LLMClient'ов из config.llms.
+
+    Один LLMClient на каждый name. Multimodal LLM (capabilities=[text,vision])
+    — один клиент шарится между indexing.llm и indexing.vision если оба
+    указывают на него.
+    """
+    clients: dict[str, LLMClient] = {}
+    for inst in llms:
+        clients[inst.name] = LLMClient(
+            base_url=inst.base_url,
+            model=inst.model,
+            api_key=inst.api_key,
+            timeout=inst.timeout,
+            max_retries=inst.max_retries,
+            max_concurrent=inst.max_concurrent,
+            model_wait_seconds=inst.model_wait_seconds,
+            model_wait_retries=inst.model_wait_retries,
+            enable_thinking=inst.enable_thinking,
+            context_window=inst.context_window,
+        )
+    return clients
 
 
 def _make_pdf_converter(
@@ -218,6 +244,19 @@ async def cmd_index(
         _install_signal_handlers(cancel_event)
     reporter = status_reporter if status_reporter is not None else _make_status_reporter()
 
+    # RunContext: бампит global counter, замораживает indexed_at для всех точек прогона.
+    # См. ADR-0012, секция 5.
+    run_ctx = RunContext.begin()
+    logger.info('Run context: number=%d, indexed_at=%s', run_ctx.run_number, run_ctx.indexed_at)
+
+    # Fingerprint dense embedder'а — детект stale-векторов при смене модели.
+    embedder_fingerprint = compute_embedder_fingerprint(
+        config.indexing.dense_embedder.model,
+        config.indexing.dense_embedder.dim,
+        config.indexing.dense_embedder.base_url,
+    )
+    logger.info('Embedder fingerprint: %s', embedder_fingerprint)
+
     logger.info('Connecting to Qdrant %s:%d', config.qdrant.host, config.qdrant.port)
     client = AsyncQdrantClient(
             host=config.qdrant.host, port=config.qdrant.port,
@@ -248,58 +287,28 @@ async def cmd_index(
     doc_repo = DocRepository(client, config.qdrant.collection_docs)
     chunk_repo = ChunkRepository(client, config.qdrant.collection_chunks)
 
-    llm_client = LLMClient(
-        base_url=config.llm.base_url,
-        model=config.llm.model,
-        api_key=config.llm.api_key,
-        timeout=config.llm.timeout,
-        max_retries=config.llm.max_retries,
-        max_concurrent=config.llm.max_concurrent,
-        model_wait_seconds=config.llm.model_wait_seconds,
-        model_wait_retries=config.llm.model_wait_retries,
-        enable_thinking=config.llm.enable_thinking,
-        context_window=config.llm.context_window,
-    )
+    # ---- LLM pool (см. ADR-0012) ----
+    # Один LLMClient на каждый name; multimodal-инстанс шарится между
+    # indexing.llm и indexing.vision если оба указывают на него.
+    llm_clients = _build_llm_clients(config.llms)
+    logger.info('LLM pool: %s', sorted(llm_clients))
 
-    vision_client = None
-    if config.llm_vision:
-        vision_client = LLMClient(
-            base_url=config.llm_vision.base_url,
-            model=config.llm_vision.model,
-            api_key=config.llm_vision.api_key,
-            timeout=config.llm_vision.timeout,
-            max_retries=config.llm_vision.max_retries,
-            max_concurrent=config.llm_vision.max_concurrent,
-            model_wait_seconds=config.llm_vision.model_wait_seconds,
-            model_wait_retries=config.llm_vision.model_wait_retries,
-            enable_thinking=config.llm_vision.enable_thinking,
-            context_window=config.llm_vision.context_window,
-        )
-        logger.info('Vision LLM: %s @ %s', config.llm_vision.model, config.llm_vision.base_url)
+    # Резолв ролей через config.indexing.llm.name_for(role) + indexing.vision
+    role_mapping = config.indexing.llm
+    vision_client = llm_clients[config.indexing.vision]
+    vision_inst = config.llm_by_name(config.indexing.vision)
+    logger.info('Vision LLM: %s @ %s (capabilities=%s)',
+                vision_inst.model, vision_inst.base_url, vision_inst.capabilities)
 
-    # Фабрика PDF-конвертера
+    # PDF converter использует vision_client как и раньше
     pdf_converter = _make_pdf_converter(config, vision_client)
 
-    local_source = None
-    if config.sources.local_documents:
-        local_source = LocalDocumentSource(
-            root=config.sources.local_documents.path,
-            pdf_converter=pdf_converter,
-        )
-        pdf_mode = config.pdf.mode if config.pdf else 'disabled'
-        logger.info('Source: local_documents path=%s (pdf=%s)', config.sources.local_documents.path, pdf_mode)
-
-    sources = []
-    if config.sources.confluence:
-        sources.append(ConfluenceSource(
-            config.sources.confluence,
-            vision_client=vision_client,
-            vision_max_tokens=config.indexing.vision_max_tokens,
-        ))
-        logger.info('Source: confluence url=%s (vision=%s)', config.sources.confluence.url, vision_client is not None)
-    if not sources and local_source is None:
-        logger.error('No sources configured in config.yml')
+    # ---- Sources (registry-based loop из config.sources) ----
+    enabled_sources = [s for s in config.sources if s.enabled]
+    if not enabled_sources:
+        logger.error('No enabled sources in config.yml')
         return
+    logger.info('Sources: %s', [(s.kind, s.name) for s in enabled_sources])
 
     llm_counter = TiktokenCounter()  # для LLM context window, doc_summary, doc_title
     embed_tokenizer = (
@@ -319,14 +328,15 @@ async def cmd_index(
     if chunker_mode == 'semantic':
         chunker = SemanticChunker(
             embed_fn=embedder.embed_batch,
-            counter=embed_counter,  # FRIDA tokenizer для точного подсчёта
+            counter=embed_counter,
             min_tokens=config.indexing.chunker.min_tokens,
             max_tokens=config.indexing.chunker.max_tokens,
             accept_pair=config.indexing.chunker.accept_pair,
         )
     elif chunker_mode == 'llm':
+        chunker_llm = llm_clients[role_mapping.name_for('chunker')]
         chunker = LLMChunker(
-            llm_client,
+            chunker_llm,
             token_counter=llm_counter,
             halving_retries=config.indexing.chunker.halving_retries,
             fallback_enabled=config.indexing.chunker.fallback,
@@ -343,8 +353,9 @@ async def cmd_index(
         # LLM chunker нужен если хотя бы одна стратегия = llm
         llm_chunker_for_hybrid = None
         if 'llm' in oversized_strategies.values():
+            chunker_llm = llm_clients[role_mapping.name_for('chunker')]
             llm_chunker_for_hybrid = LLMChunker(
-                llm_client,
+                chunker_llm,
                 token_counter=llm_counter,
                 halving_retries=config.indexing.chunker.halving_retries,
                 fallback_enabled=config.indexing.chunker.fallback,
@@ -364,7 +375,7 @@ async def cmd_index(
         chunker = PassthroughChunker()
     context_generator = (
         LLMContextGenerator(
-            llm_client,
+            llm_clients[role_mapping.name_for('context_generation')],
             token_counter=llm_counter,
             embed_counter=embed_counter,
             max_output_tokens=config.indexing.context.max_tokens,
@@ -377,7 +388,7 @@ async def cmd_index(
     doc_processors = []
     if config.indexing.doc_title.max_tokens is not None:
         doc_processors.append(DocTitleProcessor(
-            llm_client=llm_client,
+            llm_client=llm_clients[role_mapping.name_for('doc_title')],
             max_tokens=config.indexing.doc_title.max_tokens,
             scan_tokens=config.indexing.doc_title.scan_tokens,
             scan_pages=config.indexing.doc_title.scan_pages,
@@ -393,7 +404,7 @@ async def cmd_index(
         if summary_cls is None:
             raise ValueError(f'Unknown doc_summary mode: {summary_mode!r}')
         doc_processors.append(summary_cls(
-            llm_client=llm_client,
+            llm_client=llm_clients[role_mapping.name_for('doc_summary')],
             doc_repo=doc_repo,
             max_tokens=config.indexing.doc_summary.max_tokens,
             token_counter=llm_counter,
@@ -421,13 +432,14 @@ async def cmd_index(
     _LLM_PROMPT_OVERHEAD = 512  # токенов на системный промпт + запас
     skip_presplit = chunker_mode in ('semantic', 'hybrid', 'section')
     if chunker_mode == 'llm':
-        llm_safe_limit = (config.llm.context_window - _LLM_PROMPT_OVERHEAD) // 2
+        chunker_llm_inst = config.llm_by_name(role_mapping.name_for('chunker'))
+        llm_safe_limit = (chunker_llm_inst.context_window - _LLM_PROMPT_OVERHEAD) // 2
         block_limit = min(config.indexing.chunker.block_limit, llm_safe_limit)
         if block_limit < config.indexing.chunker.block_limit:
             logger.info(
                 'LLM block limit capped: %d → %d (context_window=%d, overhead=%d)',
                 config.indexing.chunker.block_limit, block_limit,
-                config.llm.context_window, _LLM_PROMPT_OVERHEAD,
+                chunker_llm_inst.context_window, _LLM_PROMPT_OVERHEAD,
             )
     else:
         block_limit = config.indexing.chunker.block_limit
@@ -447,6 +459,8 @@ async def cmd_index(
         max_table_rows=config.indexing.chunker.max_table_rows,
         status_reporter=reporter,
         cancel_event=cancel_event,
+        run_context=run_ctx,
+        embedder_fingerprint=embedder_fingerprint,
     )
 
     logger.info(
@@ -456,56 +470,84 @@ async def cmd_index(
     )
 
     try:
-        # Локальные документы: композитный source с собственным порядком запуска
-        if local_source is not None and not cancel_event.is_set():
-            await local_source.run(pipeline)
-
-        # Остальные source (Confluence и т.д.)
-        for source in sources:
+        # ---- Phase 1: source-индексация (всё кроме jira) ----
+        # Jira отдельно: ей нужны уже-проиндексированные доки для поиска ссылок.
+        for src_cfg in enabled_sources:
             if cancel_event.is_set():
                 break
-            await pipeline.run(source)
+            if src_cfg.kind == 'jira':
+                continue
 
-        # Confluence PDF attachments: после страниц, чтобы parent pages уже были в базе
-        if (not cancel_event.is_set()
-                and config.sources.confluence
-                and config.sources.confluence.attachments.enabled):
-            if pdf_converter is not None:
-                confluence_pdf_source = ConfluencePdfSource(
-                    config=config.sources.confluence,
-                    converter=pdf_converter,
-                    doc_repo=doc_repo,
+            if src_cfg.kind == 'local':
+                local_source = LocalDocumentSource(
+                    root=src_cfg.path,
+                    pdf_converter=pdf_converter,
+                    name=src_cfg.name,
                 )
-                logger.info(
-                    'Source: confluence_pdf (mime_types=%s)',
-                    config.sources.confluence.attachments.mime_types,
+                pdf_mode = config.pdf.mode if config.pdf else 'disabled'
+                logger.info('Source: local[%s] path=%s (pdf=%s)',
+                            src_cfg.name, src_cfg.path, pdf_mode)
+                await local_source.run(pipeline)
+
+            elif src_cfg.kind == 'confluence':
+                confl_source = ConfluenceSource(
+                    src_cfg,
+                    vision_client=vision_client,
+                    vision_max_tokens=config.indexing.vision_max_tokens,
                 )
-                await pipeline.run(confluence_pdf_source)
+                logger.info('Source: confluence[%s] url=%s', src_cfg.name, src_cfg.url)
+                await pipeline.run(confl_source)
+
             else:
-                logger.warning(
-                    'Confluence attachments enabled but pdf is not configured — skipping'
-                )
+                logger.warning('Unknown source kind=%s name=%s — skipping',
+                               src_cfg.kind, src_cfg.name)
 
-        # Jira: сканируем проиндексированные документы на ссылки, затем индексируем задачи.
-        # Удаление устаревших задач происходит каскадно через parent_doc_ids при удалении родительских документов.
-        if not cancel_event.is_set() and config.sources.jira:
-            logger.info('Source: jira url=%s', config.sources.jira.url)
+        # ---- Phase 2: Confluence PDF attachments per Confluence-instance ----
+        for src_cfg in config.sources_by_kind('confluence'):
+            if cancel_event.is_set():
+                break
+            if not src_cfg.attachments.enabled:
+                continue
+            if pdf_converter is None:
+                logger.warning(
+                    'Confluence[%s] attachments enabled but pdf is not configured — skipping',
+                    src_cfg.name,
+                )
+                continue
+            attachments_source = ConfluencePdfSource(
+                config=src_cfg, converter=pdf_converter, doc_repo=doc_repo,
+            )
+            logger.info('Source: confluence_pdf[%s] (mime_types=%s)',
+                        src_cfg.name, src_cfg.attachments.mime_types)
+            await pipeline.run(attachments_source)
+
+        # ---- Phase 3: Multi-Jira (по одному JiraLinkExtractor на инстанс) ----
+        # Каждый extractor знает свой base_url, находит «свои» PROJ-XXX ссылки в
+        # уже-проиндексированных документах. Удаление устаревших задач —
+        # каскадно через parent_doc_ids при удалении родительских документов.
+        jira_configs = config.sources_by_kind('jira')
+        if jira_configs and not cancel_event.is_set():
             all_docs = await doc_repo.scroll_all(exclude_source_types=['attached_jira'])
             logger.info('Scanning %d indexed document(s) for Jira links...', len(all_docs))
-            extractor = JiraLinkExtractor(config.sources.jira.url)
-            issue_map = extractor.extract_from_docs(all_docs)
-            if issue_map:
-                logger.info('Found %d Jira issue(s) in indexed documents', len(issue_map))
-                # Строим parent_ids_map: {issue_key: [doc_id, ...]} для хранения parent_doc_ids
-                path_to_doc_id = {doc.path[0]: doc.id for doc in all_docs if doc.path}
+            path_to_doc_id = {doc.path[0]: doc.id for doc in all_docs if doc.path}
+
+            for jira_cfg in jira_configs:
+                if cancel_event.is_set():
+                    break
+                logger.info('Jira[%s]: scanning for links @ %s', jira_cfg.name, jira_cfg.url)
+                extractor = JiraLinkExtractor(jira_cfg.url)
+                issue_map = extractor.extract_from_docs(all_docs)
+                if not issue_map:
+                    logger.info('Jira[%s]: no issues found in documents, skipping',
+                                jira_cfg.name)
+                    continue
+                logger.info('Jira[%s]: found %d issue(s)', jira_cfg.name, len(issue_map))
                 parent_ids_map: dict[str, list[str]] = {
                     key: [path_to_doc_id[p] for p in paths if p in path_to_doc_id]
                     for key, paths in issue_map.items()
                 }
-                jira_source = JiraSource(config.sources.jira, issue_map, parent_ids_map)
+                jira_source = JiraSource(jira_cfg, issue_map, parent_ids_map)
                 await pipeline.run(jira_source)
-            else:
-                logger.info('No Jira issues found in indexed documents, skipping Jira indexing')
 
         # Post-indexing: upgrade sparse vectors schema + build BM25 для chunks и docs
         if not cancel_event.is_set():
@@ -529,7 +571,7 @@ async def cmd_index(
             km_cfg = config.indexing.knowledge_map
             km_generator = KnowledgeMapGenerator(
                 client=client,
-                llm_client=llm_client,
+                llm_client=llm_clients[role_mapping.name_for('knowledge_map')],
                 doc_repo=doc_repo,
                 collection=km_cfg.collection,
                 depth=km_cfg.depth,
@@ -546,9 +588,15 @@ async def cmd_index(
                 flat_topics_max_input_docs=km_cfg.flat_topics_max_input_docs,
                 flat_topics_assign_batch=km_cfg.flat_topics_assign_batch,
             )
+            # Roots — собираются со ВСЕХ Confluence-инстансов. ancestor_ids
+            # в config — raw external IDs, в Qdrant они хранятся prefixed:
+            # `confluence:<name>:<id>`.
             root_ids = set()
-            if config.sources.confluence:
-                root_ids = set(config.sources.confluence.ancestor_ids)
+            for confl_cfg in config.sources_by_kind('confluence'):
+                root_ids.update(
+                    f'confluence:{confl_cfg.name}:{aid}'
+                    for aid in confl_cfg.ancestor_ids
+                )
             logger.info('Generating Knowledge Map (roots=%s)...', root_ids or 'auto')
             await km_generator.generate(root_ids=root_ids or None)
             reporter.document_done('knowledge_map')
@@ -593,25 +641,17 @@ async def cmd_rebuild_km(
     )
 
     doc_repo = DocRepository(client, config.qdrant.collection_docs)
-    llm_client = LLMClient(
-        base_url=config.llm.base_url,
-        model=config.llm.model,
-        api_key=config.llm.api_key,
-        timeout=config.llm.timeout,
-        max_retries=config.llm.max_retries,
-        max_concurrent=config.llm.max_concurrent,
-        model_wait_seconds=config.llm.model_wait_seconds,
-        model_wait_retries=config.llm.model_wait_retries,
-        enable_thinking=config.llm.enable_thinking,
-        context_window=config.llm.context_window,
-    )
+
+    # KM-llm берётся из pool по роли 'knowledge_map' (или default).
+    llm_clients = _build_llm_clients(config.llms)
+    km_llm = llm_clients[config.indexing.llm.name_for('knowledge_map')]
     llm_counter = TiktokenCounter()
 
     from morag.indexing.knowledge_map import KnowledgeMapGenerator
     km_cfg = config.indexing.knowledge_map
     km_generator = KnowledgeMapGenerator(
         client=client,
-        llm_client=llm_client,
+        llm_client=km_llm,
         doc_repo=doc_repo,
         collection=km_cfg.collection,
         depth=km_cfg.depth,
@@ -628,9 +668,12 @@ async def cmd_rebuild_km(
         flat_topics_assign_batch=km_cfg.flat_topics_assign_batch,
         depth1_section_ids=km_cfg.depth1_section_ids,
     )
+    # Roots — со всех Confluence-инстансов, prefix как в ID документов
     root_ids = set()
-    if config.sources.confluence:
-        root_ids = set(config.sources.confluence.ancestor_ids)
+    for confl_cfg in config.sources_by_kind('confluence'):
+        root_ids.update(
+            f'confluence:{confl_cfg.name}:{aid}' for aid in confl_cfg.ancestor_ids
+        )
     logger.info('Rebuilding Knowledge Map (roots=%s)...', root_ids or 'auto')
     try:
         await km_generator.generate(root_ids=root_ids or None)
