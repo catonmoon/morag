@@ -203,25 +203,93 @@ class TestPresetsRoutes:
         r = await client.get('/api/presets')
         assert r.status_code == 200
         data = r.json()
-        assert 'llm' in data and 'dense_embedder' in data
+        assert 'llm' in data and 'source' in data
         assert any(p['id'] == 'grok' for p in data['llm'])
+        assert any(p['id'] == 'local' for p in data['source'])
 
-    @pytest.mark.skip(reason='Presets выдают старо-схемный snippet ({llm: {...}}); '
-                            'будет переписано в Stage 6 (Console UI refactor под '
-                            'list[Source] + llms-pool). См. ADR-0012.')
-    async def test_apply_grok_preset_writes_local(self, client, workspace):
+    async def test_apply_grok_preset_appends_to_llms(self, client, workspace):
         r = await client.post('/api/presets/apply', json={
             'target': 'llm',
             'preset_id': 'grok',
-            'form': {'api_key': 'xai-test', 'model': 'grok-4-1-fast'},
+            'form': {'name': 'mygrok', 'api_key': 'xai-test'},
         })
         assert r.status_code == 200, r.text
+        body = r.json()
+        assert body['ok'] is True
+        assert body['added']['name'] == 'mygrok'
+        assert body['added']['base_url'] == 'https://api.x.ai/v1'
+
+        local_path = workspace['cfg'].with_name('config.local.yml')
+        local = yaml.safe_load(local_path.read_text())
+        names = [llm['name'] for llm in local['llms']]
+        assert 'mygrok' in names
+
+    async def test_apply_preset_replaces_by_name(self, client, workspace):
+        # Первый apply
+        await client.post('/api/presets/apply', json={
+            'target': 'llm', 'preset_id': 'grok',
+            'form': {'name': 'g', 'api_key': 'k1'},
+        })
+        # Второй apply с тем же name — должен заменить, не дублировать
+        r = await client.post('/api/presets/apply', json={
+            'target': 'llm', 'preset_id': 'grok',
+            'form': {'name': 'g', 'api_key': 'k2'},
+        })
+        assert r.status_code == 200
+        local_path = workspace['cfg'].with_name('config.local.yml')
+        local = yaml.safe_load(local_path.read_text())
+        names = [llm['name'] for llm in local['llms']]
+        assert names.count('g') == 1
+        g = next(llm for llm in local['llms'] if llm['name'] == 'g')
+        assert g['api_key'] == 'k2'
+
+    async def test_apply_local_source_appends(self, client, workspace):
+        r = await client.post('/api/presets/apply', json={
+            'target': 'source',
+            'preset_id': 'local',
+            'form': {'name': 'extra', 'path': '/data/extra'},
+        })
+        assert r.status_code == 200, r.text
+        local_path = workspace['cfg'].with_name('config.local.yml')
+        local = yaml.safe_load(local_path.read_text())
+        kinds_names = [(s['kind'], s['name']) for s in local['sources']]
+        assert ('local', 'extra') in kinds_names
 
     async def test_apply_unknown_preset_400(self, client):
         r = await client.post('/api/presets/apply', json={
             'target': 'llm',
             'preset_id': 'nonexistent',
             'form': {},
+        })
+        assert r.status_code == 400
+
+    async def test_set_roles(self, client, workspace):
+        # Сначала добавим LLM с vision
+        await client.post('/api/presets/apply', json={
+            'target': 'llm', 'preset_id': 'grok',
+            'form': {'name': 'text-llm', 'api_key': 'k'},
+        })
+        await client.post('/api/presets/apply', json={
+            'target': 'llm', 'preset_id': 'grok',
+            'form': {'name': 'vis-llm', 'api_key': 'k', 'vision_capable': True},
+        })
+        r = await client.post('/api/presets/roles', json={
+            'llm': 'text-llm', 'vision': 'vis-llm',
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body['llm'] == 'text-llm'
+        assert body['vision'] == 'vis-llm'
+
+        local_path = workspace['cfg'].with_name('config.local.yml')
+        local = yaml.safe_load(local_path.read_text())
+        assert local['indexing']['llm'] == 'text-llm'
+        assert local['indexing']['vision'] == 'vis-llm'
+
+    async def test_set_roles_validates_references(self, client):
+        # Несуществующая LLM в pool → 400
+        r = await client.post('/api/presets/roles', json={
+            'llm': 'nonexistent', 'vision': 'vision',
         })
         assert r.status_code == 400
 
