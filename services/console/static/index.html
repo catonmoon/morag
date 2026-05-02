@@ -398,54 +398,156 @@
     <!-- ============ SETUP WIZARD ============ -->
     <section class="view" :class="{active: tab==='setup'}">
 
-      <template x-for="target in ['llm', 'dense_embedder']" :key="target">
-        <div class="card" style="margin-bottom:1rem">
-          <h2 x-text="target === 'llm' ? '1. LLM' : '2. Embedder (dense)'"></h2>
-
-          <label>Provider</label>
-          <select x-model="setup[target].preset_id" @change="setup[target].form = {}">
-            <template x-for="p in (presets?.[target] || [])" :key="p.id">
-              <option :value="p.id" x-text="p.name"></option>
-            </template>
-          </select>
-
-          <template x-for="field in selectedFields(target)" :key="field.name">
-            <div>
-              <label x-text="field.label + (field.required ? ' *' : '')"></label>
-              <input :type="field.kind === 'password' ? 'password' : (field.kind === 'number' ? 'number' : 'text')"
-                     :placeholder="field.placeholder || ''"
-                     :value="setup[target].form[field.name] ?? field.default ?? ''"
-                     @input="setup[target].form[field.name] = $event.target.value">
-              <div class="help" x-show="field.help" x-text="field.help"></div>
-            </div>
-          </template>
-
-          <div class="actions" style="margin-top:1rem">
-            <button class="btn" :disabled="setup[target].busy" @click="applyPreset(target)">Save</button>
-            <button class="btn secondary" :disabled="setup[target].busy"
-                    @click="testProvider(target === 'llm' ? 'llm' : 'dense_embedder')">
-              Test connection
-            </button>
-            <span x-show="setup[target].busy" class="busy-spinner">⏳ working...</span>
-          </div>
-          <div x-show="setup[target].result"
-               x-transition
-               :class="'result ' + (setup[target].resultKind || '')"
-               x-text="setup[target].result"></div>
-        </div>
-      </template>
-
+      <!-- ─── 1. Sources (read-only list + add wizard) ─── -->
       <div class="card" style="margin-bottom:1rem">
-        <h2>3. Documents path</h2>
-        <label>Local docs path (внутри контейнера)</label>
-        <input type="text" x-model="setup.docs_path" placeholder="/data/docs">
-        <div class="help">Куда монтированы твои markdown'ы внутри docker-compose.</div>
-        <div class="actions" style="margin-top:1rem">
-          <button class="btn" :disabled="setup.docs_busy" @click="saveDocsPath()">Save</button>
-          <span x-show="setup.docs_busy" class="busy-spinner">⏳</span>
+        <h2>1. Sources</h2>
+        <div class="empty" x-show="!(config?.sources || []).length">
+          Источников ещё нет. Добавь хотя бы один — например Local folder.
         </div>
-        <div x-show="setup.docs_result" :class="'result ' + (setup.docs_resultKind || '')"
-             x-text="setup.docs_result"></div>
+        <template x-for="src in (config?.sources || [])" :key="src.kind + ':' + src.name">
+          <div style="margin:0.5rem 0; padding:0.5rem 0.7rem; background:var(--code-bg); border-radius:5px; font-size:0.88rem">
+            <b x-text="src.kind"></b> · <b x-text="src.name"></b>
+            <span class="empty" x-text="srcBrief(src)" style="margin-left:0.5rem"></span>
+          </div>
+        </template>
+
+        <details style="margin-top:1rem">
+          <summary style="cursor:pointer; color:var(--accent)">+ Add source</summary>
+          <div style="margin-top:0.85rem; padding-top:0.5rem; border-top:1px solid var(--border)">
+            <label>Provider</label>
+            <select x-model="setup.source.preset_id" @change="setup.source.form = {}">
+              <template x-for="p in (presets?.source || [])" :key="p.id">
+                <option :value="p.id" x-text="p.name"></option>
+              </template>
+            </select>
+            <div class="help" x-text="setup.source.preset_id ? presetDesc('source', setup.source.preset_id) : ''"></div>
+            <template x-for="field in selectedFields('source')" :key="field.name">
+              <div>
+                <template x-if="field.kind !== 'checkbox'">
+                  <div>
+                    <label x-text="field.label + (field.required ? ' *' : '')"></label>
+                    <input :type="field.kind === 'password' ? 'password' : (field.kind === 'number' ? 'number' : 'text')"
+                           :placeholder="field.placeholder || ''"
+                           :value="setup.source.form[field.name] ?? field.default ?? ''"
+                           @input="setup.source.form[field.name] = $event.target.value">
+                    <div class="help" x-show="field.help" x-text="field.help"></div>
+                  </div>
+                </template>
+                <template x-if="field.kind === 'checkbox'">
+                  <div style="margin-top:0.85rem">
+                    <label style="display:flex; align-items:center; gap:0.5rem; margin:0">
+                      <input type="checkbox"
+                             :checked="setup.source.form[field.name] ?? field.default ?? false"
+                             @change="setup.source.form[field.name] = $event.target.checked">
+                      <span x-text="field.label"></span>
+                    </label>
+                    <div class="help" x-show="field.help" x-text="field.help" style="margin-left:1.5rem"></div>
+                  </div>
+                </template>
+              </div>
+            </template>
+            <div class="actions" style="margin-top:1rem">
+              <button class="btn" :disabled="setup.source.busy" @click="addItem('source')">Add</button>
+              <span x-show="setup.source.busy" class="busy-spinner">⏳</span>
+            </div>
+            <div x-show="setup.source.result" :class="'result ' + (setup.source.resultKind || '')"
+                 x-text="setup.source.result"></div>
+          </div>
+        </details>
+      </div>
+
+      <!-- ─── 2. LLMs pool (read-only list + add wizard) ─── -->
+      <div class="card" style="margin-bottom:1rem">
+        <h2>2. LLMs</h2>
+        <div class="empty" x-show="!(config?.llms || []).length">
+          LLM ещё не настроены. Добавь хотя бы один text-LLM (для DocSummary, Context и пр.) и vision-LLM (для PDF / images).
+        </div>
+        <template x-for="llm in (config?.llms || [])" :key="llm.name">
+          <div style="margin:0.5rem 0; padding:0.5rem 0.7rem; background:var(--code-bg); border-radius:5px; font-size:0.88rem">
+            <b x-text="llm.name"></b> · <span x-text="llm.model"></span>
+            <span x-text="capabilityBadges(llm)" style="margin-left:0.5rem"></span>
+            <button class="btn secondary" style="float:right; padding:0.2rem 0.5rem; font-size:0.78rem"
+                    @click="testLLM(llm.name)">Test</button>
+          </div>
+        </template>
+
+        <details style="margin-top:1rem">
+          <summary style="cursor:pointer; color:var(--accent)">+ Add LLM</summary>
+          <div style="margin-top:0.85rem; padding-top:0.5rem; border-top:1px solid var(--border)">
+            <label>Provider</label>
+            <select x-model="setup.llm.preset_id" @change="setup.llm.form = {}">
+              <template x-for="p in (presets?.llm || [])" :key="p.id">
+                <option :value="p.id" x-text="p.name"></option>
+              </template>
+            </select>
+            <div class="help" x-text="setup.llm.preset_id ? presetDesc('llm', setup.llm.preset_id) : ''"></div>
+            <template x-for="field in selectedFields('llm')" :key="field.name">
+              <div>
+                <template x-if="field.kind !== 'checkbox'">
+                  <div>
+                    <label x-text="field.label + (field.required ? ' *' : '')"></label>
+                    <input :type="field.kind === 'password' ? 'password' : (field.kind === 'number' ? 'number' : 'text')"
+                           :placeholder="field.placeholder || ''"
+                           :value="setup.llm.form[field.name] ?? field.default ?? ''"
+                           @input="setup.llm.form[field.name] = $event.target.value">
+                    <div class="help" x-show="field.help" x-text="field.help"></div>
+                  </div>
+                </template>
+                <template x-if="field.kind === 'checkbox'">
+                  <div style="margin-top:0.85rem">
+                    <label style="display:flex; align-items:center; gap:0.5rem; margin:0">
+                      <input type="checkbox"
+                             :checked="setup.llm.form[field.name] ?? field.default ?? false"
+                             @change="setup.llm.form[field.name] = $event.target.checked">
+                      <span x-text="field.label"></span>
+                    </label>
+                    <div class="help" x-show="field.help" x-text="field.help" style="margin-left:1.5rem"></div>
+                  </div>
+                </template>
+              </div>
+            </template>
+            <div class="actions" style="margin-top:1rem">
+              <button class="btn" :disabled="setup.llm.busy" @click="addItem('llm')">Add</button>
+              <span x-show="setup.llm.busy" class="busy-spinner">⏳</span>
+            </div>
+            <div x-show="setup.llm.result" :class="'result ' + (setup.llm.resultKind || '')"
+                 x-text="setup.llm.result"></div>
+          </div>
+        </details>
+      </div>
+
+      <!-- ─── 3. Roles (assign LLMs from pool) ─── -->
+      <div class="card" style="margin-bottom:1rem">
+        <h2>3. Roles</h2>
+        <div class="help" style="margin-bottom:0.85rem">
+          Кто из LLM-пула используется для каких задач индексации. Vision-роль фильтруется по capability.
+        </div>
+        <label>Default text LLM (DocTitle, DocSummary, Context, Chunker, KM)</label>
+        <select x-model="setup.roles.llm">
+          <option value="">— select —</option>
+          <template x-for="llm in (config?.llms || [])" :key="llm.name">
+            <option :value="llm.name" x-text="`${llm.name} (${llm.model})`"></option>
+          </template>
+        </select>
+
+        <label>Vision LLM (PDF pages, Confluence images)</label>
+        <select x-model="setup.roles.vision">
+          <option value="">— select —</option>
+          <template x-for="llm in visionCapableLLMs()" :key="llm.name">
+            <option :value="llm.name" x-text="`${llm.name} (${llm.model})`"></option>
+          </template>
+        </select>
+        <div class="help" x-show="!visionCapableLLMs().length" style="color:var(--warn)">
+          В пуле нет ни одного LLM с capability=vision. Добавь LLM выше с галкой «Vision-capable».
+        </div>
+
+        <div class="actions" style="margin-top:1rem">
+          <button class="btn" :disabled="setup.roles.busy || !setup.roles.llm || !setup.roles.vision"
+                  @click="saveRoles()">Save roles</button>
+          <span x-show="setup.roles.busy" class="busy-spinner">⏳</span>
+        </div>
+        <div x-show="setup.roles.result" :class="'result ' + (setup.roles.resultKind || '')"
+             x-text="setup.roles.result"></div>
       </div>
     </section>
 
@@ -488,12 +590,10 @@
         presets: null,
 
         setup: {
+          // ADR-0012: Sources, LLMs, Roles — три секции wizard'а
+          source: { preset_id: 'local', form: {}, result: '', resultKind: '', busy: false },
           llm: { preset_id: 'grok', form: {}, result: '', resultKind: '', busy: false },
-          dense_embedder: { preset_id: 'ollama-qwen3', form: {}, result: '', resultKind: '', busy: false },
-          docs_path: '',
-          docs_result: '',
-          docs_resultKind: '',
-          docs_busy: false,
+          roles: { llm: '', vision: '', result: '', resultKind: '', busy: false },
         },
 
         settings: {
@@ -569,7 +669,19 @@
         },
 
         async refreshConfig() {
-          try { this.config = await this.fetchJson('/api/config'); }
+          try {
+            this.config = await this.fetchJson('/api/config');
+            // Prefill roles dropdowns из текущего конфига — только если юзер ещё
+            // не выбрал значения (чтобы не затирать в-процессе-редактирования).
+            const idx = this.config?.indexing;
+            if (idx) {
+              if (!this.setup.roles.llm) {
+                // indexing.llm может быть string (короткая форма) или {default, overrides}
+                this.setup.roles.llm = typeof idx.llm === 'string' ? idx.llm : (idx.llm?.default || '');
+              }
+              if (!this.setup.roles.vision) this.setup.roles.vision = idx.vision || '';
+            }
+          }
           catch (e) { this.showToast('config: ' + e.message, 'error'); }
         },
 
@@ -662,11 +774,12 @@
           } catch (e) { this.showToast('rebuild: ' + e.message, 'error'); }
         },
 
-        async applyPreset(target) {
+        async addItem(target) {
+          // target: 'source' | 'llm' — добавить новый item в pool/list
           this._setSetupResult(target, '', '');
           this.setup[target].busy = true;
           try {
-            await this.fetchJson('/api/presets/apply', {
+            const r = await this.fetchJson('/api/presets/apply', {
               method: 'POST',
               headers: {'content-type': 'application/json'},
               body: JSON.stringify({
@@ -675,7 +788,12 @@
                 form: this.setup[target].form,
               }),
             });
-            this._setSetupResult(target, `✓ Saved (config.local.yml updated)`, 'success');
+            this._setSetupResult(
+              target,
+              `✓ Added (${target} list size: ${r.list_size})`,
+              'success',
+            );
+            this.setup[target].form = {};  // reset
             await this.refreshConfig();
           } catch (e) {
             this._setSetupResult(target, '✗ ' + e.message, 'error');
@@ -684,50 +802,72 @@
           }
         },
 
-        async testProvider(target) {
-          this._setSetupResult(target, 'Testing...', 'info');
-          this.setup[target].busy = true;
+        async testLLM(name) {
+          // Pings LLM-инстанс из пула. Использует новый /api/config/test/llm/{name}
+          // если бэкенд его реализовал, иначе fallback на старый /api/config/test
+          this.showToast(`Testing LLM «${name}»...`, '');
           try {
             const r = await this.fetchJson('/api/config/test', {
               method: 'POST',
               headers: {'content-type': 'application/json'},
-              body: JSON.stringify({target}),
+              body: JSON.stringify({target: 'llm', name}),
             });
-            this._setSetupResult(
-              target,
-              r.ok ? `✓ ${r.detail}` : `✗ ${r.detail}`,
+            this.showToast(
+              r.ok ? `✓ ${name}: ${r.detail}` : `✗ ${name}: ${r.detail}`,
               r.ok ? 'success' : 'error',
             );
           } catch (e) {
-            this._setSetupResult(target, '✗ ' + e.message, 'error');
-          } finally {
-            this.setup[target].busy = false;
+            this.showToast(`✗ test ${name}: ${e.message}`, 'error');
           }
         },
 
-        async saveDocsPath() {
-          if (!this.setup.docs_path) {
-            this.setup.docs_result = 'Укажи путь';
-            this.setup.docs_resultKind = 'error';
-            return;
-          }
-          this.setup.docs_result = '';
-          this.setup.docs_busy = true;
+        async saveRoles() {
+          this.setup.roles.result = '';
+          this.setup.roles.busy = true;
           try {
-            await this.fetchJson('/api/config', {
-              method: 'PUT',
+            await this.fetchJson('/api/presets/roles', {
+              method: 'POST',
               headers: {'content-type': 'application/json'},
-              body: JSON.stringify({patch: {sources: {local_documents: {path: this.setup.docs_path}}}}),
+              body: JSON.stringify({
+                llm: this.setup.roles.llm,
+                vision: this.setup.roles.vision,
+              }),
             });
-            this.setup.docs_result = '✓ Saved';
-            this.setup.docs_resultKind = 'success';
+            this.setup.roles.result = '✓ Roles saved';
+            this.setup.roles.resultKind = 'success';
             await this.refreshConfig();
           } catch (e) {
-            this.setup.docs_result = '✗ ' + e.message;
-            this.setup.docs_resultKind = 'error';
+            this.setup.roles.result = '✗ ' + e.message;
+            this.setup.roles.resultKind = 'error';
           } finally {
-            this.setup.docs_busy = false;
+            this.setup.roles.busy = false;
           }
+        },
+
+        // ─── helpers ───
+
+        srcBrief(src) {
+          if (src.kind === 'local') return src.path;
+          if (src.kind === 'confluence') return src.url;
+          if (src.kind === 'jira') return src.url;
+          return '';
+        },
+
+        capabilityBadges(llm) {
+          const caps = llm.capabilities || ['text'];
+          return caps.map(c => `[${c}]`).join(' ');
+        },
+
+        visionCapableLLMs() {
+          return (this.config?.llms || []).filter(
+            l => (l.capabilities || ['text']).includes('vision')
+          );
+        },
+
+        presetDesc(target, preset_id) {
+          const list = this.presets?.[target] || [];
+          const p = list.find(x => x.id === preset_id);
+          return p?.description || '';
         },
 
         async saveLocalYaml() {

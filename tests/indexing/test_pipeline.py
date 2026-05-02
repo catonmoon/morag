@@ -67,6 +67,24 @@ def pipeline(doc_repo, chunk_repo) -> IndexingPipeline:
     )
 
 
+@pytest.fixture
+def run_ctx():
+    from morag.run_context import RunContext
+    return RunContext(run_number=42, indexed_at='2026-05-02T10:00:00+00:00')
+
+
+@pytest.fixture
+def stamped_pipeline(doc_repo, chunk_repo, run_ctx) -> IndexingPipeline:
+    """Pipeline с RunContext и embedder fingerprint — payload-stamping включён."""
+    return IndexingPipeline(
+        doc_repo, chunk_repo,
+        chunker=PassthroughChunker(),
+        context_generator=NoopContextGenerator(),
+        run_context=run_ctx,
+        embedder_fingerprint='fp-v1-abc',
+    )
+
+
 # ---------------------------------------------------------------------------
 # IndexingPipeline.run() — полный цикл
 # ---------------------------------------------------------------------------
@@ -394,3 +412,124 @@ class TestIndexingPipelineRun:
 
         chunks = chunk_repo.upsert_batch.call_args[0][0]
         assert all(c.updated_at == ts for c in chunks)
+
+
+# ---------------------------------------------------------------------------
+# Run versioning + embedder fingerprint stamping (см. ADR-0012, секции 4-5)
+# ---------------------------------------------------------------------------
+
+class TestPayloadStamping:
+
+    async def test_doc_payload_has_run_number_and_indexed_at(
+        self, stamped_pipeline, doc_repo, chunk_repo,
+    ):
+        doc_repo.get_by_id.return_value = None
+        source = MagicMock(spec=Source)
+        setup_source(source, [make_document()])
+
+        await stamped_pipeline.run(source)
+
+        upserted = doc_repo.upsert.call_args[0][0]
+        assert upserted.payload['run_number'] == 42
+        assert upserted.payload['indexed_at'] == '2026-05-02T10:00:00+00:00'
+        assert upserted.payload['embedder_fingerprint'] == 'fp-v1-abc'
+
+    async def test_doc_version_starts_at_1_for_new_doc(
+        self, stamped_pipeline, doc_repo, chunk_repo,
+    ):
+        doc_repo.get_by_id.return_value = None
+        source = MagicMock(spec=Source)
+        setup_source(source, [make_document()])
+
+        await stamped_pipeline.run(source)
+
+        upserted = doc_repo.upsert.call_args[0][0]
+        assert upserted.payload['version'] == 1
+
+    async def test_doc_version_increments_on_reindex(
+        self, stamped_pipeline, doc_repo, chunk_repo,
+    ):
+        # Existing doc с версией 5
+        old_ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        new_ts = datetime(2024, 6, 1, tzinfo=timezone.utc)
+        existing = make_document(updated_at=old_ts)
+        existing.payload = {'version': 5}
+        doc_repo.get_by_id.return_value = existing
+
+        source = MagicMock(spec=Source)
+        setup_source(source, [make_document(updated_at=new_ts)])
+
+        await stamped_pipeline.run(source)
+
+        upserted = doc_repo.upsert.call_args[0][0]
+        assert upserted.payload['version'] == 6
+
+    async def test_chunk_payload_inherits_version_and_run(
+        self, stamped_pipeline, doc_repo, chunk_repo,
+    ):
+        doc_repo.get_by_id.return_value = None
+        source = MagicMock(spec=Source)
+        setup_source(source, [make_document(text='# hi\n\nbody.')])
+
+        await stamped_pipeline.run(source)
+
+        chunks = chunk_repo.upsert_batch.call_args[0][0]
+        assert all(c.payload['run_number'] == 42 for c in chunks)
+        assert all(c.payload['indexed_at'] == '2026-05-02T10:00:00+00:00' for c in chunks)
+        assert all(c.payload['version'] == 1 for c in chunks)
+        assert all(c.payload['embedder_fingerprint'] == 'fp-v1-abc' for c in chunks)
+
+    async def test_no_stamping_without_run_context(
+        self, pipeline, doc_repo, chunk_repo,
+    ):
+        """Pipeline без RunContext (CLI-режим без env) — поля не пишутся."""
+        doc_repo.get_by_id.return_value = None
+        source = MagicMock(spec=Source)
+        setup_source(source, [make_document()])
+
+        await pipeline.run(source)
+
+        upserted = doc_repo.upsert.call_args[0][0]
+        assert 'run_number' not in upserted.payload
+        assert 'indexed_at' not in upserted.payload
+        assert 'embedder_fingerprint' not in upserted.payload
+
+
+class TestEmbedderFingerprint:
+
+    async def test_skip_when_fingerprint_matches(
+        self, stamped_pipeline, doc_repo, chunk_repo,
+    ):
+        ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        existing = make_document(updated_at=ts)
+        existing.payload = {'embedder_fingerprint': 'fp-v1-abc'}
+        doc_repo.get_by_id.return_value = existing
+        chunk_repo.get_index_status.return_value = (3, 3)
+
+        source = MagicMock(spec=Source)
+        source.source_type = 'markdown'
+        source.get_metadata.return_value = [
+            make_stub(updated_at=ts),
+        ]
+
+        await stamped_pipeline.run(source)
+
+        # fingerprint match → skip → load_one не вызывается
+        source.load_one.assert_not_called()
+
+    async def test_reindex_when_fingerprint_mismatches(
+        self, stamped_pipeline, doc_repo, chunk_repo,
+    ):
+        ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        existing = make_document(updated_at=ts)
+        existing.payload = {'embedder_fingerprint': 'fp-v0-old'}  # старый fingerprint
+        doc_repo.get_by_id.return_value = existing
+
+        source = MagicMock(spec=Source)
+        setup_source(source, [make_document(updated_at=ts)])
+
+        await stamped_pipeline.run(source)
+
+        # mismatch → reindex (load_one вызывается, doc upsert'ится)
+        source.load_one.assert_called_once()
+        doc_repo.upsert.assert_called_once()

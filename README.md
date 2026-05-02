@@ -98,11 +98,34 @@ Console и индексатор работают в изолированных �
 | Источник | Описание |
 |---|---|
 | Markdown-файлы | Локальная директория с .md файлами |
-| Confluence | Пространства и страницы (включая вложенные PDF) |
-| Jira | Задачи по ссылкам из документов |
+| Confluence | Пространства и страницы (включая вложенные PDF), Cloud + on-premise |
+| Jira | Задачи по ссылкам из документов (только on-premise) |
 | PDF | Конвертация через Vision LLM или docling-serve |
 
-Настраиваются в `config.yml` — см. `config.example.yml` для описания всех опций.
+Поддерживается **несколько инстансов одного типа** — например, два Confluence-сервера (корпоративный + подрядчика) или несколько Jira. Каждый со своим уникальным `name`. Настраиваются в `config.yml` — см. `config.example.yml` для описания всех опций.
+
+## LLM
+
+Несколько LLM в одном пуле, переиспользуются по ролям. Минимум — два инстанса (text + vision), при поддержке multimodal-модели — один:
+
+```yaml
+llms:
+  - name: main
+    base_url: http://host.docker.internal:11434/v1
+    model: qwen3:4b
+    api_key: ollama                 # capabilities=[text] (default)
+  - name: vision
+    base_url: ...
+    model: qwen2.5-vl:7b
+    api_key: ollama
+    capabilities: [text, vision]    # multimodal — годится и для text-роли
+
+indexing:
+  llm: main                         # для DocTitle/DocSummary/Context/KM/Chunker
+  vision: vision                    # для PDF + изображений Confluence
+```
+
+Можно использовать несколько LLM с разными ролями: дешёвую для context-generation, умную для doc_summary и KM. Подробности — в `config.example.yml`.
 
 ## Стек
 

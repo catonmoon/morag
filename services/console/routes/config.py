@@ -24,7 +24,8 @@ class ConfigPatchRequest(BaseModel):
 
 
 class ConfigTestRequest(BaseModel):
-    target: Literal['llm', 'llm_vision', 'dense_embedder', 'sparse_embedder', 'qdrant']
+    target: Literal['llm', 'dense_embedder', 'sparse_embedder', 'qdrant']
+    name: str | None = None  # для target='llm': имя инстанса из llms-pool
 
 
 class ConfigTestResponse(BaseModel):
@@ -58,7 +59,10 @@ async def put_config(req: ConfigPatchRequest, request: Request) -> dict[str, Any
     try:
         validate_merged(cfg_path, candidate_local)
     except ValidationError as e:
-        raise HTTPException(status_code=400, detail=e.errors()) from e
+        raise HTTPException(
+            status_code=400,
+            detail=e.errors(include_url=False, include_input=False, include_context=False),
+        ) from e
 
     # Валидно — пишем
     new_local = patch_local(cfg_path, clean_patch)
@@ -91,11 +95,17 @@ async def test_config(req: ConfigTestRequest, request: Request) -> ConfigTestRes
                 await client.close()
 
         if req.target == 'llm':
-            return await _test_llm(cfg.llm)
-        if req.target == 'llm_vision':
-            if cfg.llm_vision is None:
-                return ConfigTestResponse(ok=False, detail='llm_vision not configured')
-            return await _test_llm(cfg.llm_vision)
+            # Имя из pool. Если не указано — используем default из indexing.llm.
+            name = req.name
+            if name is None:
+                if cfg.indexing is None:
+                    return ConfigTestResponse(ok=False, detail='No name; indexing not configured')
+                name = cfg.indexing.llm.default
+            try:
+                llm_inst = cfg.llm_by_name(name)
+            except KeyError:
+                return ConfigTestResponse(ok=False, detail=f'LLM {name!r} not in pool')
+            return await _test_llm(llm_inst)
 
         if req.target == 'dense_embedder':
             if cfg.indexing is None or not cfg.indexing.dense_embedder.base_url:
