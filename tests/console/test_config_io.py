@@ -20,13 +20,16 @@ def write_yaml(path: Path, data: dict) -> None:
 
 
 PRIMARY = {
-    'sources': {'local_documents': {'path': '/tmp/docs'}},
-    'llm': {
-        'base_url': 'http://primary/v1',
-        'model': 'primary-model',
-        'api_key': 'primary-secret',
-    },
+    'sources': [{'kind': 'local', 'name': 'docs', 'path': '/tmp/docs'}],
+    'llms': [
+        {'name': 'main', 'base_url': 'http://primary/v1',
+         'model': 'primary-model', 'api_key': 'primary-secret'},
+        {'name': 'vision', 'base_url': 'http://primary/v1',
+         'model': 'vision-model', 'api_key': 'primary-secret'},
+    ],
     'indexing': {
+        'llm': 'main',
+        'vision': 'vision',
         'dense_embedder': {
             'model': 'qwen3-embedding:4b',
             'base_url': 'http://primary/v1',
@@ -111,11 +114,13 @@ class TestReadWrite:
         cfg = tmp_path / 'config.yml'
         local = tmp_path / 'config.local.yml'
         write_yaml(cfg, PRIMARY)
-        write_yaml(local, {'llm': {'api_key': 'new-key'}})
+        # Overlay меняет qdrant.host (типичный сценарий), остальное наследуется
+        write_yaml(local, {'qdrant': {'host': 'overridden'}})
 
         result = read_layered(cfg)
-        assert result['llm']['api_key'] == 'new-key'
-        assert result['llm']['model'] == 'primary-model'
+        assert result['qdrant']['host'] == 'overridden'
+        # llms из primary остались (overlay не трогал)
+        assert result['llms'][0]['model'] == 'primary-model'
 
     def test_read_local_returns_empty_when_missing(self, tmp_path: Path):
         cfg = tmp_path / 'config.yml'
@@ -167,14 +172,15 @@ class TestValidateMerged:
     def test_valid_overlay_passes(self, tmp_path: Path):
         cfg = tmp_path / 'config.yml'
         write_yaml(cfg, PRIMARY)
-        config_obj = validate_merged(cfg, {'llm': {'model': 'new-model'}})
-        assert config_obj.llm.model == 'new-model'
+        # Overlay меняет qdrant.host (типичный local-dev сценарий)
+        config_obj = validate_merged(cfg, {'qdrant': {'host': 'localhost'}})
+        assert config_obj.qdrant.host == 'localhost'
 
     def test_invalid_overlay_raises(self, tmp_path: Path):
         from pydantic import ValidationError
         import pytest
         cfg = tmp_path / 'config.yml'
         write_yaml(cfg, PRIMARY)
-        # base_url должен быть строкой; передадим число
+        # qdrant.port должен быть int; передадим строку
         with pytest.raises(ValidationError):
-            validate_merged(cfg, {'llm': {'base_url': 12345}})
+            validate_merged(cfg, {'qdrant': {'port': 'not-a-number'}})

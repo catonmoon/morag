@@ -107,9 +107,12 @@ class TestPresetsValid:
     """Sanity-check: все пресеты собираются в Pydantic-валидный snippet (где возможно)."""
 
     def test_grok_snippet_validates(self):
-        from morag.config import LLMConfig
+        from morag.config import LLMInstance
         snippet = apply_preset('llm', 'grok', {'api_key': 'xai-test'})
-        cfg = LLMConfig(**snippet['llm'])
+        # LLMInstance в новой схеме требует name; preset его не добавляет (это
+        # делает console при apply через сборку pool entry). Здесь — просто
+        # проверяем что snippet полей хватает чтобы построить инстанс.
+        cfg = LLMInstance(name='test', **snippet['llm'])
         assert cfg.base_url.startswith('https://')
 
     def test_ollama_embedder_validates(self):

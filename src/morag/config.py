@@ -1,59 +1,144 @@
+"""Pydantic-схема конфига morag.
+
+См. ADR-0012 для обоснования архитектуры:
+- Sources как list[Source] discriminated union (multi-instance support)
+- LLMs как named pool + role mapping
+- Document IDs префикс kind:name:
+- Per-source enabled, schema_version, embedder fingerprint
+- Run versioning через RunContext
+"""
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated, Any, Literal, Union
 
 import yaml
-from typing import Literal
-
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 
-class LocalDocumentsConfig(BaseModel):
-    path: str
+# ============================================================================
+# SOURCES — discriminated union по полю `kind`
+# ============================================================================
+
+class _SourceBase(BaseModel):
+    """Общие поля всех источников. Не используется напрямую (нет kind)."""
+    name: str = Field(min_length=1, pattern=r'^[a-z0-9][a-z0-9_-]*$',
+                      description='Уникальный id инстанса (lowercase, без пробелов)')
+    enabled: bool = True
+
+
+class LocalSourceConfig(_SourceBase):
+    """Источник локальных файлов (markdown, pdf и пр.)."""
+    kind: Literal['local']
+    path: str = Field(min_length=1, description='Путь к директории с файлами')
 
 
 class AttachmentsConfig(BaseModel):
-    enabled: bool = False                                    # включить обработку вложений
-    mime_types: list[str] = ['application/pdf']              # фильтр по MIME-типу; пока только PDF
-    skip_ancestor_ids: list[str] = []                        # пропускать вложения со страниц-потомков этих разделов
-    url_mode: str = 'preview'                                # preview | download | parent_page
+    enabled: bool = False                            # включить обработку вложений
+    mime_types: list[str] = ['application/pdf']      # фильтр по MIME-типу; пока только PDF
+    skip_ancestor_ids: list[str] = []                # пропускать вложения со страниц-потомков этих разделов
+    url_mode: Literal['preview', 'download', 'parent_page'] = 'preview'
 
 
-class ConfluenceConfig(BaseModel):
+class ConfluenceSourceConfig(_SourceBase):
+    """Confluence-инстанс (Cloud или on-premise)."""
+    kind: Literal['confluence']
     url: str
     username: str
     password: str | None = None        # on-premise
     api_token: str | None = None       # Atlassian Cloud
-    spaces: list[str] = []             # список space key для индексации; пусто — все доступные
+    spaces: list[str] = []             # space keys; пусто — все доступные
     ancestor_ids: list[str] = []       # фильтр по ancestor page id; пусто — без фильтра
     skip_ancestor_ids: list[str] = []  # исключить страницы и всех их потомков
-    min_image_size_bytes: int | None = None  # пропускать изображения меньше этого размера (байт); None — без фильтрации
-    data_url_handling: Literal['skip', 'vision'] = 'skip'  # data:image base64 в HTML:
-    # 'skip' (default) — дропаем (обычно декорации из плагинов: флаги, иконки, smileys)
-    # 'vision' — отправляем в vision LLM как обычные картинки
-    decorative_image_patterns: list[str] = [
-        r'/images/icons/emoticons/',  # Confluence built-in emoticons: smile.svg, warning.svg, star_yellow.svg, etc.
-    ]  # regex-патёрны URL картинок которые считаются декоративными — дропаем без vision-вызова
-    timeout: int = 180  # таймаут HTTP-запросов к Confluence API и скачивания изображений (секунды)
-    max_retries: int = 3  # количество повторных попыток при сетевых ошибках (urllib3 Retry); 0 = без retry
-    attachments: AttachmentsConfig = AttachmentsConfig()     # обработка вложений (PDF и др.)
+    min_image_size_bytes: int | None = None
+    data_url_handling: Literal['skip', 'vision'] = 'skip'
+    decorative_image_patterns: list[str] = [r'/images/icons/emoticons/']
+    timeout: int = 180
+    max_retries: int = 3
+    attachments: AttachmentsConfig = AttachmentsConfig()
+
+    @model_validator(mode='after')
+    def _check_secret(self) -> 'ConfluenceSourceConfig':
+        if not self.password and not self.api_token:
+            raise ValueError(
+                f'ConfluenceSourceConfig[{self.name}]: либо password (on-premise), '
+                f'либо api_token (Cloud) должен быть задан'
+            )
+        return self
 
 
-class JiraConfig(BaseModel):
+class JiraSourceConfig(_SourceBase):
+    """Jira-инстанс. Только on-premise — Cloud-вариант не поддерживается
+    (см. ADR-0012, обсуждение). Задачи находятся через ссылки в уже
+    проиндексированных документах из других sources (Confluence, local).
+    """
+    kind: Literal['jira']
     url: str
     username: str
-    password: str | None = None        # on-premise
-    api_token: str | None = None       # Atlassian Cloud
-    timeout: int = 180                 # таймаут HTTP-запросов к Jira API (секунды)
-    max_retries: int = 3              # количество повторных попыток при сетевых ошибках (urllib3 Retry); 0 = без retry
-    custom_fields: list[str] = []     # список ID кастомных полей (например ['customfield_10100']); названия берутся из Jira API
+    password: str = Field(min_length=1)  # on-prem only
+    timeout: int = 180
+    max_retries: int = 3
+    custom_fields: list[str] = []        # опциональные кастомные поля для индексации
 
 
-class SourcesConfig(BaseModel):
-    local_documents: LocalDocumentsConfig | None = None
-    confluence: ConfluenceConfig | None = None
-    jira: JiraConfig | None = None
+# Discriminated union: при загрузке Pydantic смотрит на поле `kind` и
+# подбирает правильный класс. Добавление нового типа источника = новый
+# Pydantic-класс с своим Literal['kind'] + расширение этого Union.
+Source = Annotated[
+    Union[LocalSourceConfig, ConfluenceSourceConfig, JiraSourceConfig],
+    Field(discriminator='kind'),
+]
 
+
+# ============================================================================
+# LLMs — named pool + role mapping
+# ============================================================================
+
+class LLMInstance(BaseModel):
+    """Один инстанс LLM в пуле. Уникальный по name."""
+    name: str = Field(min_length=1, pattern=r'^[a-z0-9][a-z0-9_-]*$')
+    base_url: str
+    model: str
+    api_key: str
+    timeout: int = 180
+    context_window: int = 32768
+    max_tokens: int | None = None
+    max_retries: int = 3
+    model_wait_seconds: int = 0
+    model_wait_retries: int = 0
+    enable_thinking: bool | None = None
+    max_concurrent: int | None = None
+
+
+class LLMRoleMapping(BaseModel):
+    """Маппинг ролей на LLM из пула.
+
+    Поддерживает две формы в YAML:
+        llm: main                 # короткая: только default
+        llm:                      # расширенная: default + overrides
+          default: main
+          overrides:
+            doc_summary: smart
+    """
+    default: str
+    overrides: dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode='before')
+    @classmethod
+    def _normalize(cls, v: Any) -> Any:
+        # Короткая форма (строка) → разворачиваем в полную
+        if isinstance(v, str):
+            return {'default': v, 'overrides': {}}
+        return v
+
+    def name_for(self, role: str) -> str:
+        """Имя LLM для заданной роли. Возвращает override или default."""
+        return self.overrides.get(role, self.default)
+
+
+# ============================================================================
+# Qdrant
+# ============================================================================
 
 class QdrantConfig(BaseModel):
     host: str = 'localhost'
@@ -62,54 +147,39 @@ class QdrantConfig(BaseModel):
     collection_chunks: str = 'chunks'
 
 
+# ============================================================================
+# Indexing-side configs (без LLM-секций — те ушли в indexing.llm/.vision)
+# ============================================================================
+
 class DocTitleConfig(BaseModel):
-    max_tokens: int | None = None  # лимит токенов ответа LLM; None — генерация названия отключена
-    scan_tokens: int = 32768       # глубина просмотра документа (токены от начала)
-    scan_pages: int | None = None  # альтернатива: взять первые N страниц (если есть маркеры)
+    max_tokens: int | None = None
+    scan_tokens: int = 32768
+    scan_pages: int | None = None
 
 
 class DocSummaryConfig(BaseModel):
-    max_tokens: int | None = None  # лимит токенов ответа LLM; None — генерация саммари отключена
-    mode: str = 'default'  # режим промпта: 'default' (универсальный) или 'legal' (юридические документы)
+    max_tokens: int | None = None
+    mode: str = 'default'
 
 
 class DocVectorConfig(BaseModel):
-    max_tokens: int = 28672  # head-heavy truncation: embedder рубит на этой границе (Qwen3-Embedding-4B ctx=32K, резерв 3584)
-
-
-class LLMConfig(BaseModel):
-    base_url: str            # OpenAI-совместимый endpoint, обязателен — silent default опасен (молчаливо подхватит слабую модель)
-    model: str               # идентификатор модели, обязателен
-    api_key: str             # API-ключ провайдера, обязателен (для Ollama можно 'ollama', но должно быть указано явно)
-    timeout: int = 180  # таймаут HTTP-запросов к LLM (секунды)
-    context_window: int = 32768   # контекстное окно модели (токенов)
-    max_tokens: int | None = None  # лимит токенов ответа; None — без ограничения
-    max_retries: int = 3          # повторы запросов SDK на 429/5xx/connect-errors
-    model_wait_seconds: int = 0   # ожидание перезагрузки модели (сек); 0 = не ждать
-    model_wait_retries: int = 0   # количество попыток ожидания модели
-    enable_thinking: bool | None = None  # включить/выключить thinking; None = поведение модели по умолчанию
-    max_concurrent: int | None = None  # потолок одновременных in-flight запросов; None = без ограничения.
-    # Шарится между клиентами с одинаковым (base_url, model) — например llm и llm_vision на один провайдер.
+    max_tokens: int = 28672
 
 
 class DenseEmbedderConfig(BaseModel):
-    model: str                    # идентификатор модели, обязателен — silent default опасен (разные провайдеры, разные модели)
-    tokenizer: str | None = None  # HF-имя или 'tiktoken' для счёта токенов чанкером; None → использовать model
-    base_url: str | None = None   # OpenAI-совместимый endpoint: Ollama / vLLM / OpenAI. Обязателен для индексации.
-    dim: int | None = None        # обязателен для индексации: размерность эмбеддинга
-    document_template: str = '{text}'  # формат входа для embed(); {text} заменяется на текст чанка
-    query_template: str = '{text}'     # формат входа для embed_query(); {text} заменяется на текст запроса
-    timeout: int = 30             # таймаут HTTP-запросов (секунды)
-    max_retries: int = 3          # повторы запросов SDK на 429/5xx/connect-errors
-    max_rpm: int | None = None    # лимит запросов в минуту; None = без ограничения
-    max_concurrent: int | None = None  # потолок одновременных in-flight запросов; None = без ограничения.
-    # Шарится с LLMClient через registry по (base_url, model) — например Ollama-сервер с одной GPU.
+    model: str
+    tokenizer: str | None = None
+    base_url: str | None = None
+    dim: int | None = None
+    document_template: str = '{text}'
+    query_template: str = '{text}'
+    timeout: int = 30
+    max_retries: int = 3
+    max_rpm: int | None = None
+    max_concurrent: int | None = None
 
     @model_validator(mode='after')
     def _validate_http_dim(self) -> 'DenseEmbedderConfig':
-        # base_url без dim — ошибка (dim нужен для создания Qdrant коллекции).
-        # Оба None разрешены: может быть IndexingConfig() создан без явной секции embedder.
-        # Реальная проверка отсутствия base_url/dim — в cli._make_dense_embedder.
         if self.base_url is not None and self.dim is None:
             raise ValueError('dense_embedder.dim is required when base_url is set')
         return self
@@ -117,134 +187,207 @@ class DenseEmbedderConfig(BaseModel):
 
 class SparseEmbedderConfig(BaseModel):
     model: str = 'Alibaba-NLP/gte-multilingual-base'
-    base_url: str | None = None   # OpenAI-совместимый endpoint; обязателен для индексации
-    timeout: int = 30             # таймаут HTTP-запросов (секунды)
-    max_retries: int = 3          # повторы запросов на ошибки соединения
-    max_rpm: int | None = None    # лимит запросов в минуту; None = без ограничения
+    base_url: str | None = None
+    timeout: int = 30
+    max_retries: int = 3
+    max_rpm: int | None = None
 
 
 class OversizedConfig(BaseModel):
-    """Стратегии обработки oversized блоков по типам (hybrid chunker).
-
-    Каждый тип блока > max_tokens обрабатывается своей стратегией:
-    - asis: оставить как есть (один большой чанк)
-    - split: структурное разбиение (предложения / элементы / строки)
-    - embed: SemanticChunker (embedding-based границы)
-    - transform: преобразовать формат + рекурсия через чанкинг
-    - llm: LLM преобразует/разобьёт + рекурсия
-    """
-    table: str = 'transform'        # строка → key-value текст → рекурсия
-    list: str = 'split'             # по элементам списка
-    paragraph: str = 'split'        # по предложениям
-    fence: str = 'asis'             # код как есть
-    diagram: str = 'asis'           # диаграмма как есть
+    table: str = 'transform'
+    list: str = 'split'
+    paragraph: str = 'split'
+    fence: str = 'asis'
+    diagram: str = 'asis'
 
 
 class ChunkerConfig(BaseModel):
-    mode: str = 'hybrid'                # 'hybrid' | 'section' | 'semantic' | 'passthrough' | 'llm'
-    block_limit: int = 32000             # лимит токенов для pre-split блока (llm/passthrough)
-    min_tokens: int = 50                 # мин. размер чанка в токенах (semantic/hybrid)
-    max_tokens: int = 250                # макс. размер чанка в токенах (semantic/hybrid)
-    halving_retries: int = 0             # деления блока пополам при таймауте LLM; 0 = выключено
-    fallback: bool = False               # семантический fallback; False = при неудаче документ пропускается
-    accept_pair: bool = False            # принимать оба чанка пары (left+right) за одну итерацию (2x быстрее)
-    passthrough_threshold: int | None = None  # если документ > N токенов → passthrough вместо semantic; None = отключено
-    oversized: OversizedConfig = OversizedConfig()  # стратегии по типу блока (hybrid)
-    max_table_rows: int = 0             # forced row-based split больших markdown-таблиц (с дупликацией header). 0 = выкл; рекомендуется 15-20 для таблиц-справочников/глоссариев
+    mode: str = 'hybrid'
+    block_limit: int = 32000
+    min_tokens: int = 50
+    max_tokens: int = 250
+    halving_retries: int = 0
+    fallback: bool = False
+    accept_pair: bool = False
+    passthrough_threshold: int | None = None
+    oversized: OversizedConfig = OversizedConfig()
+    max_table_rows: int = 0
 
 
 class ContextConfig(BaseModel):
-    mode: str = 'noop'                   # 'noop' | 'llm'
-    max_tokens: int | None = None        # лимит токенов в ответе; None — без ограничения (или адаптивно если embedder_max_tokens)
-    window_tokens: int | None = None     # окно вокруг позиции чанка (токены); None = отправлять весь документ
-    chunk_max_tokens: int = 512            # макс. токенов на чанк (text + context + path); адаптивный context = chunk_max - text - path_overhead
+    mode: str = 'noop'
+    max_tokens: int | None = None
+    window_tokens: int | None = None
+    chunk_max_tokens: int = 512
 
 
 class KnowledgeMapConfig(BaseModel):
-    enabled: bool = False                # генерация карты документации после индексации
-    depth: int = 2                       # кол-во уровней в системном промпте
-    max_depth: int | None = None         # макс. глубина обхода дерева; None = до самого дна
-    collection: str = 'knowledge_map'    # коллекция Qdrant для карт
-    # 'fixed'       — лимит токенов на каждый узел, для естественной иерархии
-    # 'weighted'    — общий бюджет распределяется по потомкам (иерархии)
-    # 'flat_topics' — для плоских источников: LLM группирует roots в темы,
-    #                 карта получает искусственную иерархию «тема → документы».
-    #                 Размер prompt — следствие числа тем × документов (без capping).
+    enabled: bool = False
+    depth: int = 2
+    max_depth: int | None = None
+    collection: str = 'knowledge_map'
     prompt_strategy: str = 'fixed'
-    node_max_tokens: int = 256           # для fixed: лимит токенов на описание каждого узла
-    node_min_tokens: int = 256           # для weighted: минимальный бюджет на узел (защита от обрывов)
-    prompt_budget: int = 8192            # для weighted: общий бюджет токенов на системный промпт
-    exclude_source_types: list[str] = ['attached_jira', 'attached_pdf']  # не включать в карту
-    depth1_section_ids: list[str] = []  # разделы с depth=1: показывает прямых детей, но не внуков
-    # flat_topics:
-    flat_topics_target: int | None = None   # целевое число тем; None = авто (~sqrt(N))
-    flat_topics_max_input_docs: int = 3000  # safety limit; одна LLM-сессия не батчуется
-    flat_topics_assign_batch: int = 5       # размер батча в пасс 2 (классификация);
-                                            # меньше — точнее, но больше LLM-вызовов
+    node_max_tokens: int = 256
+    node_min_tokens: int = 256
+    prompt_budget: int = 8192
+    exclude_source_types: list[str] = ['attached_jira', 'attached_pdf']
+    depth1_section_ids: list[str] = []
+    flat_topics_target: int | None = None
+    flat_topics_max_input_docs: int = 3000
+    flat_topics_assign_batch: int = 5
 
 
 class IndexingConfig(BaseModel):
+    """Индексация. Содержит ссылки на LLMs из пула через role mapping."""
+    # LLM-роли:
+    #   llm  — для всех text-задач (DocTitle, DocSummary, ContextGen, Chunker, KM)
+    #   vision — для multimodal (PDF-страницы, Confluence images)
+    llm: LLMRoleMapping
+    vision: str  # имя LLM из пула; multimodal-задачи
+
     chunker: ChunkerConfig = ChunkerConfig()
     context: ContextConfig = ContextConfig()
-    embed_batch_size: int = 64            # размер батча для embed + upsert чанков
-    lexical_doc_summary: bool = False     # добавлять doc_summary к тексту чанка для лексических векторов (GTE keywords, BM25)
-    lexical_chunk_context: bool = False   # добавлять chunk.context к тексту чанка для лексических векторов (Anthropic «Contextual BM25»)
-    dense_embedder: DenseEmbedderConfig   # обязательна: silent default опасен
+    embed_batch_size: int = 64
+    lexical_doc_summary: bool = False
+    lexical_chunk_context: bool = False
+    dense_embedder: DenseEmbedderConfig
     sparse_embedder: SparseEmbedderConfig = SparseEmbedderConfig()
-    vision_max_tokens: int = 1024  # лимит токенов ответа Vision LLM (изображения, формулы)
-    concurrency: int = 1  # количество документов, обрабатываемых параллельно
-    schedule: str | None = None  # cron-выражение для serve-режима (например '0 */6 * * *')
-    doc_title: DocTitleConfig = DocTitleConfig()  # генерация названия документа; max_tokens=None — отключено
-    doc_summary: DocSummaryConfig = DocSummaryConfig()  # генерация саммари документов; max_tokens=None — отключено
-    doc_vector: DocVectorConfig = DocVectorConfig()  # doc-level векторы: head-heavy truncation перед embedding
-    knowledge_map: KnowledgeMapConfig = KnowledgeMapConfig()  # карта документации (ADR-0010)
+    vision_max_tokens: int = 1024
+    concurrency: int = 1
+    schedule: str | None = None
+    doc_title: DocTitleConfig = DocTitleConfig()
+    doc_summary: DocSummaryConfig = DocSummaryConfig()
+    doc_vector: DocVectorConfig = DocVectorConfig()
+    knowledge_map: KnowledgeMapConfig = KnowledgeMapConfig()
 
+
+# ============================================================================
+# PDF
+# ============================================================================
 
 class PdfDoclingConfig(BaseModel):
-    base_url: str = 'http://localhost:5001'  # URL docling-serve
-    timeout: int = 300                       # таймаут конвертации документа (секунды)
+    base_url: str = 'http://localhost:5001'
+    timeout: int = 300
 
 
 class PdfDeduplicateConfig(BaseModel):
-    enabled: bool = False                    # включить дедупликацию
-    threshold: float = 0.7                   # порог fuzzy-сходства (0..1)
-    window: int = 5                          # скользящее окно (предыдущих абзацев)
-    min_phrase_len: int = 20                 # мин. длина фразы для дедупликации
+    enabled: bool = False
+    threshold: float = 0.7
+    window: int = 5
+    min_phrase_len: int = 20
 
 
 class PdfPostProcessingConfig(BaseModel):
-    strip_code_fences: bool = False              # удалять orphan code fences из ответов Vision LLM
+    strip_code_fences: bool = False
     dedup: PdfDeduplicateConfig = PdfDeduplicateConfig()
 
 
 class PdfConfig(BaseModel):
-    mode: str = 'docling'                    # 'docling' | 'vision'
-    dpi: int = 144                           # разрешение рендеринга страниц (vision-режим)
-    page_max_tokens: int = 4096              # лимит токенов ответа LLM на страницу (vision-режим)
-    concurrency: int = 1                     # параллельных запросов к Vision LLM (vision-режим)
-    temperature: float = 0.0                 # температура генерации (0 = детерминированная)
-    repetition_penalty: float | None = None  # штраф за повторы (>1.0); None = не передавать
-    frequency_penalty: float = 0.0           # OpenAI-стандартный штраф за частоту токенов
-    presence_penalty: float = 0.0            # OpenAI-стандартный штраф за наличие токенов
-    context_tail_lines: int = 0              # sliding window: строк хвоста предыдущей страницы (0 = выкл)
+    mode: str = 'docling'
+    dpi: int = 144
+    page_max_tokens: int = 4096
+    concurrency: int = 1
+    temperature: float = 0.0
+    repetition_penalty: float | None = None
+    frequency_penalty: float = 0.0
+    presence_penalty: float = 0.0
+    context_tail_lines: int = 0
     postprocessing: PdfPostProcessingConfig = PdfPostProcessingConfig()
-    docling: PdfDoclingConfig = PdfDoclingConfig()  # настройки docling-serve (docling-режим)
+    docling: PdfDoclingConfig = PdfDoclingConfig()
 
+
+# ============================================================================
+# Top-level Config
+# ============================================================================
 
 class Config(BaseModel):
-    sources: SourcesConfig
-    qdrant: QdrantConfig = QdrantConfig()
-    llm: LLMConfig   # обязательна: silent default опасен (дефолтная модель могла бы молча подмениться на слабую)
-    llm_vision: LLMConfig | None = None  # multimodal LLM для распознавания изображений (опционально)
-    pdf: PdfConfig | None = None         # конвертация PDF → Markdown (опционально; mode: docling | vision)
-    indexing: IndexingConfig | None = None  # секция индексации; None для retrieval-only конфигов (pipelines без cli.main index)
+    """Корень конфига morag.
 
+    schema_version используется для миграций. Сейчас всегда 1; при breaking
+    изменениях в будущем — bump + migration script.
+    """
+    schema_version: Literal[1] = 1
+    sources: list[Source] = Field(min_length=1, description='Минимум один источник')
+    llms: list[LLMInstance] = Field(min_length=1, description='Минимум одна LLM')
+    qdrant: QdrantConfig = QdrantConfig()
+    pdf: PdfConfig | None = None
+    indexing: IndexingConfig | None = None  # None для retrieval-only setup'ов
+
+    # ---------- Validators ----------
+
+    @model_validator(mode='after')
+    def _validate_unique_sources(self) -> 'Config':
+        """Пара (kind, name) должна быть уникальной."""
+        seen: set[tuple[str, str]] = set()
+        for src in self.sources:
+            key = (src.kind, src.name)
+            if key in seen:
+                raise ValueError(
+                    f'Duplicate source: kind={src.kind!r} name={src.name!r}. '
+                    f'Каждая пара (kind, name) должна быть уникальной.'
+                )
+            seen.add(key)
+        return self
+
+    @model_validator(mode='after')
+    def _validate_unique_llms(self) -> 'Config':
+        """name каждой LLM в пуле — уникален."""
+        seen: set[str] = set()
+        for llm in self.llms:
+            if llm.name in seen:
+                raise ValueError(
+                    f'Duplicate llm name: {llm.name!r}. Каждый LLM-инстанс '
+                    f'должен иметь уникальное имя.'
+                )
+            seen.add(llm.name)
+        return self
+
+    @model_validator(mode='after')
+    def _validate_llm_references(self) -> 'Config':
+        """indexing.llm.* и indexing.vision должны ссылаться на существующие LLMs."""
+        if self.indexing is None:
+            return self
+        pool = {llm.name for llm in self.llms}
+
+        # indexing.llm.default + overrides
+        unknown = []
+        if self.indexing.llm.default not in pool:
+            unknown.append(f'indexing.llm.default={self.indexing.llm.default!r}')
+        for role, name in self.indexing.llm.overrides.items():
+            if name not in pool:
+                unknown.append(f'indexing.llm.overrides.{role}={name!r}')
+
+        # indexing.vision
+        if self.indexing.vision not in pool:
+            unknown.append(f'indexing.vision={self.indexing.vision!r}')
+
+        if unknown:
+            available = sorted(pool)
+            raise ValueError(
+                f'LLM reference(s) not found in llms pool: {", ".join(unknown)}. '
+                f'Available: {available}'
+            )
+        return self
+
+    def llm_by_name(self, name: str) -> LLMInstance:
+        """Lookup helper. KeyError если name не найдено."""
+        for llm in self.llms:
+            if llm.name == name:
+                return llm
+        raise KeyError(f'LLM {name!r} not found in pool')
+
+    def sources_by_kind(self, kind: str) -> list[Source]:
+        """Все включённые источники указанного kind."""
+        return [s for s in self.sources if s.kind == kind and s.enabled]
+
+
+# ============================================================================
+# Loading + overlay
+# ============================================================================
 
 def _deep_merge(base: dict, overlay: dict) -> dict:
-    """Глубокий мёрж двух dict'ов: вложенные dict — рекурсивно, остальное — overlay перекрывает.
-
-    Списки заменяются целиком (а не конкатенируются) — это даёт предсказуемое поведение
-    overlay'а для типа `ancestor_ids: [1,2,3]` (хочется заменить, а не добавить).
+    """Глубокий мёрж двух dict'ов: вложенные dict — рекурсивно, остальное —
+    overlay перекрывает. Списки заменяются целиком (не конкатенируются).
     """
     merged = dict(base)
     for key, overlay_value in overlay.items():
@@ -257,11 +400,9 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
 
 
 def load_config(path: str | Path = 'config.yml') -> Config:
-    """Загрузить и валидировать конфиг из YAML-файла.
+    """Загрузить и валидировать конфиг из YAML с overlay.
 
     Если рядом с основным конфигом лежит `config.local.yml` — он deep-мёржится поверх.
-    Это позволяет хранить базовый конфиг под git, а секреты и user-overrides —
-    в `config.local.yml` (gitignored). Console API пишет правки только в local-файл.
     """
     primary_path = Path(path)
     with open(primary_path, encoding='utf-8') as f:
@@ -274,3 +415,32 @@ def load_config(path: str | Path = 'config.yml') -> Config:
         data = _deep_merge(data, local_data)
 
     return Config.model_validate(data)
+
+
+__all__ = [
+    'AttachmentsConfig',
+    'ChunkerConfig',
+    'Config',
+    'ConfluenceSourceConfig',
+    'ContextConfig',
+    'DenseEmbedderConfig',
+    'DocSummaryConfig',
+    'DocTitleConfig',
+    'DocVectorConfig',
+    'IndexingConfig',
+    'JiraSourceConfig',
+    'KnowledgeMapConfig',
+    'LLMInstance',
+    'LLMRoleMapping',
+    'LocalSourceConfig',
+    'OversizedConfig',
+    'PdfConfig',
+    'PdfDeduplicateConfig',
+    'PdfDoclingConfig',
+    'PdfPostProcessingConfig',
+    'QdrantConfig',
+    'Source',
+    'SparseEmbedderConfig',
+    'ValidationError',
+    'load_config',
+]

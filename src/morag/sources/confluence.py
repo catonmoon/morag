@@ -13,7 +13,7 @@ from atlassian import Confluence
 from bs4 import BeautifulSoup
 from markdownify import markdownify
 
-from morag.config import ConfluenceConfig
+from morag.config import ConfluenceSourceConfig
 from morag.sources.base import Document, Source
 
 logger = logging.getLogger(__name__)
@@ -48,10 +48,12 @@ class ConfluenceSource(Source):
     def source_type(self) -> str:
         return 'confluence'
 
-    def __init__(self, config: ConfluenceConfig, vision_client=None, vision_max_tokens: int | None = None) -> None:
+    def __init__(self, config: ConfluenceSourceConfig, vision_client=None, vision_max_tokens: int | None = None) -> None:
+        # password / api_token проверяется в Pydantic-валидаторе ConfluenceSourceConfig
         credential = config.api_token or config.password
-        if not credential:
-            raise ValueError('Confluence config requires either api_token or password')
+
+        self._kind = 'confluence'
+        self._name = config.name
 
         self._client = Confluence(
             url=config.url,
@@ -95,17 +97,22 @@ class ConfluenceSource(Source):
         return stubs
 
     async def load_one(self, doc_id: str) -> Document | None:
-        """Загрузить одну страницу Confluence целиком по page_id."""
+        """Загрузить страницу по prefixed doc_id."""
+        external_id = self._strip_prefix(doc_id)
         try:
             page = await asyncio.to_thread(
                 self._client.get_page_by_id,
-                doc_id,
+                external_id,
                 expand='body.view,history.lastUpdated,history.createdBy,history.createdDate,space,ancestors',
             )
             return await self._page_to_document(page)
         except Exception:
             logger.exception('Failed to load page id=%s', doc_id)
             return None
+
+    def _strip_prefix(self, doc_id: str) -> str:
+        prefix = f'{self._kind}:{self._name}:'
+        return doc_id[len(prefix):] if doc_id.startswith(prefix) else doc_id
 
     def _fetch_pages_metadata(self) -> list[dict]:
         """Получить метаданные страниц через CQL без тела (быстрый запрос)."""
@@ -157,7 +164,7 @@ class ConfluenceSource(Source):
         space_name = space.get('name') or space.get('key', 'UNKNOWN')
         ancestor_objects = content.get('ancestors', [])
         ancestors = [a['title'] for a in ancestor_objects if a.get('title')]
-        parent_doc_ids = [ancestor_objects[-1]['id']] if ancestor_objects else []
+        parent_doc_ids = [self.make_id(ancestor_objects[-1]['id'])] if ancestor_objects else []
         history = content.get('history', {})
 
         last_updated = history.get('lastUpdated', {}).get('when', '')
@@ -169,7 +176,7 @@ class ConfluenceSource(Source):
         url = f'{links.get("base", self._base_url)}{webui}' if webui else None
 
         return Document(
-            id=page_id,
+            id=self.make_id(page_id),
             path=[path],
             text='',
             updated_at=updated_at,
@@ -178,6 +185,7 @@ class ConfluenceSource(Source):
             size=0,
             url=url,
             parent_doc_ids=parent_doc_ids,
+            payload={'source_name': self._name, 'source_kind': self._kind},
         )
 
     def _build_cql(self) -> str:
@@ -205,7 +213,7 @@ class ConfluenceSource(Source):
             space_name = space.get('name') or space.get('key', 'UNKNOWN')
             ancestor_objects = content.get('ancestors', [])
             ancestors = [a['title'] for a in ancestor_objects if a.get('title')]
-            parent_doc_ids = [ancestor_objects[-1]['id']] if ancestor_objects else []
+            parent_doc_ids = [self.make_id(ancestor_objects[-1]['id'])] if ancestor_objects else []
             history = content.get('history', {})
             html = content.get('body', {}).get('view', {}).get('value', '')
             last_updated = history.get('lastUpdated', {}).get('when', '')
@@ -226,7 +234,7 @@ class ConfluenceSource(Source):
             url = f'{links.get("base", self._base_url)}{webui}' if webui else None
 
             return Document(
-                id=page_id,
+                id=self.make_id(page_id),
                 path=[path],
                 text=text,
                 updated_at=updated_at,
@@ -238,6 +246,7 @@ class ConfluenceSource(Source):
                 created_at=created_at,
                 parent_doc_ids=parent_doc_ids,
                 structural=structural,
+                payload={'source_name': self._name, 'source_kind': self._kind},
             )
         except Exception:
             page_id_for_log = (

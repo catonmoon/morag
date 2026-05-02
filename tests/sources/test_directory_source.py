@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from morag.sources.base import Document, Source
+from morag.sources.base import Source
 from morag.sources.directory import DirectorySource
 
 FIXTURES_DIR = Path(__file__).parent.parent / 'fixtures' / 'docs'
@@ -31,7 +31,7 @@ class TestDirectorySource:
     async def test_finds_api_directory(self, source):
         stubs = await source.get_metadata()
         ids = {s.id for s in stubs}
-        assert 'api/' in ids
+        assert 'local:default:api/' in ids
 
     async def test_stubs_have_empty_text(self, source):
         stubs = await source.get_metadata()
@@ -44,21 +44,21 @@ class TestDirectorySource:
             assert stub.size == 0
 
     async def test_load_one_returns_structural_doc(self, source):
-        doc = await source.load_one('api/')
+        doc = await source.load_one('local:default:api/')
         assert doc is not None
-        assert doc.id == 'api/'
+        assert doc.id == 'local:default:api/'
         assert doc.structural is True
         assert doc.text == 'api'  # имя директории
         assert doc.source_type == 'directory'
 
     async def test_load_one_nonexistent(self, source):
-        doc = await source.load_one('nonexistent/')
+        doc = await source.load_one('local:default:nonexistent/')
         assert doc is None
 
     async def test_parent_doc_ids_root_dirs(self, source):
         stubs = await source.get_metadata()
         # api/ — корневая директория, parent_doc_ids = []
-        api_stub = next(s for s in stubs if s.id == 'api/')
+        api_stub = next(s for s in stubs if s.id == 'local:default:api/')
         assert api_stub.parent_doc_ids == []
 
     async def test_parent_doc_ids_nested_dirs(self, tmp_path):
@@ -69,10 +69,10 @@ class TestDirectorySource:
         source = DirectorySource(tmp_path)
         stubs = await source.get_metadata()
         ids = {s.id for s in stubs}
-        assert 'a/' in ids
-        assert 'a/b/' in ids
-        b_stub = next(s for s in stubs if s.id == 'a/b/')
-        assert b_stub.parent_doc_ids == ['a/']
+        assert 'local:default:a/' in ids
+        assert 'local:default:a/b/' in ids
+        b_stub = next(s for s in stubs if s.id == 'local:default:a/b/')
+        assert b_stub.parent_doc_ids == ['local:default:a/']
 
     async def test_empty_directory(self, tmp_path):
         source = DirectorySource(tmp_path)
@@ -96,7 +96,7 @@ class TestDirectorySource:
         source = DirectorySource(tmp_path)
         stubs = await source.get_metadata()
         ids = {s.id for s in stubs}
-        assert 'reports/' in ids
+        assert 'local:default:reports/' in ids
 
     async def test_stubs_are_sorted(self, source):
         stubs = await source.get_metadata()

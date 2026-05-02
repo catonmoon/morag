@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from atlassian import Jira
 
-from morag.config import JiraConfig
+from morag.config import JiraSourceConfig
 from morag.sources.base import Document, Source
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,8 @@ class JiraSource(Source):
     пути на каждый документ, в котором задача упоминается. Это позволяет находить
     задачи в поиске в контексте документа, где они были упомянуты.
 
-    Поддерживает on-premise (username + password) и Cloud (username + api_token).
+    Только on-premise (username + password). Cloud-вариант не поддерживается
+    (см. ADR-0012).
     """
 
     @property
@@ -40,26 +41,29 @@ class JiraSource(Source):
 
     def __init__(
         self,
-        config: JiraConfig,
+        config: JiraSourceConfig,
         issue_map: dict[str, list[str]],
         parent_ids_map: dict[str, list[str]] | None = None,
     ) -> None:
-        credential = config.api_token or config.password
-        if not credential:
-            raise ValueError('Jira config requires either api_token or password')
+        # password обязателен через Pydantic validator (Field min_length=1)
+        self._kind = 'jira'
+        self._name = config.name
 
         self._client = Jira(
             url=config.url,
             username=config.username,
-            password=credential,
-            cloud=config.api_token is not None,
+            password=config.password,
+            cloud=False,           # on-prem only
             timeout=config.timeout,
             backoff_and_retry=config.max_retries > 0,
             max_backoff_retries=config.max_retries,
         )
         self._base_url = config.url.rstrip('/')
-        self._issue_map = issue_map         # {issue_key: [doc_path, ...]}
-        self._parent_ids_map = parent_ids_map or {}  # {issue_key: [doc_id, ...]}
+        # issue_map keys = raw issue_key (например 'PROJ-1'). Префикс добавляется
+        # при upsert через self.make_id() — чтобы PROJ-1 в разных Jira-инстансах
+        # имели разные ID в Qdrant.
+        self._issue_map = issue_map
+        self._parent_ids_map = parent_ids_map or {}  # значения уже prefixed (parent docs)
         self._timeout = config.timeout
         self._custom_fields = config.custom_fields  # ['customfield_10100', ...]
         self._field_names: dict[str, str] = {}  # кеш: field_id → display_name
@@ -97,16 +101,21 @@ class JiraSource(Source):
         return stubs
 
     async def load_one(self, doc_id: str) -> Document | None:
-        """Загрузить одну задачу Jira целиком по ключу (doc_id == issue_key)."""
-        doc_paths = self._issue_map.get(doc_id)
+        """Загрузить задачу Jira по prefixed doc_id."""
+        external = self._strip_prefix(doc_id)  # raw issue_key
+        doc_paths = self._issue_map.get(external)
         if doc_paths is None:
             logger.warning('Jira issue %s not found in issue_map', doc_id)
             return None
         try:
-            return await self._fetch_full(doc_id, doc_paths)
+            return await self._fetch_full(external, doc_paths)
         except Exception:
             logger.exception('Failed to load Jira issue %s', doc_id)
             return None
+
+    def _strip_prefix(self, doc_id: str) -> str:
+        prefix = f'{self._kind}:{self._name}:'
+        return doc_id[len(prefix):] if doc_id.startswith(prefix) else doc_id
 
     async def _fetch_stub(self, issue_key: str, doc_paths: list[str]) -> Document | None:
         """Получить стаб задачи: только метаданные без тела."""
@@ -117,9 +126,8 @@ class JiraSource(Source):
         updated_at = _parse_jira_date(fields.get('updated', ''))
         path = [f'{dp}/{issue_key}' for dp in doc_paths]
 
-        summary = fields.get('summary', '')
         return Document(
-            id=issue_key,
+            id=self.make_id(issue_key),
             path=path,
             text='',
             updated_at=updated_at,
@@ -128,6 +136,7 @@ class JiraSource(Source):
             size=0,
             url=f'{self._base_url}/browse/{issue_key}',
             parent_doc_ids=self._parent_ids_map.get(issue_key, []),
+            payload={'source_name': self._name, 'source_kind': self._kind},
         )
 
     async def _fetch_full(self, issue_key: str, doc_paths: list[str]) -> Document | None:
@@ -161,7 +170,7 @@ class JiraSource(Source):
         path = [f'{dp}/{issue_key}' for dp in doc_paths]
 
         return Document(
-            id=issue_key,
+            id=self.make_id(issue_key),
             path=path,
             text=text,
             updated_at=updated_at,
@@ -172,7 +181,12 @@ class JiraSource(Source):
             creator=reporter,
             created_at=created_at,
             parent_doc_ids=self._parent_ids_map.get(issue_key, []),
-            payload={'summary': summary, 'assignee': assignee},
+            payload={
+                'summary': summary,
+                'assignee': assignee,
+                'source_name': self._name,
+                'source_kind': self._kind,
+            },
         )
 
     async def _fetch_epic_issues(self, epic_key: str) -> list[dict]:

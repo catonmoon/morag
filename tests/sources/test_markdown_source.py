@@ -7,6 +7,9 @@ from morag.sources.markdown import MarkdownSource
 
 FIXTURES_DIR = Path(__file__).parent.parent / 'fixtures' / 'docs'
 
+# По умолчанию name='default' → IDs форматируются как 'local:default:<external>'.
+PFX = 'local:default:'
+
 
 @pytest.fixture
 def source() -> MarkdownSource:
@@ -25,25 +28,25 @@ class TestMarkdownSource:
     async def test_finds_all_md_files(self, source):
         docs = await source.load()
         ids = {d.id for d in docs}
-        assert 'overview.md' in ids
-        assert 'changelog.md' in ids
+        assert f'{PFX}overview.md' in ids
+        assert f'{PFX}changelog.md' in ids
 
     async def test_finds_nested_files(self, source):
         docs = await source.load()
         ids = {d.id for d in docs}
-        assert 'api/endpoints.md' in ids
-        assert 'api/auth.md' in ids
+        assert f'{PFX}api/endpoints.md' in ids
+        assert f'{PFX}api/auth.md' in ids
 
     async def test_total_count(self, source):
         docs = await source.load()
-        # 4 MD-файла (директории создаёт DirectorySource)
         assert len(docs) == 4
 
-    async def test_id_is_relative_path(self, source):
+    async def test_id_starts_with_prefix(self, source):
         docs = await source.load()
         for doc in docs:
-            assert not Path(doc.id).is_absolute()
-            assert doc.path == [doc.id]
+            assert doc.id.startswith(PFX)
+            # path содержит external (без prefix), id и path не равны больше
+            assert doc.path == [doc.id.removeprefix(PFX)]
 
     async def test_source_type_is_markdown(self, source):
         docs = await source.load()
@@ -77,10 +80,11 @@ class TestMarkdownSource:
         for doc in docs:
             assert doc.indexed_at is None
 
-    async def test_payload_is_empty_by_default(self, source):
+    async def test_payload_includes_source_metadata(self, source):
         docs = await source.load()
         for doc in docs:
-            assert doc.payload == {}
+            assert doc.payload['source_name'] == 'default'
+            assert doc.payload['source_kind'] == 'local'
 
     async def test_load_is_sorted(self, source):
         docs = await source.load()
@@ -98,7 +102,7 @@ class TestMarkdownSource:
         source = MarkdownSource(tmp_path)
         docs = await source.load()
         assert len(docs) == 1
-        assert docs[0].id == 'doc.md'
+        assert docs[0].id == f'{PFX}doc.md'
 
     async def test_text_content_matches_file(self, tmp_path):
         content = '# Заголовок\n\nТекст документа.'
@@ -106,6 +110,13 @@ class TestMarkdownSource:
         source = MarkdownSource(tmp_path)
         docs = await source.load()
         assert docs[0].text == content
+
+    async def test_custom_name_changes_prefix(self, tmp_path):
+        """С явным name префикс изменится — multi-instance support."""
+        (tmp_path / 'doc.md').write_text('x')
+        source = MarkdownSource(tmp_path, name='archive')
+        docs = await source.load()
+        assert docs[0].id == 'local:archive:doc.md'
 
 
 class TestMarkdownSourceGetMetadata:
@@ -121,8 +132,8 @@ class TestMarkdownSourceGetMetadata:
     async def test_stubs_have_correct_ids(self, source):
         stubs = await source.get_metadata()
         ids = {s.id for s in stubs}
-        assert 'overview.md' in ids
-        assert 'changelog.md' in ids
+        assert f'{PFX}overview.md' in ids
+        assert f'{PFX}changelog.md' in ids
 
     async def test_stubs_source_type_is_markdown(self, source):
         stubs = await source.get_metadata()
@@ -154,24 +165,25 @@ class TestMarkdownSourceGetMetadata:
 
 class TestMarkdownSourceLoadOne:
     async def test_returns_full_document(self, source):
-        doc = await source.load_one('overview.md')
+        # load_one принимает prefixed ID
+        doc = await source.load_one(f'{PFX}overview.md')
         assert doc is not None
-        assert doc.id == 'overview.md'
+        assert doc.id == f'{PFX}overview.md'
         assert len(doc.text) > 0
 
     async def test_text_matches_file_content(self, tmp_path):
         content = '# Тест\n\nТекст файла.'
         (tmp_path / 'test.md').write_text(content, encoding='utf-8')
         source = MarkdownSource(tmp_path)
-        doc = await source.load_one('test.md')
+        doc = await source.load_one(f'{PFX}test.md')
         assert doc is not None
         assert doc.text == content
 
     async def test_returns_none_for_nonexistent_id(self, source):
-        doc = await source.load_one('nonexistent.md')
+        doc = await source.load_one(f'{PFX}nonexistent.md')
         assert doc is None
 
     async def test_nested_path(self, source):
-        doc = await source.load_one('api/endpoints.md')
+        doc = await source.load_one(f'{PFX}api/endpoints.md')
         assert doc is not None
-        assert doc.id == 'api/endpoints.md'
+        assert doc.id == f'{PFX}api/endpoints.md'

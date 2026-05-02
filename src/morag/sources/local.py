@@ -14,8 +14,8 @@ logger = logging.getLogger(__name__)
 class LocalDocumentSource:
     """Композитный источник локальных документов.
 
-    Управляет тремя внутренними источниками и прогоняет их через pipeline
-    в правильном порядке: директории → markdown → pdf.
+    Управляет тремя внутренними source-классами (Directory/Markdown/Pdf) с
+    общим kind='local' и общим name (передаётся из config.LocalSourceConfig.name).
     Не наследует Source — это оркестратор.
     """
 
@@ -23,32 +23,25 @@ class LocalDocumentSource:
         self,
         root: Path | str,
         pdf_converter: PdfConverter | None = None,
+        name: str = 'default',
     ) -> None:
         self._root = Path(root).resolve()
         self._pdf_converter = pdf_converter
+        self._name = name
 
     async def run(self, pipeline) -> None:
-        """Запустить индексацию всех локальных источников в правильном порядке.
+        logger.info('Indexing local documents [%s] from %s', self._name, self._root)
 
-        1. DirectorySource — структурные документы для поддиректорий
-        2. MarkdownSource — MD-файлы
-        3. PdfSource — PDF-файлы (если pdf_converter задан)
-        """
-        logger.info('Indexing local documents from %s', self._root)
-
-        # 1. Директории
-        dir_source = DirectorySource(self._root)
+        dir_source = DirectorySource(self._root, name=self._name)
         logger.info('Phase 1/3: indexing directories...')
         await pipeline.run(dir_source)
 
-        # 2. Markdown
-        md_source = MarkdownSource(self._root)
+        md_source = MarkdownSource(self._root, name=self._name)
         logger.info('Phase 2/3: indexing markdown files...')
         await pipeline.run(md_source)
 
-        # 3. PDF
         if self._pdf_converter is not None:
-            pdf_source = PdfSource(self._root, converter=self._pdf_converter)
+            pdf_source = PdfSource(self._root, converter=self._pdf_converter, name=self._name)
             logger.info('Phase 3/3: indexing PDF files...')
             await pipeline.run(pdf_source)
         else:
