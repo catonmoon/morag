@@ -204,14 +204,16 @@ class TestPresetsRoutes:
         assert r.status_code == 200
         data = r.json()
         assert 'llm' in data and 'source' in data
-        assert any(p['id'] == 'grok' for p in data['llm'])
+        assert any(p['id'] == 'openai-compatible' for p in data['llm'])
+        assert any(p['id'] == 'ollama' for p in data['llm'])
         assert any(p['id'] == 'local' for p in data['source'])
 
-    async def test_apply_grok_preset_appends_to_llms(self, client, workspace):
+    async def test_apply_openai_preset_appends_to_llms(self, client, workspace):
         r = await client.post('/api/presets/apply', json={
             'target': 'llm',
-            'preset_id': 'grok',
-            'form': {'name': 'mygrok', 'api_key': 'xai-test'},
+            'preset_id': 'openai-compatible',
+            'form': {'name': 'mygrok',
+                     'base_url': 'https://api.x.ai/v1', 'model': 'grok-1', 'api_key': 'xai-test'},
         })
         assert r.status_code == 200, r.text
         body = r.json()
@@ -225,15 +227,16 @@ class TestPresetsRoutes:
         assert 'mygrok' in names
 
     async def test_apply_preset_replaces_by_name(self, client, workspace):
+        common_form = {'name': 'g', 'base_url': 'http://x', 'model': 'm'}
         # Первый apply
         await client.post('/api/presets/apply', json={
-            'target': 'llm', 'preset_id': 'grok',
-            'form': {'name': 'g', 'api_key': 'k1'},
+            'target': 'llm', 'preset_id': 'openai-compatible',
+            'form': {**common_form, 'api_key': 'k1'},
         })
         # Второй apply с тем же name — должен заменить, не дублировать
         r = await client.post('/api/presets/apply', json={
-            'target': 'llm', 'preset_id': 'grok',
-            'form': {'name': 'g', 'api_key': 'k2'},
+            'target': 'llm', 'preset_id': 'openai-compatible',
+            'form': {**common_form, 'api_key': 'k2'},
         })
         assert r.status_code == 200
         local_path = workspace['cfg'].with_name('config.local.yml')
@@ -264,14 +267,15 @@ class TestPresetsRoutes:
         assert r.status_code == 400
 
     async def test_set_roles(self, client, workspace):
+        common = {'base_url': 'http://x', 'model': 'm', 'api_key': 'k'}
         # Сначала добавим LLM с vision
         await client.post('/api/presets/apply', json={
-            'target': 'llm', 'preset_id': 'grok',
-            'form': {'name': 'text-llm', 'api_key': 'k'},
+            'target': 'llm', 'preset_id': 'openai-compatible',
+            'form': {**common, 'name': 'text-llm'},
         })
         await client.post('/api/presets/apply', json={
-            'target': 'llm', 'preset_id': 'grok',
-            'form': {'name': 'vis-llm', 'api_key': 'k', 'vision_capable': True},
+            'target': 'llm', 'preset_id': 'openai-compatible',
+            'form': {**common, 'name': 'vis-llm', 'vision_capable': True},
         })
         r = await client.post('/api/presets/roles', json={
             'llm': 'text-llm', 'vision': 'vis-llm',
@@ -323,7 +327,27 @@ class TestLinksRoute:
         assert r.status_code == 200
         assert r.json()['qdrant'].endswith(':6333/dashboard')
 
+    async def test_default_owui_link(self, client):
+        r = await client.get('/api/links')
+        # Default — наш встроенный OWUI на :3000
+        assert r.json()['open_webui'] == 'http://localhost:3000'
+
     async def test_owui_link_from_env(self, client, monkeypatch):
         monkeypatch.setenv('OPENWEBUI_URL', 'http://my-owui.local')
         r = await client.get('/api/links')
         assert r.json()['open_webui'] == 'http://my-owui.local'
+
+    async def test_external_owui_connection_defaults(self, client):
+        r = await client.get('/api/links')
+        d = r.json()['external_owui']
+        assert d['base_url'] == 'http://localhost:9099'
+        assert d['model'] == 'morag_pipeline'
+        assert d['api_key'] == '0p3n-w3bu!'
+
+    async def test_external_owui_overrides(self, client, monkeypatch):
+        monkeypatch.setenv('PIPELINES_PUBLIC_URL', 'https://my-pipelines.example/v1')
+        monkeypatch.setenv('PIPELINES_API_KEY', 'custom-key')
+        r = await client.get('/api/links')
+        d = r.json()['external_owui']
+        assert d['base_url'] == 'https://my-pipelines.example/v1'
+        assert d['api_key'] == 'custom-key'

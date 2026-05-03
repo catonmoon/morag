@@ -711,6 +711,7 @@ async def cmd_serve(config_path: str) -> None:
         AlreadyRunning,
         IndexerControlPlane,
     )
+    from morag.setup_gate import SetupIncomplete, is_setup_complete
 
     # state-file для status_reporter и публикации прогресса наружу
     status_path = os.environ.get(
@@ -726,28 +727,46 @@ async def cmd_serve(config_path: str) -> None:
         run_rebuild_km=lambda **kw: cmd_rebuild_km(config_path, **kw),
     )
 
-    # ---- Cron scheduler (если настроен) ----
-    scheduler: AsyncIOScheduler | None = None
-    if config.indexing.schedule:
-        async def cron_trigger() -> None:
-            try:
-                await control_plane.start_index(reset=False)
-                logger.info('Cron-triggered indexing started')
-            except AlreadyRunning:
-                logger.warning('Cron-trigger skipped: indexing already running')
-            except Exception:
-                logger.exception('Cron-trigger failed')
+    # ---- Cron scheduler ----
+    # Всегда запускаем scheduler. Job добавляется только если schedule настроен;
+    # перенастройка через POST /control/reload-schedule (без рестарта контейнера).
+    scheduler = AsyncIOScheduler()
 
-        scheduler = AsyncIOScheduler()
-        scheduler.add_job(
-            cron_trigger,
-            CronTrigger.from_crontab(config.indexing.schedule),
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=None,
-        )
-        scheduler.start()
-        logger.info('Cron schedule active: %s', config.indexing.schedule)
+    CRON_JOB_ID = 'indexing-cron'
+
+    async def cron_trigger() -> None:
+        try:
+            await control_plane.start_index(reset=False)
+            logger.info('Cron-triggered indexing started')
+        except AlreadyRunning:
+            logger.warning('Cron-trigger skipped: indexing already running')
+        except SetupIncomplete as e:
+            logger.warning('Cron-trigger skipped: setup incomplete: %s', e)
+        except Exception:
+            logger.exception('Cron-trigger failed')
+
+    def _apply_schedule_from_config() -> str | None:
+        """Перечитывает config и пере-устанавливает cron job. Возвращает active expression."""
+        cfg = load_config(config_path)
+        existing = scheduler.get_job(CRON_JOB_ID)
+        new_expr = cfg.indexing.schedule if cfg.indexing else None
+        if existing:
+            scheduler.remove_job(CRON_JOB_ID)
+        if new_expr:
+            scheduler.add_job(
+                cron_trigger,
+                CronTrigger.from_crontab(new_expr),
+                id=CRON_JOB_ID,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=None,
+            )
+        return new_expr
+
+    scheduler.start()
+    initial_schedule = _apply_schedule_from_config()
+    if initial_schedule:
+        logger.info('Cron schedule active: %s', initial_schedule)
     else:
         logger.info(
             'No cron schedule. Indexing only on-demand via control-plane (HTTP :%d)',
@@ -764,6 +783,11 @@ async def cmd_serve(config_path: str) -> None:
     async def _status():
         return control_plane.status()
 
+    @app.get('/control/setup-status')
+    async def _setup_status():
+        ok, blockers = is_setup_complete(config_path)
+        return {'ok': ok, 'blockers': blockers}
+
     @app.post('/control/start')
     async def _start(req: _StartReq):
         try:
@@ -771,6 +795,8 @@ async def cmd_serve(config_path: str) -> None:
             return {'started_at': info.started_at, 'kind': info.kind, 'reset': info.reset}
         except AlreadyRunning as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
+        except SetupIncomplete as e:
+            raise HTTPException(status_code=412, detail={'blockers': e.blockers}) from e
 
     @app.post('/control/stop')
     async def _stop(req: _StopReq):
@@ -789,6 +815,18 @@ async def cmd_serve(config_path: str) -> None:
             return {'started_at': info.started_at, 'kind': info.kind}
         except AlreadyRunning as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
+        except SetupIncomplete as e:
+            raise HTTPException(status_code=412, detail={'blockers': e.blockers}) from e
+
+    @app.post('/control/reload-schedule')
+    async def _reload_schedule():
+        """Hot-reload: перечитать config.indexing.schedule, перенастроить APScheduler.
+
+        Console дёргает после PATCH /api/config когда изменилось поле schedule —
+        чтобы новое расписание подхватилось без рестарта контейнера.
+        """
+        active = _apply_schedule_from_config()
+        return {'schedule': active}
 
     server_config = uvicorn.Config(
         app, host='0.0.0.0', port=control_port,

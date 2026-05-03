@@ -12,8 +12,8 @@ from services.console.presets import (
 
 class TestFindPreset:
     def test_finds_existing_llm(self):
-        p = find_preset('llm', 'grok')
-        assert p.id == 'grok'
+        p = find_preset('llm', 'openai-compatible')
+        assert p.id == 'openai-compatible'
         assert p.target == 'llm'
 
     def test_finds_existing_source(self):
@@ -27,52 +27,58 @@ class TestFindPreset:
 
 
 class TestApplyLLMPresets:
-    def test_grok_minimal(self):
-        snippet = apply_preset('llm', 'grok', {
-            'name': 'mygrok', 'api_key': 'xai-test',
+    def test_openai_minimal(self):
+        snippet = apply_preset('llm', 'openai-compatible', {
+            'name': 'mygrok',
+            'base_url': 'https://api.x.ai/v1',
+            'model': 'grok-4-1-fast-non-reasoning',
+            'api_key': 'xai-test',
         })
         assert snippet['name'] == 'mygrok'
         assert snippet['base_url'] == 'https://api.x.ai/v1'
         assert snippet['model'] == 'grok-4-1-fast-non-reasoning'
         assert snippet['api_key'] == 'xai-test'
         assert snippet['capabilities'] == ['text']
+        # max_concurrent всегда отдаём — даже если юзер не задал
+        assert snippet['max_concurrent'] == 4
 
     def test_vision_capable_flag(self):
-        snippet = apply_preset('llm', 'grok', {
-            'name': 'g', 'api_key': 'k', 'vision_capable': True,
+        snippet = apply_preset('llm', 'openai-compatible', {
+            'name': 'g', 'base_url': 'http://x', 'model': 'm', 'api_key': 'k',
+            'vision_capable': True,
         })
         assert snippet['capabilities'] == ['text', 'vision']
 
     def test_vision_capable_string_form(self):
         # Из HTML checkbox приходит 'on' или 'true'
-        snippet = apply_preset('llm', 'grok', {
-            'name': 'g', 'api_key': 'k', 'vision_capable': 'on',
+        snippet = apply_preset('llm', 'openai-compatible', {
+            'name': 'g', 'base_url': 'http://x', 'model': 'm', 'api_key': 'k',
+            'vision_capable': 'on',
         })
         assert 'vision' in snippet['capabilities']
 
     def test_default_name_when_empty(self):
-        snippet = apply_preset('llm', 'grok', {'name': '', 'api_key': 'k'})
-        assert snippet['name'] == 'grok'
+        snippet = apply_preset('llm', 'openai-compatible', {
+            'name': '', 'base_url': 'http://x', 'model': 'm', 'api_key': 'k',
+        })
+        assert snippet['name'] == 'main'  # default name для openai-пресета
+
+    def test_openai_custom_concurrent(self):
+        snippet = apply_preset('llm', 'openai-compatible', {
+            'name': 'or', 'base_url': 'https://openrouter.ai/api/v1',
+            'model': 'anthropic/claude', 'api_key': 'sk-or',
+            'max_concurrent': '8',
+        })
+        assert snippet['max_concurrent'] == 8
 
     def test_ollama(self):
         snippet = apply_preset('llm', 'ollama', {
             'name': 'local-qwen', 'model': 'qwen3:4b',
         })
-        assert snippet['api_key'] == 'ollama'  # hardcoded для Ollama
+        assert snippet['api_key'] == 'ollama'           # hardcoded для Ollama
         assert snippet['enable_thinking'] is False
-
-    def test_openrouter(self):
-        snippet = apply_preset('llm', 'openrouter', {
-            'name': 'or', 'model': 'anthropic/claude', 'api_key': 'sk-or-test',
-        })
-        assert snippet['base_url'] == 'https://openrouter.ai/api/v1'
-
-    def test_custom_full(self):
-        snippet = apply_preset('llm', 'custom', {
-            'name': 'my-vllm', 'base_url': 'http://x', 'model': 'm', 'api_key': 'k',
-            'context_window': '16384',
-        })
-        assert snippet['context_window'] == 16384
+        assert snippet['max_concurrent'] == 1           # дефолт для Ollama
+        assert snippet['base_url'].endswith(':11434/v1')
 
 
 class TestApplySourcePresets:
@@ -85,33 +91,42 @@ class TestApplySourcePresets:
         assert s['name'] == 'docs'
 
     def test_confluence_cloud_minimal(self):
-        s = apply_preset('source', 'confluence-cloud', {
+        s = apply_preset('source', 'confluence', {
             'name': 'corp', 'url': 'https://corp/', 'username': 'u', 'api_token': 't',
         })
         assert s['kind'] == 'confluence'
         assert s['api_token'] == 't'
         assert 'password' not in s
 
-    def test_confluence_cloud_with_spaces(self):
-        s = apply_preset('source', 'confluence-cloud', {
+    def test_confluence_with_spaces(self):
+        s = apply_preset('source', 'confluence', {
             'name': 'c', 'url': 'x', 'username': 'u', 'api_token': 't',
             'spaces': 'DOCS, ENG, ML',
         })
         assert s['spaces'] == ['DOCS', 'ENG', 'ML']
 
-    def test_confluence_cloud_with_attachments(self):
-        s = apply_preset('source', 'confluence-cloud', {
+    def test_confluence_with_attachments(self):
+        s = apply_preset('source', 'confluence', {
             'name': 'c', 'url': 'x', 'username': 'u', 'api_token': 't',
             'attachments_enabled': True,
         })
         assert s['attachments'] == {'enabled': True}
 
     def test_confluence_onprem(self):
-        s = apply_preset('source', 'confluence-onprem', {
+        s = apply_preset('source', 'confluence', {
             'name': 'c', 'url': 'x', 'username': 'u', 'password': 'p',
         })
         assert s['password'] == 'p'
         assert 'api_token' not in s
+
+    def test_confluence_api_token_wins_over_password(self):
+        # Если юзер по ошибке заполнил оба поля — приоритет api_token (Cloud-режим)
+        s = apply_preset('source', 'confluence', {
+            'name': 'c', 'url': 'x', 'username': 'u',
+            'api_token': 't', 'password': 'p',
+        })
+        assert s['api_token'] == 't'
+        assert 'password' not in s
 
     def test_jira(self):
         s = apply_preset('source', 'jira', {
@@ -137,9 +152,14 @@ class TestSerializePreset:
 class TestPresetsValidateUnderNewSchema:
     """Snippets выданные пресетами должны добавляться в Pydantic Config без ошибок."""
 
-    def test_grok_llm_validates(self):
+    def test_openai_llm_validates(self):
         from morag.config import Config
-        snippet = apply_preset('llm', 'grok', {'name': 'main', 'api_key': 'xai-test'})
+        snippet = apply_preset('llm', 'openai-compatible', {
+            'name': 'main',
+            'base_url': 'https://api.x.ai/v1',
+            'model': 'grok-4-1-fast-non-reasoning',
+            'api_key': 'xai-test',
+        })
         # Минимальный конфиг с этим LLM должен пройти валидацию
         cfg = Config.model_validate({
             'sources': [{'kind': 'local', 'name': 'd', 'path': 'a'}],

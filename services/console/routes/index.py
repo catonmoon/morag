@@ -14,6 +14,7 @@ from services.console.indexer_client import (
     DEFAULT_STOP_GRACE_SECONDS,
     AlreadyRunning,
     IndexerError,
+    SetupIncomplete,
 )
 
 router = APIRouter()
@@ -58,6 +59,8 @@ async def start_index(req: StartRequest, request: Request) -> dict[str, Any]:
         return await request.app.state.indexer.start_index(reset=req.reset)
     except AlreadyRunning as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
+    except SetupIncomplete as e:
+        raise HTTPException(status_code=412, detail={'blockers': e.blockers}) from e
     except IndexerError as e:
         raise HTTPException(status_code=502, detail=str(e)) from e
 

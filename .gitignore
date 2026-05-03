@@ -15,11 +15,11 @@ coverage_html/
 
 # Env
 .env
-config.yml
-# Все env-specific configs (содержат api_keys, base_urls конкретных провайдеров).
-# Публичный пример — config.example.yml.
+# config.yml — primary, отслеживается в git как baseline.
+# Локальные правки (секреты, кастомизация) пишутся в config.local.yml — gitignored.
+# Все остальные config.*.yml — env-specific эксперименты, не для git.
 config.*.yml
-!config.example.yml
+!config.yml
 
 # Local docker-compose override (не для production)
 docker-compose.override.yml

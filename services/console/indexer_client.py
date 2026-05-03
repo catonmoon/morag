@@ -26,6 +26,17 @@ class AlreadyRunning(RuntimeError):
     """Indexer вернул 409 — задача уже запущена."""
 
 
+class SetupIncomplete(RuntimeError):
+    """Indexer вернул 412 — конфиг ещё не настроен через UI.
+
+    `blockers` — list[str] от control-plane'а, для отображения юзеру.
+    """
+
+    def __init__(self, blockers: list[str]) -> None:
+        super().__init__('; '.join(blockers))
+        self.blockers = blockers
+
+
 class IndexerClient:
     """Тонкий HTTP-клиент. Не держит состояния — только URL."""
 
@@ -46,6 +57,9 @@ class IndexerClient:
     async def status(self) -> dict[str, Any]:
         return await self._get('/control/status')
 
+    async def setup_status(self) -> dict[str, Any]:
+        return await self._get('/control/setup-status')
+
     async def start_index(self, reset: bool = False) -> dict[str, Any]:
         return await self._post('/control/start', {'reset': reset})
 
@@ -57,6 +71,10 @@ class IndexerClient:
 
     async def kill(self) -> dict[str, Any]:
         return await self._post('/control/kill', {})
+
+    async def reload_schedule(self) -> dict[str, Any]:
+        """Hot-reload cron из обновлённого config.local.yml. Возвращает active expression."""
+        return await self._post('/control/reload-schedule', {})
 
     # ---- internals ----
 
@@ -82,5 +100,12 @@ class IndexerClient:
     def _raise_for_status(r: httpx.Response, path: str) -> None:
         if r.status_code == 409:
             raise AlreadyRunning(r.text)
+        if r.status_code == 412:
+            try:
+                detail = r.json().get('detail', {})
+                blockers = detail.get('blockers') if isinstance(detail, dict) else None
+            except Exception:
+                blockers = None
+            raise SetupIncomplete(blockers or [r.text[:200]])
         if r.status_code >= 400:
             raise IndexerError(f'{path}: HTTP {r.status_code} — {r.text[:200]}')

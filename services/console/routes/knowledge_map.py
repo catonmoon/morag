@@ -56,13 +56,13 @@ async def get_knowledge_map(request: Request) -> KMResponse:
         except Exception as e:
             return KMResponse(
                 nodes=[], full_text='', qdrant_reachable=False,
-                error=f'Qdrant unreachable: {e}',
+                error=f'Qdrant недоступен: {e}',
             )
 
         if km_collection not in cols:
             return KMResponse(
                 nodes=[], full_text='', qdrant_reachable=True,
-                error=f'Collection «{km_collection}» does not exist yet — run indexing first.',
+                error=f'Коллекция «{km_collection}» ещё не создана — сначала запустите индексацию.',
             )
 
         # Сгребаем все точки коллекции — их обычно мало (по числу root-секций).
@@ -92,7 +92,7 @@ async def get_knowledge_map(request: Request) -> KMResponse:
             nodes=nodes,
             full_text=full_text,
             qdrant_reachable=True,
-            error=None if nodes else f'Collection «{km_collection}» is empty.',
+            error=None if nodes else f'Коллекция «{km_collection}» пуста.',
         )
     finally:
         await client.close()

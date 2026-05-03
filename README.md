@@ -37,16 +37,15 @@ ollama pull qwen3.5:9b               # LLM для агента
 ollama pull qwen3-embedding:4b       # dense-эмбеддер (dim=2560, context=32K)
 ollama serve
 
-# 2. Конфиг
-cp config.example.yml config.yml
-touch config.local.yml             # overlay для секретов и UI-правок
-# минимальный config.yml — только sources.local_documents.path, остальное настроишь через console
+# 2. (опционально) Положить документы в папку из config.yml (по умолчанию ./examples/)
 
-# 3. Положить документы в папку из config.yml (по умолчанию data/)
-
-# 4. Собрать и запустить
+# 3. Собрать и запустить
 docker compose build
 docker compose up -d
+
+# 4. Открыть консоль http://localhost:8000 и через UI:
+#    - Sources / LLMs / Roles — настроить
+#    - Запустить индексацию
 ```
 
 Дальше — два URL:
@@ -102,30 +101,26 @@ Console и индексатор работают в изолированных �
 | Jira | Задачи по ссылкам из документов (только on-premise) |
 | PDF | Конвертация через Vision LLM или docling-serve |
 
-Поддерживается **несколько инстансов одного типа** — например, два Confluence-сервера (корпоративный + подрядчика) или несколько Jira. Каждый со своим уникальным `name`. Настраиваются в `config.yml` — см. `config.example.yml` для описания всех опций.
+Поддерживается **несколько инстансов одного типа** — например, два Confluence-сервера (корпоративный + подрядчика) или несколько Jira. Каждый со своим уникальным `name`. Настраиваются в `config.yml` — все опции описаны прямо в нём (комментариях).
 
 ## LLM
 
-Несколько LLM в одном пуле, переиспользуются по ролям. Минимум — два инстанса (text + vision), при поддержке multimodal-модели — один:
+Один пул LLM, переиспользуются по ролям. Минимум — одна multimodal-модель на text + vision:
 
 ```yaml
 llms:
   - name: main
     base_url: http://host.docker.internal:11434/v1
-    model: qwen3:4b
-    api_key: ollama                 # capabilities=[text] (default)
-  - name: vision
-    base_url: ...
-    model: qwen2.5-vl:7b
+    model: qwen3.5:9b
     api_key: ollama
-    capabilities: [text, vision]    # multimodal — годится и для text-роли
+    capabilities: [text, vision]    # multimodal — годится и для text, и для vision
 
 indexing:
-  llm: main                         # для DocTitle/DocSummary/Context/KM/Chunker
-  vision: vision                    # для PDF + изображений Confluence
+  llm: main                         # text-роли: DocTitle/DocSummary/Context/KM/Chunker
+  vision: main                      # vision-роль: PDF + изображения Confluence
 ```
 
-Можно использовать несколько LLM с разными ролями: дешёвую для context-generation, умную для doc_summary и KM. Подробности — в `config.example.yml`.
+Хочешь дешёвую text-only для рутины + dedicated VL для PDF — добавь второй LLM в пул и укажи в `indexing.llm`. Подробности — в комментариях `config.yml`.
 
 ## Стек
 

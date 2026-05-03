@@ -26,7 +26,17 @@ class StatsResponse(BaseModel):
 
 class LinksResponse(BaseModel):
     qdrant: str
-    open_webui: str | None
+    open_webui: str
+    # Параметры для подключения «внешнего» OWUI (не из нашего docker-compose)
+    # к нашему pipelines-сервису. Внутренний OWUI уже подключён через env
+    # (см. docker-compose.yml: OPENAI_API_BASE_URL=http://pipelines:9099).
+    external_owui: 'ExternalOwuiConnection'
+
+
+class ExternalOwuiConnection(BaseModel):
+    base_url: str
+    model: str
+    api_key: str
 
 
 @router.get('/stats', response_model=StatsResponse)
@@ -135,8 +145,22 @@ async def _safe_count(client, collection: str, available: list[str]) -> int:
 
 @router.get('/links', response_model=LinksResponse)
 async def get_links(request: Request) -> LinksResponse:
-    """Внешние ссылки в смежные сервисы. URL берутся из env."""
+    """Внешние ссылки в смежные сервисы.
+
+    Дефолты — для нашего docker-compose (qdrant на 6333, OWUI на 3000,
+    pipelines на 9099). Env-переменные могут переопределить.
+    """
     import os
     qdrant_url = os.environ.get('QDRANT_DASHBOARD_URL', 'http://localhost:6333/dashboard')
-    owui_url = os.environ.get('OPENWEBUI_URL')
-    return LinksResponse(qdrant=qdrant_url, open_webui=owui_url)
+    owui_url = os.environ.get('OPENWEBUI_URL', 'http://localhost:3000')
+    pipelines_url = os.environ.get('PIPELINES_PUBLIC_URL', 'http://localhost:9099')
+    api_key = os.environ.get('PIPELINES_API_KEY', '0p3n-w3bu!')
+    return LinksResponse(
+        qdrant=qdrant_url,
+        open_webui=owui_url,
+        external_owui=ExternalOwuiConnection(
+            base_url=pipelines_url,
+            model='morag_pipeline',
+            api_key=api_key,
+        ),
+    )

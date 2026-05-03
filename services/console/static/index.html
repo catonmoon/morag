@@ -19,6 +19,46 @@
       --danger: #dc2626;
       --warn: #d97706;
       --code-bg: #f3f4f6;
+      --card-bg: white;
+      --pill-running-bg: #dbeafe;
+      --pill-completed-bg: #dcfce7;
+      --pill-cancelled-bg: #fef3c7;
+      --welcome-bg-from: #f0f9ff;
+      --welcome-bg-to: #e0f2fe;
+      --welcome-border: #bae6fd;
+      --welcome-fg: #0c4a6e;
+      --welcome-accent: #0369a1;
+      --warn-banner-bg: #fef3c7;
+      --warn-banner-fg: #78350f;
+      --header-bg: #1e293b;       /* мягкий тёмно-синий, slate-800 */
+      --header-border: #334155;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f172a;
+        --fg: #e2e8f0;
+        --muted: #94a3b8;
+        --border: #334155;
+        --accent: #60a5fa;
+        --accent-hover: #93c5fd;
+        --success: #4ade80;
+        --danger: #f87171;
+        --warn: #fbbf24;
+        --code-bg: #1e293b;
+        --card-bg: #1e293b;
+        --pill-running-bg: #1e3a8a;
+        --pill-completed-bg: #14532d;
+        --pill-cancelled-bg: #78350f;
+        --welcome-bg-from: #0c2a3e;
+        --welcome-bg-to: #082338;
+        --welcome-border: #1e4258;
+        --welcome-fg: #bae6fd;
+        --welcome-accent: #60a5fa;
+        --warn-banner-bg: #422006;
+        --warn-banner-fg: #fde68a;
+        --header-bg: #0f172a;     /* в тёмной теме — бесшовно с фоном */
+        --header-border: #1e293b;
+      }
     }
     * { box-sizing: border-box; }
     body {
@@ -32,10 +72,28 @@
       align-items: center;
       gap: 1.5rem;
       padding: 0.75rem 1.5rem;
-      background: white;
-      border-bottom: 1px solid var(--border);
+      background: var(--header-bg);
+      border-bottom: 1px solid var(--header-border);
     }
-    header h1 { font-size: 1.1rem; margin: 0; font-weight: 600; }
+    header nav button { color: #94a3b8; }
+    header nav button:hover:not(.active) { color: #e2e8f0; }
+    header nav button.active { color: #f1f5f9; background: var(--header-border); }
+    header h1 {
+      font-family: 'SF Mono','Menlo','Consolas',monospace;
+      font-size: 7px; line-height: 1.35;
+      margin: 0; padding: 0; font-weight: 500;
+      white-space: pre;
+      color: #f8fafc;                 /* почти чистый белый, без тёплого оттенка */
+      cursor: default;
+      transition: text-shadow 0.25s ease, color 0.25s ease;
+    }
+    header h1:hover {
+      color: #ffffff;
+      text-shadow:
+        0 0 4px currentColor,
+        0 0 12px rgba(248, 250, 252, 0.6),
+        0 0 22px rgba(248, 250, 252, 0.3);
+    }
     nav { display: flex; gap: 0.25rem; }
     nav button {
       background: none;
@@ -57,16 +115,16 @@
       background: var(--code-bg);
       color: var(--muted);
     }
-    .pill.running { background: #dbeafe; color: var(--accent); }
-    .pill.completed { background: #dcfce7; color: var(--success); }
-    .pill.cancelled { background: #fef3c7; color: var(--warn); }
+    .pill.running { background: var(--pill-running-bg); color: var(--accent); }
+    .pill.completed { background: var(--pill-completed-bg); color: var(--success); }
+    .pill.cancelled { background: var(--pill-cancelled-bg); color: var(--warn); }
     .pill.failed { background: #fee2e2; color: var(--danger); }
     main { max-width: 980px; margin: 1.5rem auto; padding: 0 1.5rem; }
     section.view { display: none; }
     section.view.active { display: block; }
     .grid { display: grid; gap: 1rem; grid-template-columns: 1fr 1fr; }
     .card {
-      background: white;
+      background: var(--card-bg);
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 1rem 1.25rem;
@@ -94,7 +152,7 @@
     }
     button.btn:hover:not(:disabled) { background: var(--accent-hover); }
     button.btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    button.btn.secondary { background: white; color: var(--fg); border: 1px solid var(--border); }
+    button.btn.secondary { background: var(--card-bg); color: var(--fg); border: 1px solid var(--border); }
     button.btn.secondary:hover:not(:disabled) { background: var(--code-bg); }
     button.btn.danger { background: var(--danger); }
     button.btn.warn { background: var(--warn); }
@@ -132,7 +190,24 @@
       border: 1px solid var(--border);
       border-radius: 5px;
       font: inherit;
-      background: white;
+      background: var(--card-bg);
+      color: var(--fg);
+    }
+    /* В тёмной теме <option> в нативном <select> рендерится отдельным элементом,
+       не наследует color/background — указываем явно. */
+    @media (prefers-color-scheme: dark) {
+      select option { background: var(--card-bg); color: var(--fg); }
+    }
+    /* Placeholder тусклым — чтобы дефолты не выглядели как введённые данные */
+    input::placeholder, textarea::placeholder {
+      color: var(--muted);
+      opacity: 0.55;
+    }
+    @media (prefers-color-scheme: dark) {
+      input::placeholder, textarea::placeholder {
+        color: #475569;
+        opacity: 1;
+      }
     }
     input:focus, select:focus, textarea:focus {
       outline: 2px solid var(--accent);
@@ -178,9 +253,9 @@
       color: var(--fg);
       white-space: pre-wrap;
     }
-    .result.success { background: #dcfce7; color: #14532d; }
-    .result.error { background: #fee2e2; color: #7f1d1d; }
-    .result.info { background: #dbeafe; color: #1e3a8a; }
+    .result.success { background: var(--pill-completed-bg); color: var(--success); }
+    .result.error { background: var(--warn-banner-bg); color: var(--danger); }
+    .result.info { background: var(--pill-running-bg); color: var(--accent); }
     .busy-spinner {
       font-size: 0.85rem;
       color: var(--muted);
@@ -254,14 +329,18 @@
 <body x-data="app()" x-init="init()">
 
   <header>
-    <h1>morag console</h1>
+    <h1 title="morag console">    ▄▀▀▀▀▀▀▀▀▄
+   █  /\_/\   █      ╔╦╗ ╔═╗ ┬─┐ ┌─┐ ┌─┐
+   █ ( =^.^=) █      ║║║ ║ ║ ├┬┘ ├─┤ │ ┬
+   █  /> < /  █      ╩ ╩ ╚═╝ ┴└─ ┴ ┴ └─┘
+    ▀▄▄▄▄▄▄▄▄▀       console</h1>
     <nav>
-      <button :class="{active: tab==='dashboard'}" @click="tab='dashboard'">Dashboard</button>
-      <button :class="{active: tab==='setup'}" @click="setupOpen()">Setup</button>
-      <button :class="{active: tab==='settings'}" @click="settingsOpen()">Settings</button>
+      <button :class="{active: tab==='dashboard'}" @click="tab='dashboard'">Главная</button>
+      <button :class="{active: tab==='setup'}" @click="setupOpen()">Настройка</button>
+      <button :class="{active: tab==='settings'}" @click="settingsOpen()">Параметры</button>
     </nav>
     <div class="pill" :class="status?.progress?.state || 'idle'"
-         x-text="status?.is_running ? `Indexing — ${status?.progress?.state || '...'}` : (status?.progress?.state || 'idle')"></div>
+         x-text="pillText()"></div>
   </header>
 
   <main>
@@ -271,68 +350,134 @@
 
       <div class="grid">
         <div class="card">
-          <h2>Stats</h2>
-          <div class="stat"><span class="label">Documents</span><span class="value" x-text="stats?.docs ?? '—'"></span></div>
-          <div class="stat"><span class="label">Chunks</span><span class="value" x-text="stats?.chunks ?? '—'"></span></div>
-          <div class="stat"><span class="label">Knowledge Map nodes</span><span class="value" x-text="stats?.knowledge_map_nodes ?? '—'"></span></div>
+          <h2>Статистика</h2>
+          <div class="stat"><span class="label">Документов</span><span class="value" x-text="stats?.docs ?? '—'"></span></div>
+          <div class="stat"><span class="label">Чанков</span><span class="value" x-text="stats?.chunks ?? '—'"></span></div>
+          <div class="stat"><span class="label">Узлов карты знаний</span><span class="value" x-text="stats?.knowledge_map_nodes ?? '—'"></span></div>
           <div class="stat" x-show="stats?.last_indexed_at">
-            <span class="label">Newest document</span>
+            <span class="label">Самый свежий документ</span>
             <span class="value" :title="stats?.last_indexed_at" x-text="formatLastIndexed(stats?.last_indexed_at)"></span>
           </div>
           <div x-show="stats && !stats.qdrant_reachable"
-               style="margin-top:0.5rem; padding:0.6rem 0.75rem; background:#fef3c7; color:#78350f; border-radius:5px; font-size:0.82rem; line-height:1.45">
+               style="margin-top:0.5rem; padding:0.6rem 0.75rem; background:var(--warn-banner-bg); color:var(--warn-banner-fg); border-radius:5px; font-size:0.82rem; line-height:1.45">
             <div style="font-weight:500; margin-bottom:0.35rem">⚠ Qdrant недоступен: <span x-text="stats?.qdrant_error"></span></div>
-            <div>Если запускаешь консоль <b>локально</b> (uvicorn) — открой <a href="#" @click.prevent="tab='settings'" style="color:inherit; text-decoration:underline">Settings</a> и добавь в overlay:</div>
+            <div>Если консоль запущена <b>локально</b> (uvicorn) — откройте раздел <a href="#" @click.prevent="tab='settings'" style="color:inherit; text-decoration:underline">Параметры</a> и добавьте в overlay:</div>
             <pre style="margin:0.4rem 0 0.2rem; padding:0.4rem 0.55rem; background:rgba(0,0,0,0.05); border-radius:4px; font-size:0.78rem">qdrant:
   host: localhost</pre>
-            <div style="margin-top:0.35rem">Если в <b>docker compose</b> — проверь что сервис <code>qdrant</code> поднят (<code>docker compose ps</code>).</div>
+            <div style="margin-top:0.35rem">Если запущено через <b>docker compose</b> — убедитесь, что сервис <code>qdrant</code> поднят (<code>docker compose ps</code>).</div>
           </div>
         </div>
 
         <div class="card">
-          <h2>Links</h2>
-          <a class="ext" :href="links?.qdrant" target="_blank" x-show="links?.qdrant">→ Qdrant Dashboard</a>
-          <a class="ext" :href="links?.open_webui" target="_blank" x-show="links?.open_webui">→ Open WebUI</a>
-          <div class="empty" x-show="!links?.open_webui">Open WebUI URL не задан (env <code>OPENWEBUI_URL</code>)</div>
+          <h2>Ссылки</h2>
+          <a class="ext" :href="links?.qdrant" target="_blank" x-show="links?.qdrant">→ Панель Qdrant</a>
+          <a class="ext" :href="links?.open_webui" target="_blank" x-show="links?.open_webui">→ Open WebUI (local)</a>
+
+          <details style="margin-top:0.85rem">
+            <summary style="cursor:pointer; color:var(--accent); font-size:0.88rem">
+              Подключить внешний OWUI
+            </summary>
+            <div class="help" style="margin:0.6rem 0 0.5rem 0">
+              Параметры для подключения внешнего Open WebUI к pipeline.
+              В OWUI: <i>Settings → Connections → OpenAI API → Add</i>.
+            </div>
+            <div style="display:grid; grid-template-columns:auto 1fr auto; gap:0.4rem 0.6rem; align-items:center; font-size:0.85rem">
+              <span class="empty">URL</span>
+              <code style="user-select:all" x-text="links?.external_owui?.base_url"></code>
+              <button class="btn secondary" style="padding:0.15rem 0.5rem; font-size:0.75rem"
+                      @click="copyCmd(links?.external_owui?.base_url)">копировать</button>
+
+              <span class="empty">Модель</span>
+              <code style="user-select:all" x-text="links?.external_owui?.model"></code>
+              <button class="btn secondary" style="padding:0.15rem 0.5rem; font-size:0.75rem"
+                      @click="copyCmd(links?.external_owui?.model)">копировать</button>
+
+              <span class="empty">API-ключ</span>
+              <code style="user-select:all" x-text="links?.external_owui?.api_key"></code>
+              <button class="btn secondary" style="padding:0.15rem 0.5rem; font-size:0.75rem"
+                      @click="copyCmd(links?.external_owui?.api_key)">копировать</button>
+            </div>
+            <div class="help" style="margin-top:0.5rem">
+              Смена API-ключа: <code>docker-compose.yml</code>
+              (<code>PIPELINES_API_KEY</code> и <code>OPENAI_API_KEY</code>),
+              затем <code>docker compose up -d</code>.
+            </div>
+          </details>
         </div>
       </div>
 
       <div class="card" style="margin-top:1rem">
-        <h2>Indexing</h2>
+        <h2>Индексация</h2>
+
+        <!-- Welcome card: показывается пока юзер не настроил config через UI -->
+        <div x-show="gate && !gate.ok"
+             style="margin-bottom:1.2rem; padding:1.2rem 1.4rem; background:linear-gradient(135deg, var(--welcome-bg-from) 0%, var(--welcome-bg-to) 100%); border:1px solid var(--welcome-border); border-radius:10px; color:var(--welcome-fg)">
+          <div style="font-size:1.05rem; font-weight:600; margin-bottom:0.5rem">
+            👋 Добро пожаловать в консоль Morag!
+          </div>
+          <div style="font-size:0.92rem; line-height:1.55; margin-bottom:0.85rem">
+            Для запуска индексации откройте раздел
+            <a href="#" @click.prevent="setupOpen()" style="color:var(--welcome-accent); font-weight:500">Настройка</a>
+            и сконфигурируйте:
+          </div>
+          <ol style="margin:0 0 0.85rem 1.2rem; padding:0; font-size:0.92rem; line-height:1.7">
+            <li><b>Источники</b> — откуда брать документы (локальная папка, Confluence, Jira)</li>
+            <li><b>LLM</b> — какие модели использовать (Ollama / Grok / OpenRouter / свой сервер)</li>
+            <li><b>Роли</b> — какая LLM на текстовые задачи, какая на vision (PDF, изображения)</li>
+            <li><b>Расписание</b> <span class="empty">(необязательно)</span> — автоматическая переиндексация по cron</li>
+          </ol>
+          <a href="#" @click.prevent="setupOpen()"
+             style="display:inline-block; padding:0.45rem 1rem; background:var(--welcome-accent); color:white; border-radius:6px; text-decoration:none; font-size:0.9rem; font-weight:500">
+            → Перейти к настройке
+          </a>
+        </div>
 
         <template x-if="!status?.is_running">
           <div>
             <div class="actions">
-              <button class="btn" @click="startIndex(false)">Start</button>
-              <button class="btn warn" @click="startIndex(true)">Reset & Start</button>
-              <button class="btn secondary" @click="rebuildKM()">Rebuild Knowledge Map</button>
+              <button class="btn" :disabled="gate && !gate.ok" @click="startIndex(false)">Запустить</button>
+              <button class="btn warn" :disabled="gate && !gate.ok" @click="startIndex(true)">Сбросить и запустить</button>
+              <button class="btn secondary" :disabled="gate && !gate.ok" @click="rebuildKM()">Пересобрать карту знаний</button>
             </div>
-            <template x-if="status?.progress && status.progress.state !== 'idle'">
+            <!-- Ошибка запуска (рядом с кнопкой, не toast'ом) -->
+            <div x-show="runStartError"
+                 style="margin-top:0.7rem; padding:0.6rem 0.8rem; background:var(--warn-banner-bg); color:var(--warn-banner-fg); border-radius:5px; font-size:0.85rem; line-height:1.45">
+              <span style="margin-right:0.5rem">⚠</span><span x-text="runStartError"></span>
+            </div>
+            <!-- Last run summary (только для реальных run-результатов) -->
+            <template x-if="status?.progress && !['idle', 'unreachable'].includes(status.progress.state)">
               <div style="margin-top:1rem; padding:0.75rem 0.9rem; background:var(--code-bg); border-radius:6px">
                 <div style="font-weight:500; margin-bottom:0.35rem">
                   <span x-text="lastRunIcon()"></span>
                   <span x-text="lastRunTitle()"></span>
                 </div>
                 <div class="meta" style="margin:0">
-                  <span>Phase: <code x-text="status.progress.phase || '—'"></code></span>
-                  <span x-text="`${status.progress.processed} of ${status.progress.total}`"></span>
+                  <span>Этап: <code x-text="status.progress.phase || '—'"></code></span>
+                  <span x-text="`${status.progress.processed} из ${status.progress.total}`"></span>
                 </div>
                 <div class="meta" style="margin:0">
                   <span x-text="lastRunStartedAgo()"></span>
-                  <span x-show="status.run?.reset" style="color:var(--warn)">↻ was reset</span>
+                  <span x-show="status.run?.reset" style="color:var(--warn)">↻ со сбросом</span>
                 </div>
                 <div x-show="status.progress.error"
-                     style="margin-top:0.5rem; padding:0.4rem 0.55rem; background:#fee2e2; color:#7f1d1d; border-radius:4px; font-size:0.82rem"
+                     style="margin-top:0.5rem; padding:0.4rem 0.55rem; background:var(--warn-banner-bg); color:var(--danger); border-radius:4px; font-size:0.82rem"
                      x-text="status.progress.error"></div>
               </div>
             </template>
+
+            <!-- Нейтральная плашка для свежего стейта: ничего ещё не запускалось
+                 или indexer ещё не отвечает (юзеру в любом случае нечего смотреть). -->
+            <div x-show="!status?.progress || ['unreachable', 'idle'].includes(status?.progress?.state)"
+                 style="margin-top:1rem; padding:0.6rem 0.8rem; background:var(--code-bg); color:var(--muted); border-radius:6px; font-size:0.85rem">
+              Индексация ещё не запускалась.
+            </div>
           </div>
         </template>
 
         <template x-if="status?.is_running">
           <div>
             <div class="meta">
-              <span><b x-text="status.progress?.phase || 'starting...'"></b></span>
+              <span><b x-text="status.progress?.phase || 'запуск...'"></b></span>
               <span x-text="status.progress ? `${status.progress.processed}/${status.progress.total}` : ''"></span>
             </div>
             <div class="progress">
@@ -341,11 +486,11 @@
             </div>
             <div class="meta">
               <span><b>⏱ <span x-text="runningFor()"></span></b><span x-show="etaText()" x-text="' • ' + etaText()"></span></span>
-              <span x-text="status.progress?.current_doc_id ? `Current: ${status.progress.current_doc_id}` : ''"></span>
+              <span x-text="status.progress?.current_doc_id ? `Текущий: ${status.progress.current_doc_id}` : ''"></span>
             </div>
             <div class="actions" style="margin-top:1rem">
-              <button class="btn" :disabled="stopState !== ''" @click="stopIndex(false)">Stop (graceful)</button>
-              <button class="btn danger" :disabled="stopState === 'killing'" @click="stopIndex(true)">Force Stop</button>
+              <button class="btn" :disabled="stopState !== ''" @click="stopIndex(false)">Остановить (мягко)</button>
+              <button class="btn danger" :disabled="stopState === 'killing'" @click="stopIndex(true)">Прервать</button>
             </div>
             <div x-show="stopMessage"
                  :class="'result ' + (stopResultKind || 'info')"
@@ -356,10 +501,10 @@
 
       <!-- ============ KNOWLEDGE MAP CARD ============ -->
       <div class="card" style="margin-top:1rem">
-        <h2>Knowledge Map</h2>
+        <h2>Карта знаний</h2>
 
         <template x-if="!km">
-          <div class="empty">Loading...</div>
+          <div class="empty">Загрузка…</div>
         </template>
 
         <template x-if="km && km.error">
@@ -369,7 +514,7 @@
         <template x-if="km && !km.error && km.full_text">
           <div>
             <div class="meta" style="margin-bottom:0.5rem">
-              <span x-text="`${km.nodes.length} root section(s) — ${km.full_text.length.toLocaleString()} chars`"></span>
+              <span x-text="`${km.nodes.length} корневых разделов — ${km.full_text.length.toLocaleString()} символов`"></span>
               <span class="empty" x-show="!kmExpanded">показано начало карты</span>
             </div>
 
@@ -381,12 +526,12 @@
 
             <div class="actions" style="margin-top:1rem">
               <button class="btn secondary" @click="kmExpanded = !kmExpanded"
-                      x-text="kmExpanded ? '↑ Collapse' : '↓ Show full'"></button>
+                      x-text="kmExpanded ? '↑ Свернуть' : '↓ Показать полностью'"></button>
               <button class="btn secondary" @click="refreshKM()" :disabled="kmRefreshing">
-                <span x-show="!kmRefreshing">↻ Refresh</span>
-                <span x-show="kmRefreshing">⏳ loading...</span>
+                <span x-show="!kmRefreshing">↻ Обновить</span>
+                <span x-show="kmRefreshing">⏳ загрузка…</span>
               </button>
-              <span class="empty" style="align-self:center">встраивается в system prompt агента — то что LLM видит для навигации</span>
+              <span class="empty" style="align-self:center">встраивается в системный промпт агента — то, что видит LLM для навигации</span>
             </div>
           </div>
         </template>
@@ -398,11 +543,69 @@
     <!-- ============ SETUP WIZARD ============ -->
     <section class="view" :class="{active: tab==='setup'}">
 
+      <!-- ─── 0. Environment checklist ─── -->
+      <div class="card" style="margin-bottom:1rem">
+        <div style="display:flex; justify-content:space-between; align-items:baseline">
+          <h2 style="margin:0">0. Окружение</h2>
+          <button class="btn secondary" style="padding:0.2rem 0.6rem; font-size:0.8rem"
+                  @click="refreshChecklist()" :disabled="checklist?.loading">
+            <span x-show="!checklist?.loading">Проверить заново</span>
+            <span x-show="checklist?.loading">⏳</span>
+          </button>
+        </div>
+        <div class="help" style="margin:0.4rem 0 0.85rem 0">
+          Что требуется для индексации согласно текущей конфигурации. Команды копируются по клику.
+        </div>
+
+        <div x-show="!checklist || checklist.loading" class="empty">Проверка…</div>
+
+        <div x-show="checklist && !checklist.loading && !checklist.config_ok" class="result error">
+          ✗ Конфигурация невалидна: <span x-text="checklist?.config_error"></span>
+        </div>
+
+        <template x-if="checklist?.qdrant">
+          <div style="margin:0.4rem 0; padding:0.5rem 0.7rem; background:var(--code-bg); border-radius:5px; font-size:0.88rem">
+            <b>Qdrant</b>
+            <span x-show="checklist.qdrant.reachable" style="color:var(--success)">✓ доступен</span>
+            <span x-show="!checklist.qdrant.reachable" style="color:var(--error)">✗ недоступен</span>
+            <span class="empty" x-text="`(${checklist.qdrant.host}:${checklist.qdrant.port})`"
+                  style="margin-left:0.5rem"></span>
+            <div x-show="!checklist.qdrant.reachable" class="empty"
+                 x-text="checklist.qdrant.error" style="margin-top:0.3rem"></div>
+            <div x-show="checklist.qdrant.reachable && checklist.qdrant.collections.length"
+                 class="empty" style="margin-top:0.3rem">
+              коллекции: <span x-text="checklist.qdrant.collections.join(', ')"></span>
+            </div>
+          </div>
+        </template>
+
+        <template x-for="m in (checklist?.ollama || [])" :key="m.host + ':' + m.model + ':' + m.role">
+          <div style="margin:0.4rem 0; padding:0.5rem 0.7rem; background:var(--code-bg); border-radius:5px; font-size:0.88rem">
+            <b x-text="m.role"></b> ·
+            <code x-text="m.model"></code>
+            <template x-if="!m.host_reachable">
+              <span style="color:var(--error)">✗ Ollama недоступна (<span x-text="m.host"></span>)</span>
+            </template>
+            <template x-if="m.host_reachable && m.installed">
+              <span style="color:var(--success)">✓ установлена</span>
+            </template>
+            <template x-if="m.host_reachable && !m.installed">
+              <div style="margin-top:0.4rem">
+                <span style="color:var(--error)">✗ не установлена</span>
+                — выполните на хосте:
+                <code style="cursor:pointer; user-select:all" x-text="m.pull_cmd"
+                      @click="copyCmd(m.pull_cmd)" title="Скопировать"></code>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
+
       <!-- ─── 1. Sources (read-only list + add wizard) ─── -->
       <div class="card" style="margin-bottom:1rem">
-        <h2>1. Sources</h2>
+        <h2>1. Источники</h2>
         <div class="empty" x-show="!(config?.sources || []).length">
-          Источников ещё нет. Добавь хотя бы один — например Local folder.
+          Источников ещё нет. Добавьте хотя бы один — например, локальную папку.
         </div>
         <template x-for="src in (config?.sources || [])" :key="src.kind + ':' + src.name">
           <div style="margin:0.5rem 0; padding:0.5rem 0.7rem; background:var(--code-bg); border-radius:5px; font-size:0.88rem">
@@ -412,9 +615,9 @@
         </template>
 
         <details style="margin-top:1rem">
-          <summary style="cursor:pointer; color:var(--accent)">+ Add source</summary>
+          <summary style="cursor:pointer; color:var(--accent)">+ Добавить источник</summary>
           <div style="margin-top:0.85rem; padding-top:0.5rem; border-top:1px solid var(--border)">
-            <label>Provider</label>
+            <label>Провайдер</label>
             <select x-model="setup.source.preset_id" @change="setup.source.form = {}">
               <template x-for="p in (presets?.source || [])" :key="p.id">
                 <option :value="p.id" x-text="p.name"></option>
@@ -427,8 +630,8 @@
                   <div>
                     <label x-text="field.label + (field.required ? ' *' : '')"></label>
                     <input :type="field.kind === 'password' ? 'password' : (field.kind === 'number' ? 'number' : 'text')"
-                           :placeholder="field.placeholder || ''"
-                           :value="setup.source.form[field.name] ?? field.default ?? ''"
+                           :placeholder="field.placeholder || (field.default != null ? String(field.default) : '')"
+                           :value="setup.source.form[field.name] ?? ''"
                            @input="setup.source.form[field.name] = $event.target.value">
                     <div class="help" x-show="field.help" x-text="field.help"></div>
                   </div>
@@ -447,7 +650,7 @@
               </div>
             </template>
             <div class="actions" style="margin-top:1rem">
-              <button class="btn" :disabled="setup.source.busy" @click="addItem('source')">Add</button>
+              <button class="btn" :disabled="setup.source.busy" @click="addItem('source')">Добавить</button>
               <span x-show="setup.source.busy" class="busy-spinner">⏳</span>
             </div>
             <div x-show="setup.source.result" :class="'result ' + (setup.source.resultKind || '')"
@@ -458,23 +661,23 @@
 
       <!-- ─── 2. LLMs pool (read-only list + add wizard) ─── -->
       <div class="card" style="margin-bottom:1rem">
-        <h2>2. LLMs</h2>
+        <h2>2. LLM</h2>
         <div class="empty" x-show="!(config?.llms || []).length">
-          LLM ещё не настроены. Добавь хотя бы один text-LLM (для DocSummary, Context и пр.) и vision-LLM (для PDF / images).
+          LLM ещё не настроены. Добавьте хотя бы одну текстовую модель (DocSummary, Context и пр.) и одну vision (PDF / изображения). Можно использовать одну multimodal-модель сразу для обеих ролей.
         </div>
         <template x-for="llm in (config?.llms || [])" :key="llm.name">
           <div style="margin:0.5rem 0; padding:0.5rem 0.7rem; background:var(--code-bg); border-radius:5px; font-size:0.88rem">
             <b x-text="llm.name"></b> · <span x-text="llm.model"></span>
             <span x-text="capabilityBadges(llm)" style="margin-left:0.5rem"></span>
             <button class="btn secondary" style="float:right; padding:0.2rem 0.5rem; font-size:0.78rem"
-                    @click="testLLM(llm.name)">Test</button>
+                    @click="testLLM(llm.name)">Проверить</button>
           </div>
         </template>
 
         <details style="margin-top:1rem">
-          <summary style="cursor:pointer; color:var(--accent)">+ Add LLM</summary>
+          <summary style="cursor:pointer; color:var(--accent)">+ Добавить LLM</summary>
           <div style="margin-top:0.85rem; padding-top:0.5rem; border-top:1px solid var(--border)">
-            <label>Provider</label>
+            <label>Провайдер</label>
             <select x-model="setup.llm.preset_id" @change="setup.llm.form = {}">
               <template x-for="p in (presets?.llm || [])" :key="p.id">
                 <option :value="p.id" x-text="p.name"></option>
@@ -487,8 +690,8 @@
                   <div>
                     <label x-text="field.label + (field.required ? ' *' : '')"></label>
                     <input :type="field.kind === 'password' ? 'password' : (field.kind === 'number' ? 'number' : 'text')"
-                           :placeholder="field.placeholder || ''"
-                           :value="setup.llm.form[field.name] ?? field.default ?? ''"
+                           :placeholder="field.placeholder || (field.default != null ? String(field.default) : '')"
+                           :value="setup.llm.form[field.name] ?? ''"
                            @input="setup.llm.form[field.name] = $event.target.value">
                     <div class="help" x-show="field.help" x-text="field.help"></div>
                   </div>
@@ -507,7 +710,7 @@
               </div>
             </template>
             <div class="actions" style="margin-top:1rem">
-              <button class="btn" :disabled="setup.llm.busy" @click="addItem('llm')">Add</button>
+              <button class="btn" :disabled="setup.llm.busy" @click="addItem('llm')">Добавить</button>
               <span x-show="setup.llm.busy" class="busy-spinner">⏳</span>
             </div>
             <div x-show="setup.llm.result" :class="'result ' + (setup.llm.resultKind || '')"
@@ -518,36 +721,68 @@
 
       <!-- ─── 3. Roles (assign LLMs from pool) ─── -->
       <div class="card" style="margin-bottom:1rem">
-        <h2>3. Roles</h2>
+        <h2>3. Роли</h2>
         <div class="help" style="margin-bottom:0.85rem">
-          Кто из LLM-пула используется для каких задач индексации. Vision-роль фильтруется по capability.
+          Какая LLM из пула используется для каких задач индексации. Список vision-моделей фильтруется по capability.
         </div>
-        <label>Default text LLM (DocTitle, DocSummary, Context, Chunker, KM)</label>
+        <label>Текстовая LLM (DocTitle, DocSummary, Context, Chunker, карта знаний)</label>
         <select x-model="setup.roles.llm">
-          <option value="">— select —</option>
+          <option value="">— выберите —</option>
           <template x-for="llm in (config?.llms || [])" :key="llm.name">
             <option :value="llm.name" x-text="`${llm.name} (${llm.model})`"></option>
           </template>
         </select>
 
-        <label>Vision LLM (PDF pages, Confluence images)</label>
+        <label>Vision LLM (страницы PDF, изображения Confluence)</label>
         <select x-model="setup.roles.vision">
-          <option value="">— select —</option>
+          <option value="">— выберите —</option>
           <template x-for="llm in visionCapableLLMs()" :key="llm.name">
             <option :value="llm.name" x-text="`${llm.name} (${llm.model})`"></option>
           </template>
         </select>
         <div class="help" x-show="!visionCapableLLMs().length" style="color:var(--warn)">
-          В пуле нет ни одного LLM с capability=vision. Добавь LLM выше с галкой «Vision-capable».
+          В пуле нет ни одной vision-модели. Добавьте LLM выше с галкой «Vision-capable».
         </div>
 
         <div class="actions" style="margin-top:1rem">
           <button class="btn" :disabled="setup.roles.busy || !setup.roles.llm || !setup.roles.vision"
-                  @click="saveRoles()">Save roles</button>
+                  @click="saveRoles()">Сохранить роли</button>
           <span x-show="setup.roles.busy" class="busy-spinner">⏳</span>
         </div>
         <div x-show="setup.roles.result" :class="'result ' + (setup.roles.resultKind || '')"
              x-text="setup.roles.result"></div>
+      </div>
+
+      <!-- ─── 4. Schedule (cron, default OFF) ─── -->
+      <div class="card" style="margin-bottom:1rem">
+        <h2>4. Расписание</h2>
+        <div class="help" style="margin-bottom:0.85rem">
+          Автоматическая индексация по cron. По умолчанию <b>выключена</b> —
+          включается осознанно. Запись в <code>config.local.yml</code>, применяется без перезапуска контейнера.
+        </div>
+
+        <label style="display:flex; align-items:center; gap:0.5rem; margin:0">
+          <input type="checkbox" x-model="setup.schedule.enabled">
+          <span>Включить расписание</span>
+        </label>
+
+        <div x-show="setup.schedule.enabled" style="margin-top:0.85rem">
+          <label>Cron-выражение</label>
+          <input type="text" x-model="setup.schedule.cron"
+                 placeholder="0 */6 * * *">
+          <div class="help">
+            Стандартный crontab: минута час день месяц день_недели.
+            Примеры: <code>0 */6 * * *</code> (каждые 6 часов),
+            <code>0 3 * * *</code> (ежедневно в 03:00).
+          </div>
+        </div>
+
+        <div class="actions" style="margin-top:1rem">
+          <button class="btn" :disabled="setup.schedule.busy" @click="saveSchedule()">Сохранить расписание</button>
+          <span x-show="setup.schedule.busy" class="busy-spinner">⏳</span>
+        </div>
+        <div x-show="setup.schedule.result" :class="'result ' + (setup.schedule.resultKind || '')"
+             x-text="setup.schedule.result"></div>
       </div>
     </section>
 
@@ -556,18 +791,18 @@
     <section class="view" :class="{active: tab==='settings'}">
 
       <div class="card" style="margin-bottom:1rem">
-        <h2>Effective config (read-only)</h2>
+        <h2>Эффективная конфигурация (только чтение)</h2>
         <pre x-text="dumpYaml(config)"></pre>
-        <div class="help">Это результат merge: <code>config.yml</code> + <code>config.local.yml</code>. Секреты замаскированы.</div>
+        <div class="help">Результат merge: <code>config.yml</code> + <code>config.local.yml</code>. Секреты замаскированы.</div>
       </div>
 
       <div class="card">
-        <h2>Local overlay (config.local.yml)</h2>
-        <textarea x-model="settings.localYaml" placeholder="# YAML overlay для config.yml; пишется через API"></textarea>
+        <h2>Overlay (config.local.yml)</h2>
+        <textarea x-model="settings.localYaml" placeholder="# YAML overlay для config.yml; запись через API"></textarea>
         <div class="help">Полный overlay будет применён через PUT /api/config. Поля со значением <code>***</code> игнорируются — реальные секреты не перезаписываются.</div>
         <div class="actions" style="margin-top:1rem">
-          <button class="btn" :disabled="settings.busy" @click="saveLocalYaml()">Save overlay</button>
-          <button class="btn secondary" :disabled="settings.busy" @click="loadLocalYaml()">Reload</button>
+          <button class="btn" :disabled="settings.busy" @click="saveLocalYaml()">Сохранить overlay</button>
+          <button class="btn secondary" :disabled="settings.busy" @click="loadLocalYaml()">Перечитать</button>
           <span x-show="settings.busy" class="busy-spinner">⏳</span>
         </div>
         <div x-show="settings.result" :class="'result ' + (settings.resultKind || '')"
@@ -588,12 +823,15 @@
         config: null,
         links: null,
         presets: null,
+        checklist: null,    // {config_ok, qdrant, ollama:[], loading?}
+        gate: null,         // {ok, blockers:[]}
 
         setup: {
-          // ADR-0012: Sources, LLMs, Roles — три секции wizard'а
+          // ADR-0012: Sources, LLMs, Roles — три секции wizard'а; + Schedule (cron)
           source: { preset_id: 'local', form: {}, result: '', resultKind: '', busy: false },
-          llm: { preset_id: 'grok', form: {}, result: '', resultKind: '', busy: false },
+          llm: { preset_id: 'openai-compatible', form: {}, result: '', resultKind: '', busy: false },
           roles: { llm: '', vision: '', result: '', resultKind: '', busy: false },
+          schedule: { enabled: false, cron: '0 */6 * * *', result: '', resultKind: '', busy: false },
         },
 
         settings: {
@@ -609,6 +847,7 @@
         // завершения текущего документа.
         stopState: '',          // '' | 'graceful' | 'killing'
         stopMessage: '',
+        runStartError: '',      // ошибка из startIndex — показывается в карточке Indexing, не toast'ом
         stopResultKind: '',
 
         // Knowledge Map viewer (read-only, expandable)
@@ -635,7 +874,69 @@
             this.loadPresets(),
             this.refreshLinks(),
             this.refreshKM(),
+            this.refreshChecklist(),
+            this.refreshGate(),
+            this.refreshSchedule(),
           ]);
+        },
+
+        async refreshGate() {
+          try { this.gate = await this.fetchJson('/api/setup/gate'); }
+          catch (e) { this.gate = { ok: false, blockers: ['gate check failed: ' + e.message] }; }
+        },
+
+        async refreshSchedule() {
+          try {
+            const s = await this.fetchJson('/api/schedule');
+            this.setup.schedule.enabled = s.enabled;
+            if (s.cron) this.setup.schedule.cron = s.cron;
+          } catch (e) {
+            // silent — schedule optional
+          }
+        },
+
+        async saveSchedule() {
+          this.setup.schedule.result = '';
+          this.setup.schedule.busy = true;
+          try {
+            const body = {
+              cron: this.setup.schedule.enabled ? (this.setup.schedule.cron || '') : null,
+            };
+            const r = await this.fetchJson('/api/schedule', {
+              method: 'PUT',
+              headers: {'content-type': 'application/json'},
+              body: JSON.stringify(body),
+            });
+            const what = r.cron ? `включено: ${r.cron}` : 'выключено';
+            const reload = r.reload_error ? ` (не удалось применить без рестарта: ${r.reload_error})` : '';
+            this.setup.schedule.result = `✓ Сохранено — ${what}${reload}`;
+            this.setup.schedule.resultKind = r.reload_error ? 'error' : 'success';
+            await this.refreshGate();
+          } catch (e) {
+            this.setup.schedule.result = '✗ ' + e.message;
+            this.setup.schedule.resultKind = 'error';
+          } finally {
+            this.setup.schedule.busy = false;
+          }
+        },
+
+        async refreshChecklist() {
+          // Не блокируем UI — карточка показывает «Проверяю…» через флаг loading
+          this.checklist = { ...(this.checklist || {}), loading: true };
+          try {
+            const data = await this.fetchJson('/api/setup/checklist');
+            this.checklist = { ...data, loading: false };
+          } catch (e) {
+            this.checklist = { config_ok: false, config_error: e.message,
+                               qdrant: null, ollama: [], loading: false };
+          }
+        },
+
+        copyCmd(cmd) {
+          navigator.clipboard?.writeText(cmd).then(
+            () => this.showToast(`Скопировано: ${cmd}`, 'success'),
+            () => this.showToast('Не удалось скопировать', 'error'),
+          );
         },
 
         startPolling() {
@@ -660,7 +961,7 @@
 
         async refreshStatus() {
           try { this.status = await this.fetchJson('/api/index/status'); }
-          catch (e) { this.showToast('status: ' + e.message, 'error'); }
+          catch (e) { this.showToast('Статус: ' + e.message, 'error'); }
         },
 
         async refreshStats() {
@@ -682,7 +983,7 @@
               if (!this.setup.roles.vision) this.setup.roles.vision = idx.vision || '';
             }
           }
-          catch (e) { this.showToast('config: ' + e.message, 'error'); }
+          catch (e) { this.showToast('Конфигурация: ' + e.message, 'error'); }
         },
 
         async refreshLinks() {
@@ -692,7 +993,7 @@
 
         async loadPresets() {
           try { this.presets = await this.fetchJson('/api/presets'); }
-          catch (e) { this.showToast('presets: ' + e.message, 'error'); }
+          catch (e) { this.showToast('Пресеты: ' + e.message, 'error'); }
         },
 
         async refreshKM() {
@@ -700,7 +1001,7 @@
           try {
             this.km = await this.fetchJson('/api/knowledge-map');
           } catch (e) {
-            this.km = { nodes: [], full_text: '', error: 'Failed to load: ' + e.message };
+            this.km = { nodes: [], full_text: '', error: 'Не удалось загрузить: ' + e.message };
           } finally {
             this.kmRefreshing = false;
           }
@@ -722,15 +1023,27 @@
         },
 
         async startIndex(reset) {
+          this.runStartError = '';
           try {
             await this.fetchJson('/api/index/start', {
               method: 'POST',
               headers: {'content-type': 'application/json'},
               body: JSON.stringify({reset}),
             });
-            this.showToast(reset ? 'Reset & started' : 'Indexing started', 'success');
+            this.showToast(reset ? 'Запущено со сбросом' : 'Индексация запущена', 'success');
             await this.refreshStatus();
-          } catch (e) { this.showToast('start: ' + e.message, 'error'); }
+          } catch (e) {
+            // 412 — setup incomplete; обновим gate чтобы баннер появился
+            if (e.message.includes('412')) {
+              await this.refreshGate();
+              this.runStartError = 'Сначала завершите настройку (см. блок выше).';
+            } else if (e.message.includes('502') || e.message.includes('ConnectError')) {
+              this.runStartError = 'Сервис индексации недоступен. ' +
+                'Проверьте состояние контейнера: docker compose ps morag-indexer.';
+            } else {
+              this.runStartError = 'Не удалось запустить: ' + e.message;
+            }
+          }
         },
 
         async stopIndex(force) {
@@ -739,19 +1052,20 @@
           this.stopState = force ? 'killing' : 'graceful';
           this.stopResultKind = 'info';
           this.stopMessage = force
-            ? '⏳ Force stopping — task будет прерван мгновенно. Текущий документ может остаться недозаписанным; на следующем Start он будет обработан заново благодаря идемпотентности Qdrant.'
-            : '⏳ Stopping (graceful) — ждём пока завершится обработка текущего документа. Может занять несколько минут на больших файлах. Если нужно немедленно — нажми Force Stop.';
+            ? '⏳ Прерывание — задача остановится мгновенно. Текущий документ может остаться недозаписанным; на следующем запуске он будет обработан заново благодаря идемпотентности Qdrant.'
+            : '⏳ Мягкая остановка — ждём завершения обработки текущего документа. На больших файлах может занять несколько минут. Для немедленной остановки нажмите «Прервать».';
           try {
             const r = await this.fetchJson(url, {
               method: 'POST',
               headers: {'content-type': 'application/json'},
               body,
             });
-            this.stopMessage = `✓ Stop result: ${r.result}`;
+            const resultMap = { graceful: 'остановлено мягко', killed: 'прервано', not_running: 'не запущено' };
+            this.stopMessage = `✓ Результат: ${resultMap[r.result] || r.result}`;
             this.stopResultKind = 'success';
             await this.refreshStatus();
           } catch (e) {
-            this.stopMessage = '✗ stop failed: ' + e.message;
+            this.stopMessage = '✗ Ошибка остановки: ' + e.message;
             this.stopResultKind = 'error';
           } finally {
             this.stopState = '';
@@ -769,9 +1083,9 @@
         async rebuildKM() {
           try {
             await this.fetchJson('/api/knowledge-map/rebuild', {method: 'POST'});
-            this.showToast('Knowledge Map rebuild started', 'success');
+            this.showToast('Пересборка карты знаний запущена', 'success');
             await this.refreshStatus();
-          } catch (e) { this.showToast('rebuild: ' + e.message, 'error'); }
+          } catch (e) { this.showToast('Пересборка: ' + e.message, 'error'); }
         },
 
         async addItem(target) {
@@ -788,13 +1102,14 @@
                 form: this.setup[target].form,
               }),
             });
+            const labelMap = { source: 'источник', llm: 'LLM' };
             this._setSetupResult(
               target,
-              `✓ Added (${target} list size: ${r.list_size})`,
+              `✓ Добавлено (${labelMap[target] || target}, всего: ${r.list_size})`,
               'success',
             );
             this.setup[target].form = {};  // reset
-            await this.refreshConfig();
+            await Promise.all([this.refreshConfig(), this.refreshGate()]);
           } catch (e) {
             this._setSetupResult(target, '✗ ' + e.message, 'error');
           } finally {
@@ -803,9 +1118,8 @@
         },
 
         async testLLM(name) {
-          // Pings LLM-инстанс из пула. Использует новый /api/config/test/llm/{name}
-          // если бэкенд его реализовал, иначе fallback на старый /api/config/test
-          this.showToast(`Testing LLM «${name}»...`, '');
+          // Pings LLM-инстанс из пула.
+          this.showToast(`Проверка LLM «${name}»...`, '');
           try {
             const r = await this.fetchJson('/api/config/test', {
               method: 'POST',
@@ -817,7 +1131,7 @@
               r.ok ? 'success' : 'error',
             );
           } catch (e) {
-            this.showToast(`✗ test ${name}: ${e.message}`, 'error');
+            this.showToast(`✗ Проверка ${name}: ${e.message}`, 'error');
           }
         },
 
@@ -833,9 +1147,9 @@
                 vision: this.setup.roles.vision,
               }),
             });
-            this.setup.roles.result = '✓ Roles saved';
+            this.setup.roles.result = '✓ Роли сохранены';
             this.setup.roles.resultKind = 'success';
-            await this.refreshConfig();
+            await Promise.all([this.refreshConfig(), this.refreshGate()]);
           } catch (e) {
             this.setup.roles.result = '✗ ' + e.message;
             this.setup.roles.resultKind = 'error';
@@ -939,11 +1253,22 @@
         lastRunTitle() {
           const s = this.status?.progress?.state;
           return ({
-            completed: 'Last run: completed successfully',
-            cancelled: 'Last run: cancelled',
-            failed: 'Last run: failed',
-            running: 'Last run: still running',
-          })[s] || `Last run: ${s || 'unknown'}`;
+            completed: 'Последний прогон: успешно завершён',
+            cancelled: 'Последний прогон: отменён',
+            failed: 'Последний прогон: завершился с ошибкой',
+            running: 'Последний прогон: ещё идёт',
+          })[s] || `Последний прогон: ${s || 'неизвестно'}`;
+        },
+
+        pillText() {
+          // Перевод состояний для шапки.
+          const stateMap = {
+            running: 'выполняется', completed: 'завершено', cancelled: 'отменено',
+            failed: 'ошибка', idle: 'ожидание', unreachable: 'нет связи',
+          };
+          const s = this.status?.progress?.state || 'idle';
+          const ru = stateMap[s] || s;
+          return this.status?.is_running ? `Индексация — ${ru}` : ru;
         },
 
         runningFor() {
@@ -953,7 +1278,7 @@
           const startedAt = this.status?.run?.started_at || this.status?.progress?.started_at;
           if (!startedAt) return '';
           const sec = Math.max(0, (Date.now() - Date.parse(startedAt)) / 1000);
-          return formatDuration(sec) + ' elapsed';
+          return formatDuration(sec) + ' прошло';
         },
 
         formatLastIndexed(iso) {
