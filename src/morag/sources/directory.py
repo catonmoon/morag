@@ -12,22 +12,22 @@ SUPPORTED_EXTENSIONS = {'*.md', '*.pdf'}
 
 
 class DirectorySource(Source):
-    """Источник структурных документов для поддиректорий.
+    """Структурные документы для поддиректорий локального источника.
 
-    Сканирует директорию и создаёт фиктивный Document для каждой поддиректории,
-    содержащей файлы поддерживаемых форматов (md, pdf). Документы structural=True,
-    не чанкуются — служат для иерархии parent_doc_ids.
+    kind='local' (как часть config.LocalSourceConfig). Document.id префиксится
+    через self.make_id() — `local:<name>:<relative-dir>/`.
     """
 
     @property
     def source_type(self) -> str:
         return 'directory'
 
-    def __init__(self, root: Path | str) -> None:
+    def __init__(self, root: Path | str, name: str = 'default') -> None:
         self._root = Path(root).resolve()
+        self._kind = 'local'
+        self._name = name
 
     async def get_metadata(self) -> list[Document]:
-        """Вернуть стабы для всех поддиректорий с контентом."""
         dirs_with_content: set[Path] = set()
         for pattern in SUPPORTED_EXTENSIONS:
             for path in self._root.rglob(pattern):
@@ -45,26 +45,29 @@ class DirectorySource(Source):
         return stubs
 
     async def load_one(self, doc_id: str) -> Document | None:
-        """Загрузить структурный документ директории."""
-        dir_path = self._root / doc_id.rstrip('/')
+        external = self._strip_prefix(doc_id)
+        dir_path = self._root / external.rstrip('/')
         return self._load_dir(dir_path)
 
+    def _strip_prefix(self, doc_id: str) -> str:
+        prefix = f'{self._kind}:{self._name}:'
+        return doc_id[len(prefix):] if doc_id.startswith(prefix) else doc_id
+
     def _parent_doc_ids(self, path: Path) -> list[str]:
-        """Вычислить parent_doc_ids для директории."""
         parent_dir = path.parent
         if parent_dir == self._root:
             return []
-        return [str(parent_dir.relative_to(self._root)) + '/']
+        return [self.make_id(str(parent_dir.relative_to(self._root)) + '/')]
 
     def _get_dir_metadata(self, dir_path: Path) -> Document | None:
-        """Получить стаб фиктивного документа для директории."""
         try:
             stat = dir_path.stat()
             updated_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-            doc_id = str(dir_path.relative_to(self._root)) + '/'
+            external = str(dir_path.relative_to(self._root)) + '/'
+            doc_id = self.make_id(external)
             return Document(
                 id=doc_id,
-                path=[doc_id],
+                path=[external],
                 text='',
                 updated_at=updated_at,
                 source_type='directory',
@@ -72,19 +75,20 @@ class DirectorySource(Source):
                 size=0,
                 structural=True,
                 parent_doc_ids=self._parent_doc_ids(dir_path),
+                payload={'source_name': self._name, 'source_kind': self._kind},
             )
         except OSError:
             return None
 
     def _load_dir(self, dir_path: Path) -> Document | None:
-        """Загрузить фиктивный Document для директории (текст = имя директории)."""
         try:
             stat = dir_path.stat()
             updated_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-            doc_id = str(dir_path.relative_to(self._root)) + '/'
+            external = str(dir_path.relative_to(self._root)) + '/'
+            doc_id = self.make_id(external)
             return Document(
                 id=doc_id,
-                path=[doc_id],
+                path=[external],
                 text=dir_path.name,
                 title=dir_path.name,
                 updated_at=updated_at,
@@ -92,6 +96,7 @@ class DirectorySource(Source):
                 size=0,
                 structural=True,
                 parent_doc_ids=self._parent_doc_ids(dir_path),
+                payload={'source_name': self._name, 'source_kind': self._kind},
             )
         except OSError:
             return None

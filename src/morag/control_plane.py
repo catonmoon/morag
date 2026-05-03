@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
 
 from morag.indexing.status_reporter import FileStatusReporter
+from morag.setup_gate import SetupIncomplete, is_setup_complete
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,7 @@ class IndexerControlPlane:
     async def start_index(self, reset: bool = False) -> RunInfo:
         async with self._lock:
             self._raise_if_running()
+            self._raise_if_setup_incomplete()
             cancel_event = asyncio.Event()
             reporter = FileStatusReporter(self._status_file_path)
 
@@ -109,6 +111,7 @@ class IndexerControlPlane:
     async def start_rebuild_km(self) -> RunInfo:
         async with self._lock:
             self._raise_if_running()
+            self._raise_if_setup_incomplete()
             cancel_event = asyncio.Event()
             reporter = FileStatusReporter(self._status_file_path)
 
@@ -173,6 +176,16 @@ class IndexerControlPlane:
     def _raise_if_running(self) -> None:
         if self.is_running():
             raise AlreadyRunning(f'Task already running: {self._current_run}')
+
+    def _raise_if_setup_incomplete(self) -> None:
+        ok, blockers = is_setup_complete(self._config_path)
+        if not ok:
+            raise SetupIncomplete(blockers)
+
+    def setup_status(self) -> dict[str, Any]:
+        """For checklist endpoint — gate-check без побочек."""
+        ok, blockers = is_setup_complete(self._config_path)
+        return {'ok': ok, 'blockers': blockers}
 
     def _read_status_file(self) -> dict | None:
         if not self._status_file_path.exists():

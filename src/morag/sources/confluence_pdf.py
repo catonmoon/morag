@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from atlassian import Confluence
 
-from morag.config import ConfluenceConfig
+from morag.config import ConfluenceSourceConfig
 from morag.sources.base import Document, Source
 from morag.sources.pdf_converter import PdfConverter
 from morag.storage.repository import DocRepository
@@ -40,13 +40,16 @@ class ConfluencePdfSource(Source):
 
     def __init__(
         self,
-        config: ConfluenceConfig,
+        config: ConfluenceSourceConfig,
         converter: PdfConverter,
         doc_repo: DocRepository,
     ) -> None:
+        # password / api_token проверяется в Pydantic-валидаторе ConfluenceSourceConfig
         credential = config.api_token or config.password
-        if not credential:
-            raise ValueError('Confluence config requires either api_token or password')
+
+        # PDF-вложения принадлежат тому же ConfluenceSource (тот же config.name)
+        self._kind = 'confluence'
+        self._name = config.name
 
         self._client = Confluence(
             url=config.url,
@@ -70,14 +73,16 @@ class ConfluencePdfSource(Source):
 
     async def get_metadata(self) -> list[Document]:
         """Вернуть стабы PDF-вложений: обход всех проиндексированных страниц Confluence."""
-        # Получаем все page_id из doc_repo (source_type='confluence')
+        # Получаем все page_id из doc_repo (source_type='confluence').
+        # IDs приходят prefixed: 'confluence:<name>:<page_id>'
         page_ids = await self._doc_repo.get_ids_by_source_type('confluence')
         if not page_ids:
             logger.info('No Confluence pages found, skipping PDF attachments')
             return []
 
-        # Исключаем страницы из skip_ancestor_ids и всех их потомков
-        pages_to_skip = await self._collect_descendants(self._skip_ancestor_ids)
+        # Префиксим skip_ancestor_ids для совпадения с prefixed-IDs из repo
+        skip_prefixed = {self.make_id(pid) for pid in self._skip_ancestor_ids}
+        pages_to_skip = await self._collect_descendants(skip_prefixed)
         if pages_to_skip:
             before = len(page_ids)
             page_ids = page_ids - pages_to_skip
@@ -123,8 +128,15 @@ class ConfluencePdfSource(Source):
 
         return result
 
+    def _strip_prefix(self, doc_id: str) -> str:
+        prefix = f'{self._kind}:{self._name}:'
+        return doc_id[len(prefix):] if doc_id.startswith(prefix) else doc_id
+
     async def load_one(self, doc_id: str) -> Document | None:
-        """Скачать PDF-вложение и конвертировать через PdfConverter."""
+        """Скачать PDF-вложение и конвертировать через PdfConverter.
+
+        doc_id приходит prefixed; ищем по нему в кеше (ключи кеша тоже prefixed).
+        """
         meta = self._attachment_meta.get(doc_id)
         if meta is None:
             logger.warning('Attachment metadata not found for %s', doc_id)
@@ -159,7 +171,7 @@ class ConfluencePdfSource(Source):
             )
 
             return Document(
-                id=doc_id,
+                id=doc_id,                # уже prefixed (получили его prefixed на входе)
                 path=att_path,
                 text=markdown,
                 updated_at=updated_at,
@@ -167,8 +179,9 @@ class ConfluencePdfSource(Source):
                 title=filename,
                 size=len(pdf_bytes),
                 url=url,
-                parent_doc_ids=[page_id],
+                parent_doc_ids=[page_id],  # page_id уже prefixed (из get_ids_by_source_type)
                 paged=True,
+                payload={'source_name': self._name, 'source_kind': self._kind},
             )
         except Exception:
             logger.exception('Failed to load PDF attachment %s', doc_id)
@@ -196,14 +209,19 @@ class ConfluencePdfSource(Source):
         )
 
     async def _fetch_page_attachments(self, page_id: str) -> list[Document]:
-        """Получить PDF-вложения страницы через Confluence API."""
+        """Получить PDF-вложения страницы через Confluence API.
+
+        page_id приходит prefixed (из get_ids_by_source_type). Confluence API
+        ничего не знает про префиксы — нужен raw external_id.
+        """
+        external_page_id = self._strip_prefix(page_id)
         attachments = await asyncio.to_thread(
-            self._get_attachments_sync, page_id,
+            self._get_attachments_sync, external_page_id,
         )
 
-        # Загружаем parent_doc один раз для всех вложений страницы
+        # parent lookup в repo использует prefixed id (id в Qdrant tоже prefixed)
         parent_doc = await self._doc_repo.get_by_id(page_id)
-        parent_path = parent_doc.path[0] if parent_doc is not None and parent_doc.path else page_id
+        parent_path = parent_doc.path[0] if parent_doc is not None and parent_doc.path else external_page_id
         updated_at = parent_doc.updated_at if parent_doc is not None else datetime.now(tz=timezone.utc)
 
         stubs: list[Document] = []
@@ -213,12 +231,13 @@ class ConfluencePdfSource(Source):
                 continue
 
             att_id = att['id'].removeprefix('att')
-            doc_id = f'att:{att_id}'
+            # ID composite: префикс конфлюенс-инстанса + att-id (att_id уникален в рамках инстанса)
+            doc_id = self.make_id(f'att:{att_id}')
             filename = att.get('title', f'attachment_{att_id}.pdf')
 
             download_url = att.get('_links', {}).get('download', '')
 
-            # Кешируем метаданные для load_one
+            # Кешируем метаданные для load_one (ключ — prefixed doc_id)
             self._attachment_meta[doc_id] = (page_id, download_url, filename)
 
             stubs.append(Document(
@@ -229,8 +248,9 @@ class ConfluencePdfSource(Source):
                 source_type='attached_pdf',
                 title=filename,
                 size=0,
-                parent_doc_ids=[page_id],
+                parent_doc_ids=[page_id],  # page_id уже prefixed
                 paged=True,
+                payload={'source_name': self._name, 'source_kind': self._kind},
             ))
 
         return stubs

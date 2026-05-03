@@ -14,6 +14,7 @@ from services.console.indexer_client import (
     AlreadyRunning,
     IndexerClient,
     IndexerError,
+    SetupIncomplete,
 )
 
 
@@ -39,8 +40,18 @@ def make_fake_app(state: dict) -> FastAPI:
     async def start(req: _StartReq):
         if state.get('start_409'):
             raise HTTPException(status_code=409, detail='Task already running')
+        if state.get('start_412'):
+            raise HTTPException(status_code=412, detail={'blockers': state['start_412']})
         state['last_start_reset'] = req.reset
         return {'started_at': 'T', 'kind': 'index', 'reset': req.reset}
+
+    @app.get('/control/setup-status')
+    async def setup_status():
+        return state.get('setup_status_payload', {'ok': True, 'blockers': []})
+
+    @app.post('/control/reload-schedule')
+    async def reload_schedule():
+        return state.get('reload_payload', {'schedule': None})
 
     @app.post('/control/stop')
     async def stop(req: _StopReq):
@@ -136,3 +147,32 @@ class TestRebuildKM:
         c = make_client({'rebuild_409': True})
         with pytest.raises(AlreadyRunning):
             await c.start_rebuild_km()
+
+
+class TestSetupGate:
+
+    async def test_412_raises_setup_incomplete_with_blockers(self):
+        blockers = ['add at least one source', 'configure LLM']
+        c = make_client({'start_412': blockers})
+        with pytest.raises(SetupIncomplete) as exc:
+            await c.start_index()
+        assert exc.value.blockers == blockers
+
+    async def test_setup_status(self):
+        c = make_client({'setup_status_payload': {'ok': False, 'blockers': ['x']}})
+        s = await c.setup_status()
+        assert s['ok'] is False
+        assert s['blockers'] == ['x']
+
+
+class TestReloadSchedule:
+
+    async def test_returns_active_schedule(self):
+        c = make_client({'reload_payload': {'schedule': '0 */6 * * *'}})
+        r = await c.reload_schedule()
+        assert r['schedule'] == '0 */6 * * *'
+
+    async def test_disabled_returns_none(self):
+        c = make_client({'reload_payload': {'schedule': None}})
+        r = await c.reload_schedule()
+        assert r['schedule'] is None

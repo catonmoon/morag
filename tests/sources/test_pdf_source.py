@@ -1,15 +1,13 @@
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from morag.sources.base import Document, Source
+from morag.sources.base import Source
 from morag.sources.pdf import PdfSource
 from morag.sources.pdf_converter import (
     DoclingPdfConverter,
     PdfConverter,
-    PictureInfo,
     _parse_elements,
 )
 
@@ -48,8 +46,8 @@ class TestPdfSource:
     async def test_get_metadata_finds_pdfs(self, source):
         stubs = await source.get_metadata()
         ids = {s.id for s in stubs}
-        assert 'report.pdf' in ids
-        assert 'docs/nested.pdf' in ids
+        assert 'local:default:report.pdf' in ids
+        assert 'local:default:docs/nested.pdf' in ids
 
     async def test_stubs_have_empty_text(self, source):
         stubs = await source.get_metadata()
@@ -78,13 +76,13 @@ class TestPdfSource:
 
     async def test_parent_doc_ids_root(self, source):
         stubs = await source.get_metadata()
-        root_stub = next(s for s in stubs if s.id == 'report.pdf')
+        root_stub = next(s for s in stubs if s.id == 'local:default:report.pdf')
         assert root_stub.parent_doc_ids == []
 
     async def test_parent_doc_ids_nested(self, source):
         stubs = await source.get_metadata()
-        nested_stub = next(s for s in stubs if s.id == 'docs/nested.pdf')
-        assert nested_stub.parent_doc_ids == ['docs/']
+        nested_stub = next(s for s in stubs if s.id == 'local:default:docs/nested.pdf')
+        assert nested_stub.parent_doc_ids == ['local:default:docs/']
 
     async def test_stubs_have_url(self, source):
         stubs = await source.get_metadata()
@@ -99,7 +97,7 @@ class TestPdfSource:
         source = PdfSource(tmp_path, converter=mock_converter)
         stubs = await source.get_metadata()
         assert len(stubs) == 1
-        assert stubs[0].id == 'doc.pdf'
+        assert stubs[0].id == 'local:default:doc.pdf'
 
     async def test_empty_directory(self, tmp_path, mock_converter):
         source = PdfSource(tmp_path, converter=mock_converter)
@@ -113,10 +111,10 @@ class TestPdfSourceLoadOne:
         mock_converter.convert.return_value = '# Report\n\nSome content.'
         source = PdfSource(pdf_dir, converter=mock_converter)
 
-        doc = await source.load_one('report.pdf')
+        doc = await source.load_one('local:default:report.pdf')
 
         assert doc is not None
-        assert doc.id == 'report.pdf'
+        assert doc.id == 'local:default:report.pdf'
         assert doc.source_type == 'pdf'
         assert doc.text == '# Report\n\nSome content.'
         assert doc.size > 0
@@ -125,14 +123,14 @@ class TestPdfSourceLoadOne:
 
     async def test_load_one_returns_none_for_nonexistent(self, pdf_dir, mock_converter):
         source = PdfSource(pdf_dir, converter=mock_converter)
-        doc = await source.load_one('nonexistent.pdf')
+        doc = await source.load_one('local:default:nonexistent.pdf')
         assert doc is None
 
     async def test_load_one_returns_none_on_converter_error(self, pdf_dir, mock_converter):
         """При ошибке конвертера возвращает None."""
         mock_converter.convert.return_value = None
         source = PdfSource(pdf_dir, converter=mock_converter)
-        doc = await source.load_one('report.pdf')
+        doc = await source.load_one('local:default:report.pdf')
         assert doc is None
 
     async def test_load_one_preserves_original_metadata(self, pdf_dir, mock_converter):
@@ -142,7 +140,7 @@ class TestPdfSourceLoadOne:
         pdf_path = pdf_dir / 'report.pdf'
         pdf_stat = pdf_path.stat()
 
-        doc = await source.load_one('report.pdf')
+        doc = await source.load_one('local:default:report.pdf')
 
         assert doc is not None
         assert doc.size == pdf_stat.st_size
@@ -153,7 +151,7 @@ class TestPdfSourceLoadOne:
         mock_converter.convert.return_value = '# Doc'
         source = PdfSource(pdf_dir, converter=mock_converter)
 
-        await source.load_one('report.pdf')
+        await source.load_one('local:default:report.pdf')
 
         call_args = mock_converter.convert.call_args
         pdf_bytes = call_args[0][0]

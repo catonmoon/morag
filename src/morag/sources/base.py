@@ -46,22 +46,58 @@ class Chunk:
 
 
 class Source(ABC):
-    """Абстрактный источник документов."""
+    """Абстрактный источник документов.
+
+    Каждый source знает свой `kind` (тип) и `name` (имя инстанса) — оба берутся
+    из config (см. ADR-0012). Используются для генерации prefixed ID документов:
+    `<kind>:<name>:<external-id>`. Это гарантирует уникальность ID даже при
+    нескольких инстансах одного типа (multi-Confluence, multi-Jira).
+
+    Конкретные реализации обязаны установить self._kind и self._name в __init__.
+    """
+
+    _kind: str           # 'local' | 'confluence' | 'jira' (см. config.Source discriminator)
+    _name: str           # имя инстанса из config
+
+    @property
+    def kind(self) -> str:
+        """Тип источника, соответствует discriminator в config (Source.kind)."""
+        return self._kind
+
+    @property
+    def name(self) -> str:
+        """Имя инстанса источника из config (например 'corp', 'vendor')."""
+        return self._name
 
     @property
     @abstractmethod
     def source_type(self) -> str:
-        """Тип источника: 'markdown' | 'confluence' | 'attached_jira' | 'attached_pdf'."""
+        """Категория документа в payload (для UI/retrieval-фильтров).
+
+        Обычно совпадает с kind, но для composite-источников может отличаться:
+        ConfluencePdfSource имеет kind='confluence' но source_type='attached_pdf'.
+        """
         ...
+
+    def make_id(self, external_id: str) -> str:
+        """Построить полный prefixed-ID документа.
+
+        Формат: `<kind>:<name>:<external_id>`. Гарантирует уникальность между
+        инстансами одного типа. См. ADR-0012, раздел Document IDs.
+        """
+        return f'{self._kind}:{self._name}:{external_id}'
 
     @abstractmethod
     async def get_metadata(self) -> list[Document]:
-        """Вернуть стабы документов: только id, updated_at, source_type, size. text=''."""
+        """Вернуть стабы документов: только id, updated_at, source_type, size. text=''.
+
+        Document.id ДОЛЖЕН быть prefixed через self.make_id().
+        """
         ...
 
     @abstractmethod
     async def load_one(self, doc_id: str) -> Document | None:
-        """Загрузить один документ целиком по id."""
+        """Загрузить один документ по prefixed-ID."""
         ...
 
     async def load(self) -> list[Document]:

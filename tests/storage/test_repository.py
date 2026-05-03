@@ -1,6 +1,5 @@
 from datetime import datetime, timezone
 
-import pytest
 
 from morag.sources.base import Chunk, Document
 

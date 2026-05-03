@@ -37,9 +37,34 @@ async def _fake_index(
         status_reporter.finish('completed')
 
 
-def make_cp(tmp_path: Path, *, duration: float = 5.0) -> IndexerControlPlane:
+_VALID_CONFIG = {
+    'sources': [{'kind': 'local', 'name': 'docs', 'path': '/x'}],
+    'llms': [
+        {'name': 'main', 'base_url': 'http://x/v1', 'model': 'm', 'api_key': 'k',
+         'capabilities': ['text', 'vision']},
+    ],
+    'indexing': {
+        'llm': 'main', 'vision': 'main',
+        'dense_embedder': {'model': 'e', 'base_url': 'http://x/v1', 'dim': 8},
+    },
+}
+
+
+def make_cp(tmp_path: Path, *, duration: float = 5.0,
+            setup_complete: bool = True) -> IndexerControlPlane:
+    """Создаёт control-plane с временным config'ом.
+
+    `setup_complete=True` → primary + local (gate проходит)
+    `setup_complete=False` → только primary (gate fail: local missing)
+    """
+    import yaml as _yaml
+    cfg = tmp_path / 'config.yml'
+    cfg.write_text(_yaml.safe_dump(_VALID_CONFIG))
+    if setup_complete:
+        # Реальный контент — пустой/только-комментарии файл считается «не настроен»
+        (tmp_path / 'config.local.yml').write_text('qdrant:\n  host: customhost\n')
     return IndexerControlPlane(
-        config_path='/dev/null',
+        config_path=str(cfg),
         status_file_path=tmp_path / 'state.json',
         run_index=lambda **kw: _fake_index(duration=duration, **kw),
         run_rebuild_km=lambda **kw: _fake_index(duration=duration, **kw),
@@ -158,3 +183,34 @@ class TestStatus:
             pytest.fail(f'progress never showed running, last={s}')
         finally:
             await cp.kill()
+
+
+class TestSetupGate:
+    """start_index/rebuild_km блокируются если setup-gate не пройден."""
+
+    async def test_start_index_raises_setup_incomplete(self, tmp_path):
+        from morag.setup_gate import SetupIncomplete
+        cp = make_cp(tmp_path, setup_complete=False)
+        with pytest.raises(SetupIncomplete) as exc:
+            await cp.start_index()
+        assert exc.value.blockers
+        assert 'Setup' in exc.value.blockers[0]
+        assert cp.is_running() is False
+
+    async def test_start_rebuild_km_raises_setup_incomplete(self, tmp_path):
+        from morag.setup_gate import SetupIncomplete
+        cp = make_cp(tmp_path, setup_complete=False)
+        with pytest.raises(SetupIncomplete):
+            await cp.start_rebuild_km()
+
+    async def test_setup_status_reports_state(self, tmp_path):
+        a = tmp_path / 'a'
+        b = tmp_path / 'b'
+        a.mkdir()
+        b.mkdir()
+        cp_blocked = make_cp(a, setup_complete=False)
+        cp_ok = make_cp(b, setup_complete=True)
+        assert cp_blocked.setup_status()['ok'] is False
+        assert cp_blocked.setup_status()['blockers']
+        assert cp_ok.setup_status()['ok'] is True
+        assert cp_ok.setup_status()['blockers'] == []

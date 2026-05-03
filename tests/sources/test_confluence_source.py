@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from morag.config import ConfluenceConfig
+from morag.config import ConfluenceSourceConfig
 from morag.sources.base import Document, Source
 from morag.sources.confluence import (
     ConfluenceSource,
@@ -19,10 +19,13 @@ from morag.sources.confluence import (
 # Фикстуры
 # ---------------------------------------------------------------------------
 
-def _make_config(**kwargs) -> ConfluenceConfig:
-    defaults = dict(url='https://confluence.example.com', username='user', password='pass')
+def _make_config(**kwargs) -> ConfluenceSourceConfig:
+    defaults = dict(
+        kind='confluence', name='test',
+        url='https://confluence.example.com', username='user', password='pass',
+    )
     defaults.update(kwargs)
-    return ConfluenceConfig(**defaults)
+    return ConfluenceSourceConfig(**defaults)
 
 
 def _make_cql_page(page_id: str, title: str, space_key: str,
@@ -180,11 +183,15 @@ class TestConfluenceSourceInit:
             src = ConfluenceSource(_make_config())
             assert isinstance(src, Source)
 
-    def test_requires_credential(self):
-        with pytest.raises(ValueError, match='api_token or password'):
-            ConfluenceSource(ConfluenceConfig(
+    def test_requires_credential_at_pydantic_level(self):
+        # Validation moved to Pydantic ConfluenceSourceConfig._check_secret.
+        # См. test_config.py::test_confluence_requires_secret.
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError, match='password.*api_token'):
+            ConfluenceSourceConfig(
+                kind='confluence', name='test',
                 url='https://example.com', username='user',
-            ))
+            )
 
     def test_cloud_flag_when_api_token(self):
         with patch('morag.sources.confluence.Confluence') as mock_cls:
@@ -263,7 +270,7 @@ class TestConfluenceSourceGetMetadata:
         pages = [_make_cql_page('42', 'My Page', 'ML')]
         src = _src_with_pages(pages)
         stubs = await src.get_metadata()
-        assert stubs[0].id == '42'
+        assert stubs[0].id == 'confluence:test:42'
 
     async def test_stub_path_no_ancestors(self):
         pages = [_make_cql_page('1', 'My Page', 'ML', space_name='Machine Learning')]
@@ -332,21 +339,21 @@ class TestConfluenceSourceLoadOne:
     async def test_returns_document(self):
         pages = [_make_cql_page('42', 'My Page', 'ML')]
         src = _src_with_pages(pages, [_make_full_page('42', 'My Page', 'ML', '<p>body</p>')])
-        doc = await src.load_one('42')
+        doc = await src.load_one('confluence:test:42')
         assert doc is not None
         assert isinstance(doc, Document)
-        assert doc.id == '42'
+        assert doc.id == 'confluence:test:42'
 
     async def test_document_text_starts_with_title(self):
         pages = [_make_cql_page('1', 'My Title', 'ML')]
         src = _src_with_pages(pages, [_make_full_page('1', 'My Title', 'ML', '<p>body</p>')])
-        doc = await src.load_one('1')
+        doc = await src.load_one('confluence:test:1')
         assert doc.text.startswith('# My Title')
 
     async def test_document_text_contains_body(self):
         pages = [_make_cql_page('1', 'T', 'ML')]
         src = _src_with_pages(pages, [_make_full_page('1', 'T', 'ML', '<p>important content</p>')])
-        doc = await src.load_one('1')
+        doc = await src.load_one('confluence:test:1')
         assert 'important content' in doc.text
 
     async def test_returns_none_on_error(self):
@@ -356,7 +363,7 @@ class TestConfluenceSourceLoadOne:
             mock_client.get_page_by_id.side_effect = Exception('API error')
             src = ConfluenceSource(_make_config())
             src._client = mock_client
-            doc = await src.load_one('999')
+            doc = await src.load_one('confluence:test:999')
         assert doc is None
 
 

@@ -25,12 +25,14 @@ class PdfSource(Source):
         self,
         root: Path | str,
         converter: PdfConverter,
+        name: str = 'default',
     ) -> None:
         self._root = Path(root).resolve()
         self._converter = converter
+        self._kind = 'local'
+        self._name = name
 
     async def get_metadata(self) -> list[Document]:
-        """Вернуть стабы PDF-файлов (без конвертации)."""
         all_pdf_files = sorted(self._root.rglob('*.pdf'))
 
         stubs: list[Document] = []
@@ -43,8 +45,8 @@ class PdfSource(Source):
         return stubs
 
     async def load_one(self, doc_id: str) -> Document | None:
-        """Загрузить PDF: конвертировать через PdfConverter."""
-        path = self._root / doc_id
+        external = self._strip_prefix(doc_id)
+        path = self._root / external
         try:
             stat = path.stat()
         except OSError:
@@ -59,8 +61,8 @@ class PdfSource(Source):
             return None
 
         return Document(
-            id=doc_id,
-            path=[doc_id],
+            id=self.make_id(external),
+            path=[external],
             text=markdown,
             updated_at=updated_at,
             source_type='pdf',
@@ -69,24 +71,27 @@ class PdfSource(Source):
             url=path.as_uri(),
             parent_doc_ids=self._parent_doc_ids(path),
             paged=True,
+            payload={'source_name': self._name, 'source_kind': self._kind},
         )
 
+    def _strip_prefix(self, doc_id: str) -> str:
+        prefix = f'{self._kind}:{self._name}:'
+        return doc_id[len(prefix):] if doc_id.startswith(prefix) else doc_id
+
     def _parent_doc_ids(self, path: Path) -> list[str]:
-        """Вычислить parent_doc_ids для файла."""
         parent_dir = path.parent
         if parent_dir == self._root:
             return []
-        return [str(parent_dir.relative_to(self._root)) + '/']
+        return [self.make_id(str(parent_dir.relative_to(self._root)) + '/')]
 
     def _get_file_metadata(self, path: Path) -> Document | None:
-        """Получить метаданные PDF-файла без конвертации."""
         try:
             stat = path.stat()
             updated_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-            doc_id = str(path.relative_to(self._root))
+            external = str(path.relative_to(self._root))
             return Document(
-                id=doc_id,
-                path=[doc_id],
+                id=self.make_id(external),
+                path=[external],
                 text='',
                 updated_at=updated_at,
                 source_type='pdf',
@@ -95,6 +100,7 @@ class PdfSource(Source):
                 url=path.as_uri(),
                 parent_doc_ids=self._parent_doc_ids(path),
                 paged=True,
+                payload={'source_name': self._name, 'source_kind': self._kind},
             )
         except OSError:
             return None

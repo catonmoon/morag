@@ -10,18 +10,23 @@ class MarkdownSource(Source):
     """Источник локальных Markdown-файлов.
 
     Рекурсивно сканирует директорию и возвращает Document для каждого *.md файла.
-    parent_doc_ids ссылается на структурные документы директорий (создаются DirectorySource).
+    parent_doc_ids ссылается на структурные документы директорий (DirectorySource).
+
+    kind='local' (соответствует discriminator config.LocalSourceConfig). name —
+    из config (передаётся через LocalDocumentSource). Document.id форматируется
+    через self.make_id() — `local:<name>:<relative-path>`.
     """
 
     @property
     def source_type(self) -> str:
         return 'markdown'
 
-    def __init__(self, root: Path | str) -> None:
+    def __init__(self, root: Path | str, name: str = 'default') -> None:
         self._root = Path(root).resolve()
+        self._kind = 'local'
+        self._name = name
 
     async def get_metadata(self) -> list[Document]:
-        """Вернуть стабы MD-файлов (без чтения содержимого)."""
         all_md_files = sorted(self._root.rglob('*.md'))
 
         stubs: list[Document] = []
@@ -34,25 +39,30 @@ class MarkdownSource(Source):
         return stubs
 
     async def load_one(self, doc_id: str) -> Document | None:
-        """Загрузить один MD-файл по doc_id."""
-        return self._load_file(self._root / doc_id)
+        external = self._strip_prefix(doc_id)
+        return self._load_file(self._root / external)
+
+    def _strip_prefix(self, doc_id: str) -> str:
+        """Извлечь external-id (relative path) из prefixed doc_id."""
+        prefix = f'{self._kind}:{self._name}:'
+        return doc_id[len(prefix):] if doc_id.startswith(prefix) else doc_id
 
     def _parent_doc_ids(self, path: Path) -> list[str]:
-        """Вычислить parent_doc_ids для файла."""
+        """Parent — структурный документ директории. ID тоже prefixed."""
         parent_dir = path.parent
         if parent_dir == self._root:
             return []
-        return [str(parent_dir.relative_to(self._root)) + '/']
+        return [self.make_id(str(parent_dir.relative_to(self._root)) + '/')]
 
     def _get_file_metadata(self, path: Path) -> Document | None:
-        """Получить метаданные файла без чтения содержимого."""
         try:
             stat = path.stat()
             updated_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-            doc_id = str(path.relative_to(self._root))
+            external = str(path.relative_to(self._root))
+            doc_id = self.make_id(external)
             return Document(
                 id=doc_id,
-                path=[doc_id],
+                path=[external],  # path остаётся "human-readable", без prefix
                 text='',
                 updated_at=updated_at,
                 source_type='markdown',
@@ -60,20 +70,21 @@ class MarkdownSource(Source):
                 size=stat.st_size,
                 url=path.as_uri(),
                 parent_doc_ids=self._parent_doc_ids(path),
+                payload={'source_name': self._name, 'source_kind': self._kind},
             )
         except OSError:
             return None
 
     def _load_file(self, path: Path) -> Document | None:
-        """Загрузить один MD-файл и создать Document."""
         try:
             stat = path.stat()
             text = path.read_text(encoding='utf-8')
             updated_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
-            doc_id = str(path.relative_to(self._root))
+            external = str(path.relative_to(self._root))
+            doc_id = self.make_id(external)
             return Document(
                 id=doc_id,
-                path=[doc_id],
+                path=[external],
                 text=text,
                 updated_at=updated_at,
                 source_type='markdown',
@@ -81,6 +92,7 @@ class MarkdownSource(Source):
                 size=stat.st_size,
                 url=path.as_uri(),
                 parent_doc_ids=self._parent_doc_ids(path),
+                payload={'source_name': self._name, 'source_kind': self._kind},
             )
         except OSError:
             return None

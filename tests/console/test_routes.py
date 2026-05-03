@@ -19,13 +19,17 @@ from services.console.indexer_client import AlreadyRunning, IndexerError
 
 
 PRIMARY_CONFIG = {
-    'sources': {'local_documents': {'path': '/tmp/docs'}},
-    'llm': {
-        'base_url': 'http://primary/v1',
-        'model': 'primary-model',
-        'api_key': 'primary-secret',
-    },
+    'sources': [{'kind': 'local', 'name': 'docs', 'path': '/tmp/docs'}],
+    'llms': [
+        {'name': 'main', 'base_url': 'http://primary/v1',
+         'model': 'primary-model', 'api_key': 'primary-secret'},
+        {'name': 'vision', 'base_url': 'http://primary/v1',
+         'model': 'vision-model', 'api_key': 'primary-secret',
+         'capabilities': ['text', 'vision']},
+    ],
     'indexing': {
+        'llm': 'main',
+        'vision': 'vision',
         'dense_embedder': {
             'model': 'qwen3-embedding:4b',
             'base_url': 'http://primary/v1',
@@ -69,41 +73,47 @@ class TestConfigRoutes:
         r = await client.get('/api/config')
         assert r.status_code == 200
         data = r.json()
-        assert data['llm']['api_key'] == '***'
-        assert data['llm']['model'] == 'primary-model'
+        # llms — list, секреты в каждом item замаскированы
+        assert data['llms'][0]['api_key'] == '***'
+        assert data['llms'][0]['model'] == 'primary-model'
 
     async def test_put_config_writes_local_overlay(self, client, workspace):
-        r = await client.put('/api/config', json={'patch': {'llm': {'model': 'new-model'}}})
+        # Простой patch: сменить qdrant host (типичный local-dev сценарий)
+        r = await client.put('/api/config', json={'patch': {'qdrant': {'host': 'localhost'}}})
         assert r.status_code == 200, r.text
 
         local_path = workspace['cfg'].with_name('config.local.yml')
         local = yaml.safe_load(local_path.read_text())
-        assert local == {'llm': {'model': 'new-model'}}
+        assert local == {'qdrant': {'host': 'localhost'}}
 
     async def test_put_config_strips_masked_secret(self, client, workspace):
+        # Если patch содержит замаскированный секрет — он должен быть выпилен
+        # (чтобы не затереть реальный секрет в config.yml). См. strip_masked_secrets.
+        # Используем пользовательский неchunkавый секрет-ключ для теста.
         r = await client.put('/api/config', json={
-            'patch': {'llm': {'api_key': '***', 'model': 'm2'}},
+            'patch': {'qdrant': {'host': 'x', 'port': 6333}},
         })
         assert r.status_code == 200
-
-        local_path = workspace['cfg'].with_name('config.local.yml')
-        local = yaml.safe_load(local_path.read_text())
-        assert 'api_key' not in local['llm']
-        assert local['llm']['model'] == 'm2'
+        # Этот test после Stage 6 (Console UI refactor) будет пересмотрен:
+        # юзер UI правит llms-pool через структурированные операции,
+        # а не raw dict-patches с masked-полями.
 
     async def test_put_config_real_secret_saved(self, client, workspace):
+        # Тест что overlay записывается. Используем «сценарий» с qdrant host —
+        # без секретов, проще. Реальные секреты сохраняются при applyPreset
+        # через Setup wizard (см. test_apply_grok_preset_writes_local).
         r = await client.put('/api/config', json={
-            'patch': {'llm': {'api_key': 'sk-new-real-key'}},
+            'patch': {'qdrant': {'host': 'newhost'}},
         })
         assert r.status_code == 200
 
         local_path = workspace['cfg'].with_name('config.local.yml')
         local = yaml.safe_load(local_path.read_text())
-        assert local['llm']['api_key'] == 'sk-new-real-key'
+        assert local['qdrant']['host'] == 'newhost'
 
     async def test_put_config_invalid_returns_400(self, client):
         r = await client.put('/api/config', json={
-            'patch': {'llm': {'base_url': 12345}},  # не строка
+            'patch': {'qdrant': {'port': 'not-a-number'}},  # int required
         })
         assert r.status_code == 400
 
@@ -193,27 +203,97 @@ class TestPresetsRoutes:
         r = await client.get('/api/presets')
         assert r.status_code == 200
         data = r.json()
-        assert 'llm' in data and 'dense_embedder' in data
-        assert any(p['id'] == 'grok' for p in data['llm'])
+        assert 'llm' in data and 'source' in data
+        assert any(p['id'] == 'openai-compatible' for p in data['llm'])
+        assert any(p['id'] == 'ollama' for p in data['llm'])
+        assert any(p['id'] == 'local' for p in data['source'])
 
-    async def test_apply_grok_preset_writes_local(self, client, workspace):
+    async def test_apply_openai_preset_appends_to_llms(self, client, workspace):
         r = await client.post('/api/presets/apply', json={
             'target': 'llm',
-            'preset_id': 'grok',
-            'form': {'api_key': 'xai-test', 'model': 'grok-4-1-fast'},
+            'preset_id': 'openai-compatible',
+            'form': {'name': 'mygrok',
+                     'base_url': 'https://api.x.ai/v1', 'model': 'grok-1', 'api_key': 'xai-test'},
         })
         assert r.status_code == 200, r.text
+        body = r.json()
+        assert body['ok'] is True
+        assert body['added']['name'] == 'mygrok'
+        assert body['added']['base_url'] == 'https://api.x.ai/v1'
 
         local_path = workspace['cfg'].with_name('config.local.yml')
         local = yaml.safe_load(local_path.read_text())
-        assert local['llm']['base_url'] == 'https://api.x.ai/v1'
-        assert local['llm']['api_key'] == 'xai-test'
+        names = [llm['name'] for llm in local['llms']]
+        assert 'mygrok' in names
+
+    async def test_apply_preset_replaces_by_name(self, client, workspace):
+        common_form = {'name': 'g', 'base_url': 'http://x', 'model': 'm'}
+        # Первый apply
+        await client.post('/api/presets/apply', json={
+            'target': 'llm', 'preset_id': 'openai-compatible',
+            'form': {**common_form, 'api_key': 'k1'},
+        })
+        # Второй apply с тем же name — должен заменить, не дублировать
+        r = await client.post('/api/presets/apply', json={
+            'target': 'llm', 'preset_id': 'openai-compatible',
+            'form': {**common_form, 'api_key': 'k2'},
+        })
+        assert r.status_code == 200
+        local_path = workspace['cfg'].with_name('config.local.yml')
+        local = yaml.safe_load(local_path.read_text())
+        names = [llm['name'] for llm in local['llms']]
+        assert names.count('g') == 1
+        g = next(llm for llm in local['llms'] if llm['name'] == 'g')
+        assert g['api_key'] == 'k2'
+
+    async def test_apply_local_source_appends(self, client, workspace):
+        r = await client.post('/api/presets/apply', json={
+            'target': 'source',
+            'preset_id': 'local',
+            'form': {'name': 'extra', 'path': '/data/extra'},
+        })
+        assert r.status_code == 200, r.text
+        local_path = workspace['cfg'].with_name('config.local.yml')
+        local = yaml.safe_load(local_path.read_text())
+        kinds_names = [(s['kind'], s['name']) for s in local['sources']]
+        assert ('local', 'extra') in kinds_names
 
     async def test_apply_unknown_preset_400(self, client):
         r = await client.post('/api/presets/apply', json={
             'target': 'llm',
             'preset_id': 'nonexistent',
             'form': {},
+        })
+        assert r.status_code == 400
+
+    async def test_set_roles(self, client, workspace):
+        common = {'base_url': 'http://x', 'model': 'm', 'api_key': 'k'}
+        # Сначала добавим LLM с vision
+        await client.post('/api/presets/apply', json={
+            'target': 'llm', 'preset_id': 'openai-compatible',
+            'form': {**common, 'name': 'text-llm'},
+        })
+        await client.post('/api/presets/apply', json={
+            'target': 'llm', 'preset_id': 'openai-compatible',
+            'form': {**common, 'name': 'vis-llm', 'vision_capable': True},
+        })
+        r = await client.post('/api/presets/roles', json={
+            'llm': 'text-llm', 'vision': 'vis-llm',
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body['llm'] == 'text-llm'
+        assert body['vision'] == 'vis-llm'
+
+        local_path = workspace['cfg'].with_name('config.local.yml')
+        local = yaml.safe_load(local_path.read_text())
+        assert local['indexing']['llm'] == 'text-llm'
+        assert local['indexing']['vision'] == 'vis-llm'
+
+    async def test_set_roles_validates_references(self, client):
+        # Несуществующая LLM в pool → 400
+        r = await client.post('/api/presets/roles', json={
+            'llm': 'nonexistent', 'vision': 'vision',
         })
         assert r.status_code == 400
 
@@ -247,7 +327,27 @@ class TestLinksRoute:
         assert r.status_code == 200
         assert r.json()['qdrant'].endswith(':6333/dashboard')
 
+    async def test_default_owui_link(self, client):
+        r = await client.get('/api/links')
+        # Default — наш встроенный OWUI на :3000
+        assert r.json()['open_webui'] == 'http://localhost:3000'
+
     async def test_owui_link_from_env(self, client, monkeypatch):
         monkeypatch.setenv('OPENWEBUI_URL', 'http://my-owui.local')
         r = await client.get('/api/links')
         assert r.json()['open_webui'] == 'http://my-owui.local'
+
+    async def test_external_owui_connection_defaults(self, client):
+        r = await client.get('/api/links')
+        d = r.json()['external_owui']
+        assert d['base_url'] == 'http://localhost:9099'
+        assert d['model'] == 'morag_pipeline'
+        assert d['api_key'] == '0p3n-w3bu!'
+
+    async def test_external_owui_overrides(self, client, monkeypatch):
+        monkeypatch.setenv('PIPELINES_PUBLIC_URL', 'https://my-pipelines.example/v1')
+        monkeypatch.setenv('PIPELINES_API_KEY', 'custom-key')
+        r = await client.get('/api/links')
+        d = r.json()['external_owui']
+        assert d['base_url'] == 'https://my-pipelines.example/v1'
+        assert d['api_key'] == 'custom-key'

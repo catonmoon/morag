@@ -1,11 +1,15 @@
-"""Опинионированные пресеты провайдеров для wizard'а.
+"""Опинионированные пресеты для wizard'а Console UI.
 
-Цель — сократить onboarding до 2-3 полей вместо целого config.example.yml.
-Каждый пресет описывает: target (куда подкладывать в YAML), какие поля
-спросить у юзера, и как собрать итоговый overlay-snippet.
+Цель — сократить onboarding до 2-3 полей вместо ручной правки config.yml.
 
-Не покрывает экзотику — только массовые сценарии. Для нестандартных кейсов
-есть пресет 'custom', где все поля редактируются вручную.
+После Stage 6 refactor (ADR-0012):
+- LLM-presets выдают snippet формы `{name, base_url, model, api_key, capabilities, ...}`
+  — добавляются в `llms[]` через add_to_pool().
+- Source-presets выдают `{kind, name, ...source-fields...}` — добавляются в `sources[]`.
+- Embedder больше не отдельный preset (один dense + sparse, не пул).
+
+Apply-логика (services/console/routes/presets.py): list-append/replace by name,
+не deep-merge top-level dict (т.к. lists в overlay перезаписываются целиком).
 """
 from __future__ import annotations
 
@@ -13,24 +17,24 @@ from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
 
-PresetTarget = Literal['llm', 'llm_vision', 'dense_embedder', 'sparse_embedder']
+PresetTarget = Literal['llm', 'source']
 
 
 @dataclass(frozen=True)
 class PresetField:
     """Описание одного поля формы пресета."""
-    name: str                            # ключ в form_data
-    label: str                           # подпись в UI
-    kind: Literal['text', 'password', 'number'] = 'text'
+    name: str
+    label: str
+    kind: Literal['text', 'password', 'number', 'checkbox'] = 'text'
     required: bool = True
-    default: str | int | None = None
+    default: str | int | bool | None = None
     placeholder: str | None = None
     help: str | None = None
 
 
 @dataclass(frozen=True)
 class Preset:
-    """Шаблон для конкретного провайдера + типа вектора/LLM."""
+    """Шаблон для добавления одного инстанса (LLM или source) в pool/list."""
     id: str
     name: str
     target: PresetTarget
@@ -40,192 +44,205 @@ class Preset:
 
 
 # ---------------------------------------------------------------------------
-# LLM presets
+# LLM presets — выдают одну entry для llms[] pool
 # ---------------------------------------------------------------------------
 
-def _build_grok(form: dict[str, Any]) -> dict[str, Any]:
-    return {
-        'base_url': 'https://api.x.ai/v1',
-        'model': form.get('model', 'grok-4-1-fast-non-reasoning'),
-        'api_key': form['api_key'],
-        'context_window': 256000,
-        'max_concurrent': 8,
-    }
+def _capabilities(form: dict[str, Any]) -> list[str]:
+    """Из формы → list capabilities."""
+    if form.get('vision_capable') in (True, 'true', 'on', '1'):
+        return ['text', 'vision']
+    return ['text']
 
 
-def _build_openrouter(form: dict[str, Any]) -> dict[str, Any]:
-    return {
-        'base_url': 'https://openrouter.ai/api/v1',
+def _build_openai_compatible(form: dict[str, Any]) -> dict[str, Any]:
+    """Любой OpenAI-совместимый endpoint: Grok, OpenRouter, vLLM, OpenAI."""
+    out = {
+        'name': form.get('name') or 'main',
+        'base_url': form['base_url'],
         'model': form['model'],
         'api_key': form['api_key'],
-        'context_window': int(form.get('context_window', 32768)),
-        'max_concurrent': int(form.get('max_concurrent', 4)),
+        'capabilities': _capabilities(form),
+        'context_window': int(form.get('context_window') or 32768),
+        'max_concurrent': int(form.get('max_concurrent') or 4),
     }
+    return out
 
 
 def _build_ollama_llm(form: dict[str, Any]) -> dict[str, Any]:
     return {
-        'base_url': form.get('base_url', 'http://host.docker.internal:11434/v1'),
+        'name': form.get('name') or 'ollama',
+        'base_url': form.get('base_url') or 'http://host.docker.internal:11434/v1',
         'model': form['model'],
-        'api_key': 'ollama',  # OpenAI-compat требует непустое значение, Ollama его игнорирует
-        'context_window': int(form.get('context_window', 32768)),
-        'max_concurrent': int(form.get('max_concurrent', 1)),
-        'enable_thinking': False,
+        'api_key': 'ollama',                # Ollama игнорирует, но SDK требует
+        'capabilities': _capabilities(form),
+        'context_window': int(form.get('context_window') or 32768),
+        'max_concurrent': int(form.get('max_concurrent') or 1),
+        'enable_thinking': False,           # Ollama qwen-модели думают по умолчанию — выключаем
     }
 
 
-def _build_vllm_custom_llm(form: dict[str, Any]) -> dict[str, Any]:
-    out = {
-        'base_url': form['base_url'],
-        'model': form['model'],
-        'api_key': form['api_key'],
-        'context_window': int(form.get('context_window', 32768)),
-    }
-    if form.get('max_concurrent'):
-        out['max_concurrent'] = int(form['max_concurrent'])
-    return out
+# Общие поля для обоих LLM-пресетов (name + vision-capable)
+def _llm_common_fields(default_name: str = '') -> list[PresetField]:
+    return [
+        PresetField('name', 'Имя (уникальное в пуле)',
+                    default=default_name,
+                    help='Используется для ссылок в indexing.llm/.vision. '
+                         'Lowercase, без пробелов (a-z 0-9 _ -).'),
+        PresetField('vision_capable', 'Vision-capable (multimodal)',
+                    kind='checkbox', required=False, default=False,
+                    help='Отметьте, если модель умеет обрабатывать изображения '
+                         '(qwen3.5, claude, gpt-4o, и т.п.). Только такие LLM '
+                         'можно назначать на роль indexing.vision.'),
+    ]
 
 
 LLM_PRESETS: list[Preset] = [
     Preset(
-        id='grok',
-        name='Grok (xAI)',
-        target='llm',
-        description='xAI Grok через api.x.ai. Большой контекст, дёшево, быстро.',
-        fields=[
-            PresetField('model', 'Модель', default='grok-4-1-fast-non-reasoning',
-                        help='grok-4-1-fast-non-reasoning — рекомендуется. Reasoning-варианты — медленнее и дороже.'),
+        id='openai-compatible', name='OpenAI-compatible', target='llm',
+        description='Любой OpenAI-совместимый endpoint: Grok, OpenRouter, vLLM, '
+                    'OpenAI, Together, и др. В будущем — отдельные пресеты '
+                    'для известных провайдеров с проверенными настройками.',
+        fields=_llm_common_fields(default_name='main') + [
+            PresetField('base_url', 'Base URL',
+                        placeholder='https://api.x.ai/v1'),
+            PresetField('model', 'Модель',
+                        placeholder='grok-4-1-fast-non-reasoning'),
             PresetField('api_key', 'API key', kind='password',
-                        placeholder='xai-...'),
+                        placeholder='xai-... / sk-or-... / sk-...'),
+            PresetField('context_window', 'Context window (токенов)',
+                        kind='number', default=32768, required=False,
+                        help='Размер окна модели. Для Grok ≈ 256000, '
+                             'для большинства Claude/GPT ≈ 200000.'),
+            PresetField('max_concurrent', 'Max concurrent (потолок параллельных запросов)',
+                        kind='number', default=4, required=False,
+                        help='Защита от перегрузки провайдера. 4-8 для облака, '
+                             '1-2 для слабых vLLM-серверов.'),
         ],
-        build=_build_grok,
+        build=_build_openai_compatible,
     ),
     Preset(
-        id='openrouter',
-        name='OpenRouter',
-        target='llm',
-        description='Единая точка входа в десятки моделей. Удобно для экспериментов.',
-        fields=[
-            PresetField('model', 'Модель', placeholder='anthropic/claude-haiku-4.5'),
-            PresetField('api_key', 'API key', kind='password',
-                        placeholder='sk-or-...'),
-            PresetField('context_window', 'Context window (токены)', kind='number',
-                        default=200000, required=False),
-            PresetField('max_concurrent', 'Max concurrent', kind='number',
-                        default=4, required=False),
-        ],
-        build=_build_openrouter,
-    ),
-    Preset(
-        id='ollama',
-        name='Ollama (локальный)',
-        target='llm',
-        description='Локальный Ollama-сервер. Подходит для приватных деплоев без внешних API.',
-        fields=[
-            PresetField('model', 'Модель', placeholder='qwen3:4b',
-                        help='Имя модели как в `ollama list`. Например qwen3:4b, llama3.1:8b, mistral.'),
+        id='ollama', name='Ollama (локальный)', target='llm',
+        description='Локальный Ollama-сервер. По умолчанию max_concurrent=1 — '
+                    'Ollama сериализует запросы. Thinking-режим выключается '
+                    'автоматически (для qwen3, которые думают по умолчанию).',
+        fields=_llm_common_fields(default_name='ollama') + [
+            PresetField('model', 'Модель', placeholder='qwen3.5:9b',
+                        help='Имя модели как в выводе `ollama list`.'),
             PresetField('base_url', 'Base URL',
                         default='http://host.docker.internal:11434/v1', required=False,
-                        help='host.docker.internal — для доступа из контейнера к Ollama на хост-машине.'),
-            PresetField('context_window', 'Context window (токены)', kind='number',
-                        default=32768, required=False),
-            PresetField('max_concurrent', 'Max concurrent', kind='number',
-                        default=1, required=False,
-                        help='Ollama обычно сериализует запросы — ставь 1, если не настраивал параллелизм.'),
+                        help='Изнутри docker-compose — host.docker.internal. '
+                             'Если консоль локально — http://localhost:11434/v1.'),
+            PresetField('context_window', 'Context window (токенов)',
+                        kind='number', default=32768, required=False),
+            PresetField('max_concurrent', 'Max concurrent (потолок параллельных запросов)',
+                        kind='number', default=1, required=False,
+                        help='Ollama сериализует запросы — обычно 1. '
+                             'Если CPU/GPU не даст просесть — можно повысить.'),
         ],
         build=_build_ollama_llm,
-    ),
-    Preset(
-        id='custom',
-        name='Custom (vLLM / OpenAI-compat)',
-        target='llm',
-        description='Любой OpenAI-совместимый endpoint. Все параметры — вручную.',
-        fields=[
-            PresetField('base_url', 'Base URL', placeholder='https://...'),
-            PresetField('model', 'Модель'),
-            PresetField('api_key', 'API key', kind='password'),
-            PresetField('context_window', 'Context window (токены)', kind='number',
-                        default=32768, required=False),
-            PresetField('max_concurrent', 'Max concurrent', kind='number',
-                        required=False),
-        ],
-        build=_build_vllm_custom_llm,
     ),
 ]
 
 
 # ---------------------------------------------------------------------------
-# Dense embedder presets
+# Source presets — выдают одну entry для sources[] list
 # ---------------------------------------------------------------------------
 
-# Стандартный Qwen3-Embedding instruct-шаблон для query-side.
-# document-side префикс не нужен — Qwen3 без него работает корректно.
-QWEN3_QUERY_TEMPLATE = (
-    'Instruct: Given a web search query, retrieve relevant passages that answer the query\n'
-    'Query: {text}'
-)
-
-
-def _build_ollama_embedder(form: dict[str, Any]) -> dict[str, Any]:
+def _build_local_source(form: dict[str, Any]) -> dict[str, Any]:
     return {
-        'model': form.get('model', 'qwen3-embedding:4b'),
-        'base_url': form.get('base_url', 'http://host.docker.internal:11434/v1'),
-        'dim': int(form.get('dim', 2560)),
-        'tokenizer': 'tiktoken',
-        'document_template': '{text}',
-        'query_template': QWEN3_QUERY_TEMPLATE,
-        'max_concurrent': int(form.get('max_concurrent', 4)),
+        'kind': 'local',
+        'name': form.get('name') or 'docs',
+        'path': form['path'],
     }
 
 
-def _build_custom_embedder(form: dict[str, Any]) -> dict[str, Any]:
+def _build_confluence(form: dict[str, Any]) -> dict[str, Any]:
+    """Универсальный Confluence (Cloud или on-premise).
+
+    Auth: одно из двух — `password` (on-prem) или `api_token` (Cloud).
+    Pydantic-валидатор на уровне ConfluenceSourceConfig потребует ровно одно из них.
+    """
     out = {
-        'base_url': form['base_url'],
-        'model': form['model'],
-        'dim': int(form['dim']),
-        'tokenizer': form.get('tokenizer') or 'tiktoken',
+        'kind': 'confluence',
+        'name': form.get('name') or 'main',
+        'url': form['url'],
+        'username': form['username'],
     }
-    if form.get('api_key'):
-        # SDK требует key (даже фиктивный для self-hosted) — но конфиг не имеет поля api_key
-        # для embedder; шаблоны на это не влияют. Игнорируем здесь.
-        pass
-    if form.get('document_template'):
-        out['document_template'] = form['document_template']
-    if form.get('query_template'):
-        out['query_template'] = form['query_template']
+    # Auth: api_token приоритетнее (если юзер заполнил оба, считаем что Cloud)
+    if form.get('api_token'):
+        out['api_token'] = form['api_token']
+    elif form.get('password'):
+        out['password'] = form['password']
+    if form.get('spaces'):
+        out['spaces'] = [s.strip() for s in form['spaces'].split(',') if s.strip()]
+    if form.get('ancestor_ids'):
+        out['ancestor_ids'] = [s.strip() for s in form['ancestor_ids'].split(',') if s.strip()]
+    if form.get('attachments_enabled') in (True, 'true', 'on', '1'):
+        out['attachments'] = {'enabled': True}
     return out
 
 
-DENSE_EMBEDDER_PRESETS: list[Preset] = [
+def _build_jira(form: dict[str, Any]) -> dict[str, Any]:
+    return {
+        'kind': 'jira',
+        'name': form.get('name') or 'main',
+        'url': form['url'],
+        'username': form['username'],
+        'password': form['password'],
+    }
+
+
+SOURCE_PRESETS: list[Preset] = [
     Preset(
-        id='ollama-qwen3',
-        name='Ollama: Qwen3-Embedding-4B',
-        target='dense_embedder',
-        description='Рекомендуемая локальная конфигурация. dim=2560, контекст 32K.',
+        id='local', name='Local folder', target='source',
+        description='Markdown и PDF из локальной директории.',
         fields=[
-            PresetField('model', 'Модель', default='qwen3-embedding:4b', required=False),
-            PresetField('base_url', 'Base URL',
-                        default='http://host.docker.internal:11434/v1', required=False),
-            PresetField('dim', 'Dim', kind='number', default=2560, required=False),
-            PresetField('max_concurrent', 'Max concurrent', kind='number',
-                        default=4, required=False),
+            PresetField('name', 'Name', default='docs', required=False,
+                        help='Уникальный id среди local-инстансов. Lowercase.'),
+            PresetField('path', 'Path', placeholder='data/',
+                        help='Путь внутри контейнера. По умолчанию ./data/.'),
         ],
-        build=_build_ollama_embedder,
+        build=_build_local_source,
     ),
     Preset(
-        id='custom',
-        name='Custom (OpenAI-compat)',
-        target='dense_embedder',
-        description='Любой OpenAI-совместимый embeddings endpoint.',
+        id='confluence', name='Confluence', target='source',
+        description='Atlassian Confluence — Cloud или on-premise. '
+                    'Заполните либо API token (Cloud), либо password (on-prem).',
         fields=[
-            PresetField('base_url', 'Base URL', placeholder='https://...'),
-            PresetField('model', 'Модель'),
-            PresetField('dim', 'Dim', kind='number',
-                        help='Размерность вектора. Должна совпадать с моделью; меняется только пересозданием коллекции.'),
-            PresetField('tokenizer', 'Tokenizer', default='tiktoken', required=False,
-                        help='HF-имя или "tiktoken" как fallback.'),
+            PresetField('name', 'Имя', default='main', required=False,
+                        help='Уникальный id (например "corp", "vendor").'),
+            PresetField('url', 'URL',
+                        placeholder='https://your-company.atlassian.net'
+                                    ' или https://confluence.your-company.com'),
+            PresetField('username', 'Username',
+                        placeholder='email (Cloud) или логин (on-prem)'),
+            PresetField('api_token', 'API token (для Cloud)',
+                        kind='password', required=False,
+                        help='Для atlassian.net: id.atlassian.com/manage-profile/security/api-tokens'),
+            PresetField('password', 'Password (для on-premise)',
+                        kind='password', required=False,
+                        help='Для self-hosted Confluence Server / Data Center.'),
+            PresetField('spaces', 'Spaces (через запятую)', required=False,
+                        placeholder='DOCS, ENG'),
+            PresetField('ancestor_ids', 'Ancestor IDs (через запятую)', required=False,
+                        placeholder='123456, 789012',
+                        help='Только потомки этих страниц. Приоритет над spaces.'),
+            PresetField('attachments_enabled', 'Индексировать PDF-вложения',
+                        kind='checkbox', required=False, default=False),
         ],
-        build=_build_custom_embedder,
+        build=_build_confluence,
+    ),
+    Preset(
+        id='jira', name='Jira', target='source',
+        description='Jira (on-premise). Задачи берутся по ссылкам в '
+                    'уже-проиндексированных документах (Confluence/Local).',
+        fields=[
+            PresetField('name', 'Имя', default='main', required=False),
+            PresetField('url', 'URL', placeholder='https://jira.your-company.com'),
+            PresetField('username', 'Username'),
+            PresetField('password', 'Password', kind='password'),
+        ],
+        build=_build_jira,
     ),
 ]
 
@@ -234,11 +251,10 @@ DENSE_EMBEDDER_PRESETS: list[Preset] = [
 # API
 # ---------------------------------------------------------------------------
 
-ALL_PRESETS: list[Preset] = LLM_PRESETS + DENSE_EMBEDDER_PRESETS
+ALL_PRESETS: list[Preset] = LLM_PRESETS + SOURCE_PRESETS
 
 
 def find_preset(target: PresetTarget, preset_id: str) -> Preset:
-    """Найти пресет по target + id. Кидает KeyError если нет."""
     for p in ALL_PRESETS:
         if p.target == target and p.id == preset_id:
             return p
@@ -246,27 +262,16 @@ def find_preset(target: PresetTarget, preset_id: str) -> Preset:
 
 
 def apply_preset(target: PresetTarget, preset_id: str, form: dict[str, Any]) -> dict[str, Any]:
-    """Собрать overlay-snippet от заполненной формы.
+    """Собрать одну entry для добавления в pool/list.
 
-    Возвращает структуру вида {'llm': {...}} или {'indexing': {'dense_embedder': {...}}},
-    готовую к merge в config.local.yml через config_io.patch_local.
+    Возвращает item — НЕ обёрнутый в ключ. Caller (apply route) сам решает
+    в какой список добавлять (`llms` или `sources`) на основе target.
     """
     preset = find_preset(target, preset_id)
-    snippet = preset.build(form)
-
-    if target == 'llm':
-        return {'llm': snippet}
-    if target == 'llm_vision':
-        return {'llm_vision': snippet}
-    if target == 'dense_embedder':
-        return {'indexing': {'dense_embedder': snippet}}
-    if target == 'sparse_embedder':
-        return {'indexing': {'sparse_embedder': snippet}}
-    raise ValueError(f'Unknown target: {target}')
+    return preset.build(form)
 
 
 def serialize_preset(p: Preset) -> dict[str, Any]:
-    """JSON-friendly представление для GET /api/presets."""
     return {
         'id': p.id,
         'name': p.name,
