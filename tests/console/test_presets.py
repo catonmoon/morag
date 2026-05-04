@@ -83,11 +83,12 @@ class TestApplyLLMPresets:
 
 class TestApplySourcePresets:
     def test_local(self):
-        s = apply_preset('source', 'local', {'name': 'docs', 'path': 'data/'})
-        assert s == {'kind': 'local', 'name': 'docs', 'path': 'data/'}
+        # path зашит в /app/data, форма принимает только name
+        s = apply_preset('source', 'local', {'name': 'docs'})
+        assert s == {'kind': 'local', 'name': 'docs', 'path': '/app/data'}
 
     def test_local_default_name(self):
-        s = apply_preset('source', 'local', {'name': '', 'path': 'data/'})
+        s = apply_preset('source', 'local', {'name': ''})
         assert s['name'] == 'docs'
 
     def test_confluence_cloud_minimal(self):

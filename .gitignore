@@ -15,11 +15,16 @@ coverage_html/
 
 # Env
 .env
-# config.yml — primary, отслеживается в git как baseline.
-# Локальные правки (секреты, кастомизация) пишутся в config.local.yml — gitignored.
-# Все остальные config.*.yml — env-specific эксперименты, не для git.
+# conf/ — каталог конфигов morag.
+# conf/config.yml — baseline, в git.
+# conf/config.local.yml — overlay (правки UI, секреты), gitignored.
+# conf/state/ — runtime state indexer'а (status файл), gitignored.
+conf/*
+!conf/config.yml
+# Старые artifacts корня (для тех кто ещё не перешёл на conf/).
+config.yml
+config.local.yml
 config.*.yml
-!config.yml
 
 # Local docker-compose override (не для production)
 docker-compose.override.yml
