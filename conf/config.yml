@@ -78,8 +78,8 @@ indexing:
   context:
     mode: llm                        # noop | llm
     window_tokens: 8162              # окно текста вокруг чанка под крупные section-чанки
-    chunk_max_tokens: 3072           # бюджет text + context + path
-    max_tokens: 256                  # hard-cap на LLM-ответ (контекст до 256 токенов)
+    chunk_max_tokens: 3072           # бюджет финального embed-входа (text + context + path)
+    max_tokens: 512                  # hard-cap на LLM-ответ (длина контекста)
 
   # Sparse-эмбеддер (GTE). Свой контейнер в docker-compose, отдельно настраивать не нужно.
   sparse_embedder:
