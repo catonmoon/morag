@@ -92,20 +92,30 @@ def _extract_content(message) -> str:
 
 
 def _build_extra_body(params: GenerationParams) -> dict | None:
-    """Собрать extra_body для нестандартных параметров (top_k, repetition_penalty, thinking)."""
+    """Собрать extra_body для нестандартных параметров (top_k, repetition_penalty, thinking).
+
+    Thinking-управление шлётся в нескольких форматах одновременно — каждый провайдер
+    распознаёт свой и игнорирует чужие:
+
+    - **vLLM**: `chat_template_kwargs.enable_thinking` (Jinja-шаблон).
+    - **Ollama OpenAI-compat** (`/v1/chat/completions`): **только** `reasoning_effort`
+      ('low'|'none'); `think` и `options.think` шлются на native `/api/chat`, а на
+      OpenAI-compat РОУТЕРОМ ИГНОРИРУЮТСЯ. Без `reasoning_effort: 'none'` модель
+      типа qwen3.5:9b всё равно генерирует `<think>` токены (50× оверхед на
+      latency и cost), даже если контент `<think>` Ollama прячет в финальный ответ.
+      Подтверждено реальным curl + issue ollama/ollama#14820.
+    - **OpenRouter**: `reasoning.effort` (текущий стандарт; `.enabled` deprecated).
+    """
     extra: dict = {}
     if params.top_k != 0:
         extra['top_k'] = params.top_k
     if params.repetition_penalty is not None:
         extra['repetition_penalty'] = params.repetition_penalty
     if params.enable_thinking is not None:
-        # vLLM
+        effort = 'low' if params.enable_thinking else 'none'
         extra['chat_template_kwargs'] = {'enable_thinking': params.enable_thinking}
-        # Ollama (/v1/ OpenAI-compatible API)
-        extra['think'] = params.enable_thinking
-        extra['options'] = {'think': params.enable_thinking}
-        # OpenRouter
-        extra['reasoning'] = {'enabled': params.enable_thinking}
+        extra['reasoning_effort'] = effort           # Ollama OpenAI-compat
+        extra['reasoning'] = {'effort': effort}      # OpenRouter
     return extra or None
 
 

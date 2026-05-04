@@ -413,9 +413,10 @@ class TestDefaultEnableThinking:
         call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
         extra = call_kwargs.get('extra_body') or {}
         assert extra.get('chat_template_kwargs') == {'enable_thinking': False}
-        assert extra.get('think') is False
-        assert extra.get('options') == {'think': False}
-        assert extra.get('reasoning') == {'enabled': False}
+        # Ollama OpenAI-compat: только reasoning_effort работает на /v1/chat/completions
+        assert extra.get('reasoning_effort') == 'none'
+        # OpenRouter: текущий формат — reasoning.effort
+        assert extra.get('reasoning') == {'effort': 'none'}
 
     async def test_per_call_true_overrides_default_false(self, mock_openai):
         """Per-call GenerationParams.enable_thinking=True overrides default False."""
@@ -429,8 +430,8 @@ class TestDefaultEnableThinking:
         call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
         extra = call_kwargs.get('extra_body') or {}
         assert extra.get('chat_template_kwargs') == {'enable_thinking': True}
-        assert extra.get('think') is True
-        assert extra.get('reasoning') == {'enabled': True}
+        assert extra.get('reasoning_effort') == 'low'
+        assert extra.get('reasoning') == {'effort': 'low'}
 
     async def test_default_none_preserves_backward_compat(self, mock_openai):
         """No enable_thinking default → no thinking-related fields in extra_body."""
@@ -443,7 +444,7 @@ class TestDefaultEnableThinking:
         # Either no extra_body at all or extra_body without thinking keys
         if extra is not None:
             assert 'chat_template_kwargs' not in extra
-            assert 'think' not in extra
+            assert 'reasoning_effort' not in extra
             assert 'reasoning' not in extra
 
     async def test_default_false_applies_to_vision(self, mock_openai):
