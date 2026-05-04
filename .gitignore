@@ -1,6 +1,14 @@
-# Project data
-data/
-volumes/
+# Project data: содержимое gitignored, .gitkeep сохраняет структуру папок
+# чтобы они существовали после git clone (для bind-mount Docker).
+data/*
+!data/.gitkeep
+volumes/*
+!volumes/qdrant
+!volumes/open-webui
+volumes/qdrant/*
+!volumes/qdrant/.gitkeep
+volumes/open-webui/*
+!volumes/open-webui/.gitkeep
 old/
 
 # Python
@@ -18,9 +26,13 @@ coverage_html/
 # conf/ — каталог конфигов morag.
 # conf/config.yml — baseline, в git.
 # conf/config.local.yml — overlay (правки UI, секреты), gitignored.
-# conf/state/ — runtime state indexer'а (status файл), gitignored.
+# conf/state/ — runtime state indexer'а, gitignored (только .gitkeep).
 conf/*
 !conf/config.yml
+!conf/state
+conf/state/*
+!conf/state/.gitkeep
+
 # Старые artifacts корня (для тех кто ещё не перешёл на conf/).
 config.yml
 config.local.yml

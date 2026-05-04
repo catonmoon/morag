@@ -37,11 +37,9 @@ ollama pull qwen3.5:9b               # multimodal LLM для агента и vis
 ollama pull qwen3-embedding:4b       # dense-эмбеддер (dim=2560, context=32K)
 ollama serve
 
-# 2. Положить документы в ./data/
-#    Папка примонтирована в контейнер как /app/data — это единственный путь,
-#    который Console UI добавляет как local-source.
-#    Для пробы можно скопировать примеры из репо:
-mkdir -p data && cp examples/*.md data/
+# 2. Положить документы в ./data/ (для пробы — примеры из репо).
+#    Папка примонтирована в контейнер как /app/data — единственный путь для local-source.
+cp examples/*.md data/
 
 # 3. Собрать и запустить
 docker compose build

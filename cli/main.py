@@ -746,7 +746,7 @@ async def cmd_serve(config_path: str) -> None:
     # state-file для status_reporter и публикации прогресса наружу
     status_path = os.environ.get(
         'MORAG_STATUS_FILE',
-        '/data/morag_state/index_status.json',
+        '/app/conf/state/index_status.json',
     )
     control_port = int(os.environ.get('MORAG_CONTROL_PORT', '9090'))
 

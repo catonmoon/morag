@@ -50,10 +50,10 @@ class IndexerControlPlane:
 
     Пример (внутри cmd_serve):
         cp = IndexerControlPlane(
-            config_path='/data/config.yml',
-            status_file_path='/data/morag_state/index_status.json',
-            run_index=lambda **kw: cmd_index('/data/config.yml', **kw),
-            run_rebuild_km=lambda **kw: cmd_rebuild_km('/data/config.yml', **kw),
+            config_path='/app/conf/config.yml',
+            status_file_path='/app/conf/state/index_status.json',
+            run_index=lambda **kw: cmd_index('/app/conf/config.yml', **kw),
+            run_rebuild_km=lambda **kw: cmd_rebuild_km('/app/conf/config.yml', **kw),
         )
     """
 

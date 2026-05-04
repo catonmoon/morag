@@ -6,7 +6,9 @@ services:
       - "6333:6333"   # REST API + веб-дашборд: http://localhost:6333/dashboard
       - "6334:6334"   # gRPC
     volumes:
-      - qdrant_data:/qdrant/storage
+      # Bind-mount в локальную папку — каждый клон morag имеет своё хранилище.
+      # Никакого шаринга через docker named volumes между параллельными деплоями.
+      - ./volumes/qdrant:/qdrant/storage
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/localhost/6333'"]
@@ -148,9 +150,7 @@ services:
     depends_on:
       - pipelines
     volumes:
-      - open_webui_data:/app/backend/data
+      # Bind-mount: чаты, история, settings OWUI — в локальной папке,
+      # без шаринга через named volumes между параллельными деплоями.
+      - ./volumes/open-webui:/app/backend/data
     restart: unless-stopped
-
-volumes:
-  qdrant_data:
-  open_webui_data:

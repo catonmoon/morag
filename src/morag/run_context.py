@@ -6,7 +6,7 @@
 
 См. ADR-0012, секция «5. Run versioning».
 
-Counter persistится в state-файле (`data/morag_state/run_counter.json`).
+Counter persistится в state-файле (`conf/state/run_counter.json`).
 Если файл потерян — recovery через `max(run_number)` из существующих
 документов в Qdrant (избегаем коллизий с историческими прогонами).
 """
@@ -21,7 +21,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_STATE_PATH = Path('/app/data/morag_state/run_counter.json')
+DEFAULT_STATE_PATH = Path('/app/conf/state/run_counter.json')
 
 
 @dataclass(frozen=True)
@@ -80,7 +80,7 @@ class RunContext:
 
 
 def _resolve_state_path() -> Path:
-    """Путь по умолчанию: env MORAG_RUN_COUNTER_FILE или /app/data/morag_state/."""
+    """Путь по умолчанию: env MORAG_RUN_COUNTER_FILE или /app/conf/state/."""
     env = os.environ.get('MORAG_RUN_COUNTER_FILE')
     if env:
         return Path(env)
