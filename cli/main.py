@@ -962,8 +962,9 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest='command', required=True)
     index_parser = subparsers.add_parser('index', help='Индексировать документы из источника')
     index_parser.add_argument(
-        '--config', default='config.yml', metavar='PATH',
-        help='Путь к конфигу (по умолчанию: config.yml)',
+        '--config', default=os.environ.get('MORAG_CONFIG_PATH', 'config.yml'),
+        metavar='PATH',
+        help='Путь к конфигу (по умолчанию: env MORAG_CONFIG_PATH или config.yml)',
     )
     index_parser.add_argument(
         '--reset', action='store_true',
@@ -972,20 +973,23 @@ def main() -> None:
 
     km_parser = subparsers.add_parser('rebuild-km', help='Перестроить Knowledge Map без полной индексации')
     km_parser.add_argument(
-        '--config', default='config.yml', metavar='PATH',
-        help='Путь к конфигу (по умолчанию: config.yml)',
+        '--config', default=os.environ.get('MORAG_CONFIG_PATH', 'config.yml'),
+        metavar='PATH',
+        help='Путь к конфигу (по умолчанию: env MORAG_CONFIG_PATH или config.yml)',
     )
 
     serve_parser = subparsers.add_parser('serve', help='Daemon-режим: индексация по расписанию из конфига')
     serve_parser.add_argument(
-        '--config', default='config.yml', metavar='PATH',
-        help='Путь к конфигу (по умолчанию: config.yml)',
+        '--config', default=os.environ.get('MORAG_CONFIG_PATH', 'config.yml'),
+        metavar='PATH',
+        help='Путь к конфигу (по умолчанию: env MORAG_CONFIG_PATH или config.yml)',
     )
 
     query_parser = subparsers.add_parser('query', help='Гибридный поиск без LLM-ответа (для отладки)')
     query_parser.add_argument(
-        '--config', default='config.yml', metavar='PATH',
-        help='Путь к конфигу (по умолчанию: config.yml)',
+        '--config', default=os.environ.get('MORAG_CONFIG_PATH', 'config.yml'),
+        metavar='PATH',
+        help='Путь к конфигу (по умолчанию: env MORAG_CONFIG_PATH или config.yml)',
     )
     query_parser.add_argument('question', help='Поисковый вопрос')
     query_parser.add_argument('--top-k', type=int, default=10, help='Количество результатов (по умолчанию: 10)')
