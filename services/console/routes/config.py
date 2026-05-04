@@ -98,8 +98,8 @@ async def test_config(req: ConfigTestRequest, request: Request) -> ConfigTestRes
             # Имя из pool. Если не указано — используем default из indexing.llm.
             name = req.name
             if name is None:
-                if cfg.indexing is None:
-                    return ConfigTestResponse(ok=False, detail='No name; indexing not configured')
+                if cfg.indexing is None or cfg.indexing.llm is None:
+                    return ConfigTestResponse(ok=False, detail='No name; indexing.llm not configured')
                 name = cfg.indexing.llm.default
             try:
                 llm_inst = cfg.llm_by_name(name)
@@ -108,7 +108,7 @@ async def test_config(req: ConfigTestRequest, request: Request) -> ConfigTestRes
             return await _test_llm(llm_inst)
 
         if req.target == 'dense_embedder':
-            if cfg.indexing is None or not cfg.indexing.dense_embedder.base_url:
+            if cfg.indexing is None or cfg.indexing.dense_embedder is None or not cfg.indexing.dense_embedder.base_url:
                 return ConfigTestResponse(ok=False, detail='dense_embedder.base_url not configured')
             return await _test_dense_embedder(cfg.indexing.dense_embedder)
 
@@ -125,6 +125,7 @@ async def test_config(req: ConfigTestRequest, request: Request) -> ConfigTestRes
 
 
 async def _test_llm(llm_cfg) -> ConfigTestResponse:
+    import time
     from morag.llm.client import GenerationParams, LLMClient
     client = LLMClient(
         base_url=llm_cfg.base_url,
@@ -134,26 +135,41 @@ async def _test_llm(llm_cfg) -> ConfigTestResponse:
         max_retries=0,
         enable_thinking=False,
     )
+    t0 = time.monotonic()
     # max_tokens — kwarg complete(), не поле GenerationParams
     answer = await client.complete(
         messages=[{'role': 'user', 'content': 'ping'}],
         params=GenerationParams(temperature=0),
         max_tokens=1,
     )
-    return ConfigTestResponse(ok=True, detail=f'received {len(answer)} chars')
+    ms = int((time.monotonic() - t0) * 1000)
+    snippet = answer.strip().replace('\n', ' ')
+    if len(snippet) > 40:
+        snippet = snippet[:40] + '…'
+    return ConfigTestResponse(
+        ok=True,
+        detail=f'модель ответила за {ms} мс — «ping» → «{snippet}»',
+    )
 
 
 async def _test_dense_embedder(cfg) -> ConfigTestResponse:
+    import time
     from morag.indexing.embedder import HttpEmbedder
     embedder = HttpEmbedder(
         cfg.base_url, cfg.model, cfg.dim,
+        api_key=cfg.api_key or 'ollama',
         document_template=cfg.document_template,
         query_template=cfg.query_template,
         timeout=15,
         max_retries=0,
     )
+    t0 = time.monotonic()
     vec = await embedder.embed_batch(['ping'])
-    return ConfigTestResponse(ok=True, detail=f'dim={len(vec[0])}')
+    ms = int((time.monotonic() - t0) * 1000)
+    return ConfigTestResponse(
+        ok=True,
+        detail=f'эмбеддер вернул вектор размерности {len(vec[0])} за {ms} мс',
+    )
 
 
 async def _test_sparse_embedder(cfg) -> ConfigTestResponse:

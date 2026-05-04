@@ -291,14 +291,15 @@ class TestSourcesDiscriminatedUnion:
         enabled_locals = cfg.sources_by_kind('local')
         assert [s.name for s in enabled_locals] == ['docs2']
 
-    def test_min_one_source_required(self):
+    def test_empty_sources_allowed_in_baseline(self):
+        # Pydantic-схема ослаблена: sources/llms могут быть пустыми в baseline
+        # config.yml. Готовность к индексации проверяется через setup_gate.
         from morag.config import Config
-        from pydantic import ValidationError
-        with pytest.raises(ValidationError):
-            Config.model_validate({
-                'sources': [],
-                'llms': [{'name': 'm', 'base_url': 'x', 'model': 'm', 'api_key': 'k'}],
-            })
+        cfg = Config.model_validate({
+            'sources': [],
+            'llms': [{'name': 'm', 'base_url': 'x', 'model': 'm', 'api_key': 'k'}],
+        })
+        assert cfg.sources == []
 
 
 class TestLLMPool:
@@ -329,14 +330,14 @@ class TestLLMPool:
                 ],
             })
 
-    def test_min_one_llm_required(self):
+    def test_empty_llms_allowed_in_baseline(self):
+        # Аналогично sources — пустой пул валиден в baseline.
         from morag.config import Config
-        from pydantic import ValidationError
-        with pytest.raises(ValidationError):
-            Config.model_validate({
-                'sources': [{'kind': 'local', 'name': 'd', 'path': 'a'}],
-                'llms': [],
-            })
+        cfg = Config.model_validate({
+            'sources': [{'kind': 'local', 'name': 'd', 'path': 'a'}],
+            'llms': [],
+        })
+        assert cfg.llms == []
 
 
 class TestLLMRoleMapping:

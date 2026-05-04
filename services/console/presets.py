@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
 
-PresetTarget = Literal['llm', 'source']
+PresetTarget = Literal['llm', 'source', 'embedder']
 
 
 @dataclass(frozen=True)
@@ -55,16 +55,21 @@ def _capabilities(form: dict[str, Any]) -> list[str]:
 
 
 def _build_openai_compatible(form: dict[str, Any]) -> dict[str, Any]:
-    """Любой OpenAI-совместимый endpoint: Grok, OpenRouter, vLLM, OpenAI."""
+    """Любой OpenAI-совместимый endpoint: Grok, OpenRouter, vLLM, OpenAI.
+
+    api_key может быть пустым — это валидно при Edit-режиме (бэкенд подтянет
+    существующий секрет из текущего конфига). См. routes/presets.py::apply.
+    """
     out = {
         'name': form.get('name') or 'main',
         'base_url': form['base_url'],
         'model': form['model'],
-        'api_key': form['api_key'],
         'capabilities': _capabilities(form),
         'context_window': int(form.get('context_window') or 32768),
         'max_concurrent': int(form.get('max_concurrent') or 4),
     }
+    if form.get('api_key'):
+        out['api_key'] = form['api_key']
     return out
 
 
@@ -148,11 +153,16 @@ LLM_PRESETS: list[Preset] = [
 # Source presets — выдают одну entry для sources[] list
 # ---------------------------------------------------------------------------
 
+# Жёсткий путь для local-source: всегда /app/data в контейнере (см. docker-compose.yml).
+# Если юзеру нужна другая папка — править docker-compose.yml volume и config.local.yml.
+LOCAL_SOURCE_PATH = '/app/data'
+
+
 def _build_local_source(form: dict[str, Any]) -> dict[str, Any]:
     return {
         'kind': 'local',
         'name': form.get('name') or 'docs',
-        'path': form['path'],
+        'path': LOCAL_SOURCE_PATH,
     }
 
 
@@ -161,6 +171,7 @@ def _build_confluence(form: dict[str, Any]) -> dict[str, Any]:
 
     Auth: одно из двух — `password` (on-prem) или `api_token` (Cloud).
     Pydantic-валидатор на уровне ConfluenceSourceConfig потребует ровно одно из них.
+    Секреты опциональны — при пустом значении бэкенд подтянет существующий.
     """
     out = {
         'kind': 'confluence',
@@ -183,24 +194,26 @@ def _build_confluence(form: dict[str, Any]) -> dict[str, Any]:
 
 
 def _build_jira(form: dict[str, Any]) -> dict[str, Any]:
-    return {
+    out = {
         'kind': 'jira',
         'name': form.get('name') or 'main',
         'url': form['url'],
         'username': form['username'],
-        'password': form['password'],
     }
+    if form.get('password'):
+        out['password'] = form['password']
+    return out
 
 
 SOURCE_PRESETS: list[Preset] = [
     Preset(
-        id='local', name='Local folder', target='source',
-        description='Markdown и PDF из локальной директории.',
+        id='local', name='Локальная папка', target='source',
+        description='Markdown и PDF из локальной папки. Путь зашит на /app/data — '
+                    'это volume в docker-compose, на хосте — ./data/. '
+                    'Положите файлы туда; для смены пути правьте docker-compose.yml.',
         fields=[
-            PresetField('name', 'Name', default='docs', required=False,
-                        help='Уникальный id среди local-инстансов. Lowercase.'),
-            PresetField('path', 'Path', placeholder='data/',
-                        help='Путь внутри контейнера. По умолчанию ./data/.'),
+            PresetField('name', 'Имя', default='docs', required=False,
+                        help='Уникальный id среди local-источников. Lowercase.'),
         ],
         build=_build_local_source,
     ),
@@ -248,10 +261,97 @@ SOURCE_PRESETS: list[Preset] = [
 
 
 # ---------------------------------------------------------------------------
+# Embedder presets — выдают snippet для indexing.dense_embedder (replace, не append)
+# ---------------------------------------------------------------------------
+
+def _build_embedder_ollama(form: dict[str, Any]) -> dict[str, Any]:
+    out = {
+        'base_url': form.get('base_url') or 'http://host.docker.internal:11434/v1',
+        'model': form['model'],
+        'api_key': 'ollama',          # Ollama игнорирует, но SDK требует
+        'dim': int(form['dim']),
+        'max_concurrent': int(form.get('max_concurrent') or 1),
+    }
+    if form.get('tokenizer'):
+        out['tokenizer'] = form['tokenizer']
+    return out
+
+
+def _build_embedder_openai_compatible(form: dict[str, Any]) -> dict[str, Any]:
+    out = {
+        'base_url': form['base_url'],
+        'model': form['model'],
+        'dim': int(form['dim']),
+        'max_concurrent': int(form.get('max_concurrent') or 4),
+    }
+    if form.get('api_key'):
+        out['api_key'] = form['api_key']
+    if form.get('tokenizer'):
+        out['tokenizer'] = form['tokenizer']
+    return out
+
+
+EMBEDDER_PRESETS: list[Preset] = [
+    Preset(
+        id='ollama', name='Ollama (локальный)', target='embedder',
+        description='Локальный Ollama-сервер. Подходит для qwen3-embedding, '
+                    'nomic-embed-text, bge-m3 и др.',
+        fields=[
+            PresetField('model', 'Модель', placeholder='qwen3-embedding:4b',
+                        help='Имя модели как в выводе `ollama list`. '
+                             'Стандарт для morag — qwen3-embedding:4b.'),
+            PresetField('base_url', 'Base URL',
+                        default='http://host.docker.internal:11434/v1', required=False,
+                        help='Изнутри docker-compose — host.docker.internal. '
+                             'Если консоль локально — http://localhost:11434/v1.'),
+            PresetField('dim', 'Размерность вектора (dim)', kind='number',
+                        placeholder='2560',
+                        help='qwen3-embedding:4b → 2560, nomic-embed-text → 768, '
+                             'bge-m3 → 1024.'),
+            PresetField('max_concurrent', 'Max concurrent',
+                        kind='number', default=1, required=False,
+                        help='Ollama сериализует запросы. Обычно 1.'),
+            PresetField('tokenizer', 'HuggingFace tokenizer (опционально)',
+                        required=False,
+                        placeholder='Qwen/Qwen3-Embedding-4B',
+                        help='Для точного подсчёта токенов в чанкере. '
+                             'Если не задан — TikToken (приближение ±30%).'),
+        ],
+        build=_build_embedder_ollama,
+    ),
+    Preset(
+        id='openai-compatible', name='OpenAI-compatible', target='embedder',
+        description='Любой OpenAI-совместимый endpoint /v1/embeddings: '
+                    'OpenAI, Together, vLLM, и др.',
+        fields=[
+            PresetField('base_url', 'Base URL',
+                        placeholder='https://api.openai.com/v1'),
+            PresetField('model', 'Модель',
+                        placeholder='text-embedding-3-small'),
+            PresetField('api_key', 'API key', kind='password',
+                        placeholder='sk-...'),
+            PresetField('dim', 'Размерность вектора (dim)', kind='number',
+                        placeholder='1536',
+                        help='text-embedding-3-small → 1536, '
+                             'text-embedding-3-large → 3072.'),
+            PresetField('max_concurrent', 'Max concurrent',
+                        kind='number', default=4, required=False),
+            PresetField('tokenizer', 'HuggingFace tokenizer (опционально)',
+                        required=False,
+                        placeholder='Qwen/Qwen3-Embedding-4B',
+                        help='Для точного подсчёта токенов в чанкере. '
+                             'Если не задан — TikToken (приближение ±30%).'),
+        ],
+        build=_build_embedder_openai_compatible,
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
 
-ALL_PRESETS: list[Preset] = LLM_PRESETS + SOURCE_PRESETS
+ALL_PRESETS: list[Preset] = LLM_PRESETS + SOURCE_PRESETS + EMBEDDER_PRESETS
 
 
 def find_preset(target: PresetTarget, preset_id: str) -> Preset:

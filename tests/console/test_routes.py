@@ -351,3 +351,130 @@ class TestLinksRoute:
         d = r.json()['external_owui']
         assert d['base_url'] == 'https://my-pipelines.example/v1'
         assert d['api_key'] == 'custom-key'
+
+
+# ---------------------------------------------------------------------------
+# /api/presets/delete + /api/presets/apply (embedder target)
+# ---------------------------------------------------------------------------
+
+class TestDeleteAndEmbedder:
+
+    async def test_delete_llm(self, client, workspace):
+        # Сначала добавим, потом удалим
+        common = {'base_url': 'http://x', 'model': 'm', 'api_key': 'k'}
+        await client.post('/api/presets/apply', json={
+            'target': 'llm', 'preset_id': 'openai-compatible',
+            'form': {**common, 'name': 'todelete'},
+        })
+        r = await client.post('/api/presets/delete', json={
+            'target': 'llm', 'name': 'todelete',
+        })
+        assert r.status_code == 200, r.text
+
+        local = yaml.safe_load((workspace['cfg'].with_name('config.local.yml')).read_text())
+        names = [llm['name'] for llm in local.get('llms', [])]
+        assert 'todelete' not in names
+
+    async def test_delete_protects_referenced_llm(self, client):
+        # primary 'main' использован в indexing.llm — удаление сломает refs → 400
+        r = await client.post('/api/presets/delete', json={
+            'target': 'llm', 'name': 'main',
+        })
+        assert r.status_code == 400
+
+    async def test_delete_source_requires_kind(self, client):
+        r = await client.post('/api/presets/delete', json={
+            'target': 'source', 'name': 'docs',
+        })
+        assert r.status_code == 400
+        assert 'kind required' in r.text.lower()
+
+    async def test_delete_404_when_not_found(self, client):
+        r = await client.post('/api/presets/delete', json={
+            'target': 'llm', 'name': 'nonexistent',
+        })
+        assert r.status_code == 404
+
+    async def test_apply_embedder_replaces(self, client, workspace):
+        r = await client.post('/api/presets/apply', json={
+            'target': 'embedder', 'preset_id': 'ollama',
+            'form': {'model': 'nomic-embed-text', 'dim': '768'},
+        })
+        assert r.status_code == 200, r.text
+        assert r.json()['added']['model'] == 'nomic-embed-text'
+
+        local = yaml.safe_load((workspace['cfg'].with_name('config.local.yml')).read_text())
+        assert local['indexing']['dense_embedder']['model'] == 'nomic-embed-text'
+        assert local['indexing']['dense_embedder']['dim'] == 768
+
+    async def test_list_presets_includes_embedder(self, client):
+        r = await client.get('/api/presets')
+        d = r.json()
+        assert 'embedder' in d
+        ids = [p['id'] for p in d['embedder']]
+        assert 'ollama' in ids
+        assert 'openai-compatible' in ids
+
+
+class TestSecretPreservation:
+    """При Edit secret-поля (api_key/password/api_token) сохраняются если в форме пусто."""
+
+    async def test_llm_api_key_preserved_when_form_omits_it(self, client, workspace):
+        # 1. Добавим LLM с api_key
+        await client.post('/api/presets/apply', json={
+            'target': 'llm', 'preset_id': 'openai-compatible',
+            'form': {'name': 'edit-me', 'base_url': 'http://x', 'model': 'm', 'api_key': 'secret-1'},
+        })
+        # 2. Edit: меняем model, api_key пустой (как это сделает UI после маскировки)
+        r = await client.post('/api/presets/apply', json={
+            'target': 'llm', 'preset_id': 'openai-compatible',
+            'form': {'name': 'edit-me', 'base_url': 'http://x', 'model': 'NEW', 'api_key': ''},
+        })
+        assert r.status_code == 200, r.text
+
+        local = yaml.safe_load((workspace['cfg'].with_name('config.local.yml')).read_text())
+        edited = next(l for l in local['llms'] if l['name'] == 'edit-me')
+        assert edited['model'] == 'NEW'
+        assert edited['api_key'] == 'secret-1'  # сохранился
+
+    async def test_llm_api_key_replaced_when_form_provides_new(self, client, workspace):
+        await client.post('/api/presets/apply', json={
+            'target': 'llm', 'preset_id': 'openai-compatible',
+            'form': {'name': 'r', 'base_url': 'http://x', 'model': 'm', 'api_key': 'old'},
+        })
+        await client.post('/api/presets/apply', json={
+            'target': 'llm', 'preset_id': 'openai-compatible',
+            'form': {'name': 'r', 'base_url': 'http://x', 'model': 'm', 'api_key': 'new-key'},
+        })
+        local = yaml.safe_load((workspace['cfg'].with_name('config.local.yml')).read_text())
+        edited = next(l for l in local['llms'] if l['name'] == 'r')
+        assert edited['api_key'] == 'new-key'
+
+    async def test_embedder_api_key_preserved(self, client, workspace):
+        await client.post('/api/presets/apply', json={
+            'target': 'embedder', 'preset_id': 'openai-compatible',
+            'form': {'base_url': 'http://x', 'model': 'm', 'api_key': 'sk-saved', 'dim': '768'},
+        })
+        # Edit: меняем dim, api_key пустой
+        await client.post('/api/presets/apply', json={
+            'target': 'embedder', 'preset_id': 'openai-compatible',
+            'form': {'base_url': 'http://x', 'model': 'm', 'api_key': '', 'dim': '1024'},
+        })
+        local = yaml.safe_load((workspace['cfg'].with_name('config.local.yml')).read_text())
+        emb = local['indexing']['dense_embedder']
+        assert emb['dim'] == 1024
+        assert emb['api_key'] == 'sk-saved'
+
+    async def test_confluence_password_preserved(self, client, workspace):
+        await client.post('/api/presets/apply', json={
+            'target': 'source', 'preset_id': 'confluence',
+            'form': {'name': 'cf', 'url': 'https://cf', 'username': 'u', 'password': 'pw1'},
+        })
+        await client.post('/api/presets/apply', json={
+            'target': 'source', 'preset_id': 'confluence',
+            'form': {'name': 'cf', 'url': 'https://cf', 'username': 'u-changed', 'password': ''},
+        })
+        local = yaml.safe_load((workspace['cfg'].with_name('config.local.yml')).read_text())
+        cf = next(s for s in local['sources'] if s.get('kind') == 'confluence' and s['name'] == 'cf')
+        assert cf['username'] == 'u-changed'
+        assert cf['password'] == 'pw1'  # сохранился

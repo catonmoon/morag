@@ -190,6 +190,7 @@ class DenseEmbedderConfig(BaseModel):
     model: str
     tokenizer: str | None = None
     base_url: str | None = None
+    api_key: str | None = None        # OpenAI-compatible providers; для Ollama не нужен
     dim: int | None = None
     document_template: str = '{text}'
     query_template: str = '{text}'
@@ -258,19 +259,25 @@ class KnowledgeMapConfig(BaseModel):
 
 
 class IndexingConfig(BaseModel):
-    """Индексация. Содержит ссылки на LLMs из пула через role mapping."""
+    """Индексация. Содержит ссылки на LLMs из пула через role mapping.
+
+    `llm`/`vision`/`dense_embedder` опциональны на уровне Pydantic — при
+    запуске cmd_index/cmd_serve проверяются как обязательные через setup_gate.
+    Это позволяет хранить минимальный baseline config.yml в git без секретов
+    и доконфигурировать через Console UI.
+    """
     # LLM-роли:
     #   llm  — для всех text-задач (DocTitle, DocSummary, ContextGen, Chunker, KM)
     #   vision — для multimodal (PDF-страницы, Confluence images)
-    llm: LLMRoleMapping
-    vision: str  # имя LLM из пула; multimodal-задачи
+    llm: LLMRoleMapping | None = None
+    vision: str | None = None  # имя LLM из пула; multimodal-задачи
 
     chunker: ChunkerConfig = ChunkerConfig()
     context: ContextConfig = ContextConfig()
     embed_batch_size: int = 64
     lexical_doc_summary: bool = False
     lexical_chunk_context: bool = False
-    dense_embedder: DenseEmbedderConfig
+    dense_embedder: DenseEmbedderConfig | None = None
     sparse_embedder: SparseEmbedderConfig = SparseEmbedderConfig()
     vision_max_tokens: int = 1024
     concurrency: int = 1
@@ -327,8 +334,10 @@ class Config(BaseModel):
     изменениях в будущем — bump + migration script.
     """
     schema_version: Literal[1] = 1
-    sources: list[Source] = Field(min_length=1, description='Минимум один источник')
-    llms: list[LLMInstance] = Field(min_length=1, description='Минимум одна LLM')
+    # sources / llms могут быть пустыми в baseline config.yml — наполняются
+    # через Console UI. Запуск индексации блокирует setup_gate если они пусты.
+    sources: list[Source] = Field(default_factory=list)
+    llms: list[LLMInstance] = Field(default_factory=list)
     qdrant: QdrantConfig = QdrantConfig()
     pdf: PdfConfig | None = None
     indexing: IndexingConfig | None = None  # None для retrieval-only setup'ов
@@ -364,21 +373,25 @@ class Config(BaseModel):
 
     @model_validator(mode='after')
     def _validate_llm_references(self) -> 'Config':
-        """indexing.llm.* и indexing.vision должны ссылаться на существующие LLMs."""
+        """indexing.llm.* и indexing.vision должны ссылаться на существующие LLMs.
+
+        Если роли не заданы (None) — проверка пропускается. Это позволяет хранить
+        baseline config.yml без llms/ролей; setup_gate блокирует запуск индексации
+        пока они не заполнены через UI.
+        """
         if self.indexing is None:
             return self
         pool = {llm.name for llm in self.llms}
 
-        # indexing.llm.default + overrides
         unknown = []
-        if self.indexing.llm.default not in pool:
-            unknown.append(f'indexing.llm.default={self.indexing.llm.default!r}')
-        for role, name in self.indexing.llm.overrides.items():
-            if name not in pool:
-                unknown.append(f'indexing.llm.overrides.{role}={name!r}')
+        if self.indexing.llm is not None:
+            if self.indexing.llm.default not in pool:
+                unknown.append(f'indexing.llm.default={self.indexing.llm.default!r}')
+            for role, name in self.indexing.llm.overrides.items():
+                if name not in pool:
+                    unknown.append(f'indexing.llm.overrides.{role}={name!r}')
 
-        # indexing.vision
-        if self.indexing.vision not in pool:
+        if self.indexing.vision is not None and self.indexing.vision not in pool:
             unknown.append(f'indexing.vision={self.indexing.vision!r}')
 
         if unknown:
@@ -399,7 +412,7 @@ class Config(BaseModel):
         Валидация делается перед любой работой с провайдером — misconfig
         ловится при load_config(), а не на 47-й странице PDF.
         """
-        if self.indexing is None:
+        if self.indexing is None or self.indexing.vision is None:
             return self
 
         vision_llm = self.llm_by_name(self.indexing.vision)

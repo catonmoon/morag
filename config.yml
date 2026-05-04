@@ -1,0 +1,120 @@
+# ============================================================================
+# config.yml — baseline-конфиг morag (schema_version=1, см. ADR-0012).
+#
+# Этот файл — в git. Содержит технические defaults индексации.
+#
+# Sources, LLMs, Embedder, Roles — настраиваются через Console UI
+# (http://localhost:8000). Все правки UI сохраняются в config.local.yml,
+# который deep-merge'ится поверх baseline. config.local.yml gitignored.
+# ============================================================================
+
+schema_version: 1
+
+
+# ----------------------------------------------------------------------------
+# Qdrant
+# ----------------------------------------------------------------------------
+qdrant:
+  host: qdrant                    # Docker; для нативного запуска: localhost
+  port: 6333
+  collection_docs: docs
+  collection_chunks: chunks
+
+
+# ----------------------------------------------------------------------------
+# PDF — конвертация PDF → Markdown (опционально).
+# Если не задана секция, PDF-файлы пропускаются при индексации.
+# Использует LLM из indexing.vision (см. ниже).
+# ----------------------------------------------------------------------------
+pdf:
+  mode: vision                       # 'docling' | 'vision'
+  dpi: 144                           # разрешение рендеринга страниц (vision-режим)
+  page_max_tokens: 8192              # лимит токенов ответа LLM на страницу (vision-режим)
+  concurrency: 8                     # параллельных страниц на документ
+  temperature: 0.1                   # немного вариативности (0.0 может кэшироваться на серверах)
+  repetition_penalty: 1.2            # штраф за повторы (>1.0; для vLLM/MLX)
+  context_tail_lines: 0              # 0 = выключен; >0 = передать N последних строк предыдущей страницы
+  postprocessing:
+    strip_code_fences: true          # удалить orphan code fences из ответов Vision LLM
+    dedup:
+      enabled: true                  # программная дедупликация после генерации
+      threshold: 0.7
+      window: 5
+      min_phrase_len: 20
+  # docling:                         # настройки docling-serve (только для mode: docling)
+  #   base_url: http://localhost:5001
+  #   timeout: 300
+
+
+# ----------------------------------------------------------------------------
+# Indexing — defaults индексации. LLM/Embedder/Roles задаются через Console UI.
+# ----------------------------------------------------------------------------
+indexing:
+  # llm / vision / dense_embedder задаются через Console UI и пишутся
+  # в config.local.yml. По умолчанию здесь не определены — gate блокирует
+  # запуск индексации до их настройки.
+
+  # Anthropic «Contextual BM25»: chunk.context подмешивается в лексические
+  # векторы (keywords + bm25 + bm25_trigram). Context уже генерируется
+  # LLM (см. context.mode=llm) — дополнительных вызовов нет.
+  lexical_chunk_context: true
+
+  chunker:
+    mode: section                    # иерархическая упаковка по markdown-заголовкам
+    min_tokens: 128                  # без огрызков: маленькая секция приклеивается к соседу
+    max_tokens: 2048                 # влезает целая H2-глава; Qwen3-Embedding выдерживает
+    max_table_rows: 20               # row-based split больших таблиц с дублированием шапки. 0 = выкл
+    oversized:                       # стратегии для oversized блоков
+      table: split                   # по строкам с дублированием шапки
+      list: split                    # по элементам
+      paragraph: split               # по предложениям
+      fence: asis                    # код как есть
+      diagram: asis                  # диаграмма как есть
+      # варианты: asis | split | embed | transform | llm
+    # block_limit: 32000             # лимит токенов pre-split (в llm-режиме capped: (context_window-512)/2)
+    # halving_retries: 3             # деления блока пополам при таймауте LLM
+    # fallback: false                # семантический fallback при исчерпании попыток
+
+  context:
+    mode: llm                        # noop | llm
+    window_tokens: 8162              # окно текста вокруг чанка под крупные section-чанки
+    chunk_max_tokens: 3072           # бюджет text + context + path
+    max_tokens: 256                  # hard-cap на LLM-ответ (контекст до 256 токенов)
+
+  # Sparse-эмбеддер (GTE). Свой контейнер в docker-compose, отдельно настраивать не нужно.
+  sparse_embedder:
+    model: Alibaba-NLP/gte-multilingual-base
+    base_url: http://embedder-gte:8081               # Docker; для нативного запуска: закомментировать
+
+  embed_batch_size: 4                # Qwen3-4B через Ollama на больших батчах подвисает
+  concurrency: 8                     # документов параллельно
+  # lexical_doc_summary: false       # добавлять doc_summary в лексические векторы
+
+  # Название документа (опционально)
+  doc_title:
+    max_tokens: 64                   # для файлов (PDF, markdown); Confluence пропускается автоматически
+    scan_pages: 3                    # для PDF: первые N страниц
+
+  # Саммари документов (опционально)
+  doc_summary:
+    max_tokens: 512                  # лимит ответа; не задано — генерация отключена
+
+  # Doc-level эмбед (для section-level retrieval)
+  doc_vector:
+    max_tokens: 28672                # head-heavy truncation (Qwen3-Embedding ctx=32K, запас 3584)
+
+  # Knowledge Map (карта документации, ADR-0010)
+  knowledge_map:
+    enabled: true
+    depth: 2                         # уровней в системном промпте
+    prompt_strategy: weighted        # 'fixed' | 'weighted' | 'flat_topics'
+    prompt_budget: 8192              # для weighted: общий бюджет токенов
+    node_min_tokens: 256             # для weighted: минимальный бюджет на узел
+    # node_max_tokens: 256           # для fixed: лимит на узел
+    # depth1_section_ids: ["12345"]  # разделы с depth=1: только сам раздел, без потомков
+    # flat_topics_target: 20         # целевое число тем (для plain-структуры)
+    # flat_topics_assign_batch: 5
+    # flat_topics_max_input_docs: 3000
+
+  # schedule: '0 */6 * * *'          # cron для serve-режима. По умолчанию выключен —
+                                      # включается через Console UI (Setup → Schedule).

@@ -53,8 +53,10 @@ services:
       # config.local.yml — overlay редактируемый через console UI. Если файла нет на хосте,
       # перед `docker compose up` сделай `touch config.local.yml` (иначе docker создаст директорию).
       - ./config.local.yml:/app/config.local.yml:ro
-      # data: рw для записи state-file (./data/morag_state/index_status.json), чанки
-      # источников читаются из подкаталогов как обычно.
+      # data: рw для записи state-file (./data/morag_state/index_status.json) +
+      # папка с документами для local-source. ВСЕГДА примонтирована — local-source
+      # в Console UI зашит на /app/data без вариаций. Для других папок — править
+      # этот mount + path в config.local.yml вручную.
       - ./data:/app/data:rw
     restart: unless-stopped
 
@@ -77,6 +79,9 @@ services:
       # config.local.yml mount должен указывать на существующий файл (touch заранее).
       - ./config.yml:/data/config.yml:ro
       - ./config.local.yml:/data/config.local.yml:rw
+      # data ro — console читает /app/data чтобы показать список файлов
+      # для local-source (см. /api/setup/local-source-files).
+      - ./data:/app/data:ro
     depends_on:
       morag-indexer:
         condition: service_started

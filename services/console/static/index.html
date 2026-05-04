@@ -123,6 +123,7 @@
     section.view { display: none; }
     section.view.active { display: block; }
     .grid { display: grid; gap: 1rem; grid-template-columns: 1fr 1fr; }
+    .grid-3 { display: grid; gap: 1rem; grid-template-columns: 1fr 1fr 1fr; }
     .card {
       background: var(--card-bg);
       border: 1px solid var(--border);
@@ -311,7 +312,7 @@
       bottom: 0; left: 0; right: 0;
       height: 80px;
       pointer-events: none;
-      background: linear-gradient(to bottom, transparent, white);
+      background: linear-gradient(to bottom, transparent, var(--card-bg));
     }
     .md-full {
       max-height: 70vh;
@@ -368,33 +369,84 @@
           </div>
         </div>
 
+        <!-- ─── Окружение: ссылки + Qdrant + модели текущего конфига ─── -->
         <div class="card">
-          <h2>Ссылки</h2>
-          <a class="ext" :href="links?.qdrant" target="_blank" x-show="links?.qdrant">→ Панель Qdrant</a>
-          <a class="ext" :href="links?.open_webui" target="_blank" x-show="links?.open_webui">→ Open WebUI (local)</a>
+          <div style="display:flex; justify-content:space-between; align-items:baseline">
+            <h2 style="margin:0">Окружение</h2>
+            <button class="btn secondary" style="padding:0.2rem 0.6rem; font-size:0.8rem"
+                    @click="refreshChecklist()" :disabled="checklist?.loading">
+              <span x-show="!checklist?.loading">↻</span>
+              <span x-show="checklist?.loading">⏳</span>
+            </button>
+          </div>
+
+          <div x-show="!checklist || checklist.loading" class="empty" style="margin-top:0.5rem">Проверка…</div>
+
+          <div x-show="checklist && !checklist.loading && !checklist.config_ok" class="result error">
+            ✗ Конфигурация невалидна: <span x-text="checklist?.config_error"></span>
+          </div>
+
+          <!-- Ссылки на UI смежных сервисов (компактные, без плашек) -->
+          <div style="margin:0.5rem 0; font-size:0.88rem; line-height:1.7">
+            <template x-if="checklist?.qdrant">
+              <div style="display:flex; align-items:center; gap:0.5rem">
+                <a :href="links?.qdrant" target="_blank"
+                   style="color:var(--accent); text-decoration:none; flex:1">→ Панель Qdrant</a>
+                <span x-show="checklist.qdrant.reachable" style="color:var(--success)">✓</span>
+                <span x-show="!checklist.qdrant.reachable" style="color:var(--error)">✗</span>
+                <span class="empty" x-text="`${checklist.qdrant.host}:${checklist.qdrant.port}`"></span>
+              </div>
+            </template>
+            <div x-show="links?.open_webui">
+              <a :href="links?.open_webui" target="_blank"
+                 style="color:var(--accent); text-decoration:none">→ Open WebUI</a>
+            </div>
+          </div>
+
+          <template x-for="m in (checklist?.ollama || [])" :key="m.host + ':' + m.model + ':' + m.role">
+            <div style="margin:0.4rem 0; padding:0.5rem 0.7rem; background:var(--code-bg); border-radius:5px; font-size:0.85rem">
+              <b x-text="m.role"></b> · <code x-text="m.model"></code>
+              <template x-if="!m.host_reachable">
+                <span style="color:var(--error)"> ✗ Ollama недоступна</span>
+              </template>
+              <template x-if="m.host_reachable && m.installed">
+                <span style="color:var(--success)"> ✓ установлена</span>
+              </template>
+              <template x-if="m.host_reachable && !m.installed">
+                <div style="margin-top:0.3rem">
+                  <span style="color:var(--error)">✗ не установлена</span>
+                  — <code style="cursor:pointer; user-select:all" x-text="m.pull_cmd"
+                        @click="copyCmd(m.pull_cmd)" title="Скопировать"></code>
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <div x-show="checklist && checklist.config_ok && !(checklist.ollama || []).length" class="empty"
+               style="margin-top:0.4rem">Модели ещё не настроены — перейдите в раздел Настройка.</div>
 
           <details style="margin-top:0.85rem">
-            <summary style="cursor:pointer; color:var(--accent); font-size:0.88rem">
+            <summary style="cursor:pointer; color:var(--accent); font-size:0.85rem">
               Подключить внешний OWUI
             </summary>
             <div class="help" style="margin:0.6rem 0 0.5rem 0">
               Параметры для подключения внешнего Open WebUI к pipeline.
               В OWUI: <i>Settings → Connections → OpenAI API → Add</i>.
             </div>
-            <div style="display:grid; grid-template-columns:auto 1fr auto; gap:0.4rem 0.6rem; align-items:center; font-size:0.85rem">
+            <div style="display:grid; grid-template-columns:auto 1fr auto; gap:0.35rem 0.5rem; align-items:center; font-size:0.82rem">
               <span class="empty">URL</span>
               <code style="user-select:all" x-text="links?.external_owui?.base_url"></code>
-              <button class="btn secondary" style="padding:0.15rem 0.5rem; font-size:0.75rem"
+              <button class="btn secondary" style="padding:0.1rem 0.45rem; font-size:0.72rem"
                       @click="copyCmd(links?.external_owui?.base_url)">копировать</button>
 
               <span class="empty">Модель</span>
               <code style="user-select:all" x-text="links?.external_owui?.model"></code>
-              <button class="btn secondary" style="padding:0.15rem 0.5rem; font-size:0.75rem"
+              <button class="btn secondary" style="padding:0.1rem 0.45rem; font-size:0.72rem"
                       @click="copyCmd(links?.external_owui?.model)">копировать</button>
 
               <span class="empty">API-ключ</span>
               <code style="user-select:all" x-text="links?.external_owui?.api_key"></code>
-              <button class="btn secondary" style="padding:0.15rem 0.5rem; font-size:0.75rem"
+              <button class="btn secondary" style="padding:0.1rem 0.45rem; font-size:0.72rem"
                       @click="copyCmd(links?.external_owui?.api_key)">копировать</button>
             </div>
             <div class="help" style="margin-top:0.5rem">
@@ -423,6 +475,7 @@
           <ol style="margin:0 0 0.85rem 1.2rem; padding:0; font-size:0.92rem; line-height:1.7">
             <li><b>Источники</b> — откуда брать документы (локальная папка, Confluence, Jira)</li>
             <li><b>LLM</b> — какие модели использовать (Ollama / Grok / OpenRouter / свой сервер)</li>
+            <li><b>Embedder</b> — модель для векторного поиска (Ollama qwen3-embedding или OpenAI)</li>
             <li><b>Роли</b> — какая LLM на текстовые задачи, какая на vision (PDF, изображения)</li>
             <li><b>Расписание</b> <span class="empty">(необязательно)</span> — автоматическая переиндексация по cron</li>
           </ol>
@@ -444,6 +497,10 @@
                  style="margin-top:0.7rem; padding:0.6rem 0.8rem; background:var(--warn-banner-bg); color:var(--warn-banner-fg); border-radius:5px; font-size:0.85rem; line-height:1.45">
               <span style="margin-right:0.5rem">⚠</span><span x-text="runStartError"></span>
             </div>
+            <!-- Success запуска — рядом с кнопкой -->
+            <div x-show="runStartSuccess"
+                 :class="'result success'" style="margin-top:0.7rem"
+                 x-text="runStartSuccess"></div>
             <!-- Last run summary (только для реальных run-результатов) -->
             <template x-if="status?.progress && !['idle', 'unreachable'].includes(status.progress.state)">
               <div style="margin-top:1rem; padding:0.75rem 0.9rem; background:var(--code-bg); border-radius:6px">
@@ -543,54 +600,54 @@
     <!-- ============ SETUP WIZARD ============ -->
     <section class="view" :class="{active: tab==='setup'}">
 
-      <!-- ─── 0. Environment checklist ─── -->
-      <div class="card" style="margin-bottom:1rem">
-        <div style="display:flex; justify-content:space-between; align-items:baseline">
-          <h2 style="margin:0">0. Окружение</h2>
-          <button class="btn secondary" style="padding:0.2rem 0.6rem; font-size:0.8rem"
-                  @click="refreshChecklist()" :disabled="checklist?.loading">
-            <span x-show="!checklist?.loading">Проверить заново</span>
-            <span x-show="checklist?.loading">⏳</span>
-          </button>
-        </div>
-        <div class="help" style="margin:0.4rem 0 0.85rem 0">
-          Что требуется для индексации согласно текущей конфигурации. Команды копируются по клику.
-        </div>
+      <!-- ─── Quickstart: мастер настройки рекомендуемого Ollama-стека.
+           Показывается пока LLM/embedder ещё не настроены ИЛИ был только что
+           применён (тогда показывается отчёт что было сделано). ─── -->
+      <div class="card" style="margin-bottom:1rem"
+           x-show="(!(config?.llms || []).length || !config?.indexing?.dense_embedder)
+                   || quickstart?.justApplied">
+        <h2>⚡ Быстрая настройка для Ollama</h2>
 
-        <div x-show="!checklist || checklist.loading" class="empty">Проверка…</div>
-
-        <div x-show="checklist && !checklist.loading && !checklist.config_ok" class="result error">
-          ✗ Конфигурация невалидна: <span x-text="checklist?.config_error"></span>
-        </div>
-
-        <template x-if="checklist?.qdrant">
-          <div style="margin:0.4rem 0; padding:0.5rem 0.7rem; background:var(--code-bg); border-radius:5px; font-size:0.88rem">
-            <b>Qdrant</b>
-            <span x-show="checklist.qdrant.reachable" style="color:var(--success)">✓ доступен</span>
-            <span x-show="!checklist.qdrant.reachable" style="color:var(--error)">✗ недоступен</span>
-            <span class="empty" x-text="`(${checklist.qdrant.host}:${checklist.qdrant.port})`"
-                  style="margin-left:0.5rem"></span>
-            <div x-show="!checklist.qdrant.reachable" class="empty"
-                 x-text="checklist.qdrant.error" style="margin-top:0.3rem"></div>
-            <div x-show="checklist.qdrant.reachable && checklist.qdrant.collections.length"
-                 class="empty" style="margin-top:0.3rem">
-              коллекции: <span x-text="checklist.qdrant.collections.join(', ')"></span>
-            </div>
+        <!-- Pre-apply: рекомендация + кнопка -->
+        <div x-show="!quickstart?.justApplied">
+          <div class="help" style="margin:0.4rem 0 0.85rem 0">
+            Рекомендуется для локального запуска: одна multimodal LLM
+            (<code>qwen3.5:9b</code>, для текста и vision) и dense embedder
+            (<code>qwen3-embedding:4b</code>, dim 2560) через локальный Ollama-сервер.
           </div>
-        </template>
+        </div>
 
-        <template x-for="m in (checklist?.ollama || [])" :key="m.host + ':' + m.model + ':' + m.role">
-          <div style="margin:0.4rem 0; padding:0.5rem 0.7rem; background:var(--code-bg); border-radius:5px; font-size:0.88rem">
-            <b x-text="m.role"></b> ·
-            <code x-text="m.model"></code>
-            <template x-if="!m.host_reachable">
-              <span style="color:var(--error)">✗ Ollama недоступна (<span x-text="m.host"></span>)</span>
+        <!-- Post-apply: отчёт что добавлено + след шаги -->
+        <div x-show="quickstart?.justApplied">
+          <div class="help" style="margin:0.4rem 0 0.85rem 0; color:var(--success); font-weight:500">
+            ✓ Конфигурация применена. Дальше — добавьте источники.
+          </div>
+          <ul style="margin:0 0 1rem 1.2rem; padding:0; font-size:0.88rem; line-height:1.7">
+            <li><b>LLM</b> <code>main</code> · qwen3.5:9b · context 32K · capabilities text+vision</li>
+            <li><b>Embedder</b> · qwen3-embedding:4b · dim 2560</li>
+            <li><b>Роли</b> · <code>indexing.llm = main</code> · <code>indexing.vision = main</code></li>
+          </ul>
+          <div class="help" style="margin-bottom:0.85rem"
+               x-show="!(config?.sources || []).length">
+            Следующий шаг: добавьте <b>источник</b> в секции «1. Источники» ниже —
+            например, локальную папку с документами.
+          </div>
+          <div class="actions">
+            <button class="btn secondary" @click="quickstart.justApplied = false">Закрыть</button>
+          </div>
+        </div>
+
+        <template x-for="m in (quickstart && !quickstart.justApplied ? quickstart.models || [] : [])" :key="m.role">
+          <div style="margin:0.4rem 0; padding:0.5rem 0.7rem; background:var(--code-bg); border-radius:5px; font-size:0.85rem">
+            <b x-text="m.role"></b> · <code x-text="m.model"></code>
+            <template x-if="!quickstart?.ollama_available">
+              <span style="color:var(--error)"> ✗ Ollama недоступна</span>
             </template>
-            <template x-if="m.host_reachable && m.installed">
-              <span style="color:var(--success)">✓ установлена</span>
+            <template x-if="quickstart?.ollama_available && m.installed">
+              <span style="color:var(--success)"> ✓ установлена</span>
             </template>
-            <template x-if="m.host_reachable && !m.installed">
-              <div style="margin-top:0.4rem">
+            <template x-if="quickstart?.ollama_available && !m.installed">
+              <div style="margin-top:0.3rem">
                 <span style="color:var(--error)">✗ не установлена</span>
                 — выполните на хосте:
                 <code style="cursor:pointer; user-select:all" x-text="m.pull_cmd"
@@ -599,6 +656,27 @@
             </template>
           </div>
         </template>
+
+        <div x-show="!quickstart?.ollama_available && quickstart?.ollama_error && !quickstart?.justApplied"
+             class="help" style="margin-top:0.5rem; color:var(--warn)"
+             x-text="`Ollama недоступна (${quickstart.ollama_base_url}): ${quickstart.ollama_error}. Запустите: ollama serve`"></div>
+
+        <div class="actions" style="margin-top:1rem" x-show="!quickstart?.justApplied">
+          <button class="btn"
+                  :disabled="!quickstart || quickstart.applying || quickstart.can_apply === false"
+                  :title="quickstartButtonHint()"
+                  @click="quickstartApply()">
+            <span x-show="!quickstart">⏳ проверка…</span>
+            <span x-show="quickstart && !quickstart.applying">Добавить рекомендуемые</span>
+            <span x-show="quickstart?.applying">⏳ применяется…</span>
+          </button>
+          <span class="empty" x-show="quickstart && quickstart.can_apply === false"
+                style="font-size:0.82rem; align-self:center"
+                x-text="quickstartButtonHint()"></span>
+        </div>
+        <div x-show="quickstart?.result"
+             :class="'result ' + (quickstart?.resultKind || '')"
+             x-text="quickstart?.result"></div>
       </div>
 
       <!-- ─── 1. Sources (read-only list + add wizard) ─── -->
@@ -608,17 +686,24 @@
           Источников ещё нет. Добавьте хотя бы один — например, локальную папку.
         </div>
         <template x-for="src in (config?.sources || [])" :key="src.kind + ':' + src.name">
-          <div style="margin:0.5rem 0; padding:0.5rem 0.7rem; background:var(--code-bg); border-radius:5px; font-size:0.88rem">
-            <b x-text="src.kind"></b> · <b x-text="src.name"></b>
-            <span class="empty" x-text="srcBrief(src)" style="margin-left:0.5rem"></span>
+          <div style="margin:0.5rem 0; padding:0.5rem 0.7rem; background:var(--code-bg); border-radius:5px; font-size:0.88rem; display:flex; align-items:center; gap:0.5rem">
+            <div style="flex:1">
+              <b x-text="src.kind"></b> · <b x-text="src.name"></b>
+              <span class="empty" x-text="srcBrief(src)" style="margin-left:0.5rem"></span>
+            </div>
+            <button class="btn secondary" style="padding:0.15rem 0.5rem; font-size:0.78rem"
+                    @click="editItem('source', src)">Изменить</button>
+            <button class="btn danger" style="padding:0.15rem 0.5rem; font-size:0.78rem"
+                    @click="deleteItem('source', src)">×</button>
           </div>
         </template>
 
-        <details style="margin-top:1rem">
-          <summary style="cursor:pointer; color:var(--accent)">+ Добавить источник</summary>
+        <details style="margin-top:1rem" :open="!!setup.source.editingName">
+          <summary style="cursor:pointer; color:var(--accent)"
+                   x-text="setup.source.editingName ? `Редактирование: ${setup.source.editingName}` : '+ Добавить источник'"></summary>
           <div style="margin-top:0.85rem; padding-top:0.5rem; border-top:1px solid var(--border)">
             <label>Провайдер</label>
-            <select x-model="setup.source.preset_id" @change="setup.source.form = {}">
+            <select x-model="setup.source.preset_id">
               <template x-for="p in (presets?.source || [])" :key="p.id">
                 <option :value="p.id" x-text="p.name"></option>
               </template>
@@ -630,9 +715,12 @@
                   <div>
                     <label x-text="field.label + (field.required ? ' *' : '')"></label>
                     <input :type="field.kind === 'password' ? 'password' : (field.kind === 'number' ? 'number' : 'text')"
-                           :placeholder="field.placeholder || (field.default != null ? String(field.default) : '')"
-                           :value="setup.source.form[field.name] ?? ''"
+                           :placeholder="field.placeholder || (field.kind === 'password' && setup.source.editingName ? 'оставьте пустым чтобы сохранить текущий' : '')"
+                           :disabled="field.name === 'name' && !!setup.source.editingName"
+                           :value="setup.source.form[field.name] ?? (field.default ?? '')"
                            @input="setup.source.form[field.name] = $event.target.value">
+                    <div class="help" x-show="field.name === 'name' && setup.source.editingName"
+                         style="color:var(--muted)">При редактировании имя менять нельзя — сначала удалите и создайте заново.</div>
                     <div class="help" x-show="field.help" x-text="field.help"></div>
                   </div>
                 </template>
@@ -650,7 +738,10 @@
               </div>
             </template>
             <div class="actions" style="margin-top:1rem">
-              <button class="btn" :disabled="setup.source.busy" @click="addItem('source')">Добавить</button>
+              <button class="btn" :disabled="setup.source.busy" @click="addItem('source')"
+                      x-text="setup.source.editingName ? 'Сохранить' : 'Добавить'"></button>
+              <button x-show="setup.source.editingName" class="btn secondary"
+                      @click="cancelEdit('source')">Отмена</button>
               <span x-show="setup.source.busy" class="busy-spinner">⏳</span>
             </div>
             <div x-show="setup.source.result" :class="'result ' + (setup.source.resultKind || '')"
@@ -667,18 +758,32 @@
         </div>
         <template x-for="llm in (config?.llms || [])" :key="llm.name">
           <div style="margin:0.5rem 0; padding:0.5rem 0.7rem; background:var(--code-bg); border-radius:5px; font-size:0.88rem">
-            <b x-text="llm.name"></b> · <span x-text="llm.model"></span>
-            <span x-text="capabilityBadges(llm)" style="margin-left:0.5rem"></span>
-            <button class="btn secondary" style="float:right; padding:0.2rem 0.5rem; font-size:0.78rem"
-                    @click="testLLM(llm.name)">Проверить</button>
+            <div style="display:flex; align-items:center; gap:0.5rem">
+              <div style="flex:1">
+                <b x-text="llm.name"></b> · <span x-text="llm.model"></span>
+                <span x-text="capabilityBadges(llm)" style="margin-left:0.5rem"></span>
+              </div>
+              <button class="btn secondary" style="padding:0.15rem 0.5rem; font-size:0.78rem"
+                      @click="testLLM(llm.name)">Проверить</button>
+              <button class="btn secondary" style="padding:0.15rem 0.5rem; font-size:0.78rem"
+                      @click="editItem('llm', llm)">Изменить</button>
+              <button class="btn danger" style="padding:0.15rem 0.5rem; font-size:0.78rem"
+                      @click="deleteItem('llm', llm)">×</button>
+            </div>
+            <div x-show="llmTestResults[llm.name]"
+                 :class="'result ' + (llmTestResults[llm.name]?.kind || '')"
+                 style="margin-top:0.4rem; padding:0.35rem 0.5rem; font-size:0.82rem"
+                 x-text="llmTestResults[llm.name]?.msg"></div>
           </div>
         </template>
 
-        <details style="margin-top:1rem">
-          <summary style="cursor:pointer; color:var(--accent)">+ Добавить LLM</summary>
+        <details style="margin-top:1rem" :open="!!setup.llm.editingName">
+          <summary style="cursor:pointer; color:var(--accent)"
+                   x-text="setup.llm.editingName ? `Редактирование: ${setup.llm.editingName}` : '+ Добавить LLM'"></summary>
           <div style="margin-top:0.85rem; padding-top:0.5rem; border-top:1px solid var(--border)">
             <label>Провайдер</label>
-            <select x-model="setup.llm.preset_id" @change="setup.llm.form = {}">
+            <select x-model="setup.llm.preset_id"
+                    @change="loadOllamaModels('llm')">
               <template x-for="p in (presets?.llm || [])" :key="p.id">
                 <option :value="p.id" x-text="p.name"></option>
               </template>
@@ -686,13 +791,39 @@
             <div class="help" x-text="setup.llm.preset_id ? presetDesc('llm', setup.llm.preset_id) : ''"></div>
             <template x-for="field in selectedFields('llm')" :key="field.name">
               <div>
-                <template x-if="field.kind !== 'checkbox'">
+                <!-- Spec case: model для Ollama → dropdown с installed-моделями -->
+                <template x-if="field.name === 'model' && setup.llm.preset_id === 'ollama'">
+                  <div>
+                    <label x-text="field.label + (field.required ? ' *' : '')"></label>
+                    <select x-model="setup.llm.form.model">
+                      <option value="">— выберите модель —</option>
+                      <!-- Текущее значение всегда добавляется как option, даже если
+                           Ollama-список ещё не загружен или модель удалена из Ollama -->
+                      <template x-if="setup.llm.form.model && !setup.llm.ollamaModels.models.includes(setup.llm.form.model)">
+                        <option :value="setup.llm.form.model"
+                                x-text="setup.llm.form.model"></option>
+                      </template>
+                      <template x-for="m in setup.llm.ollamaModels.models" :key="m">
+                        <option :value="m" x-text="m"></option>
+                      </template>
+                    </select>
+                    <div class="help" x-show="setup.llm.ollamaModels.error" style="color:var(--warn)"
+                         x-text="`Не удалось получить список моделей: ${setup.llm.ollamaModels.error}`"></div>
+                    <div class="help" x-show="!setup.llm.ollamaModels.error && !setup.llm.ollamaModels.models.length"
+                         style="color:var(--muted)">Список моделей пуст. Установите хотя бы одну: <code>ollama pull qwen3.5:9b</code></div>
+                  </div>
+                </template>
+                <template x-if="field.kind !== 'checkbox' && !(field.name === 'model' && setup.llm.preset_id === 'ollama')">
                   <div>
                     <label x-text="field.label + (field.required ? ' *' : '')"></label>
                     <input :type="field.kind === 'password' ? 'password' : (field.kind === 'number' ? 'number' : 'text')"
-                           :placeholder="field.placeholder || (field.default != null ? String(field.default) : '')"
-                           :value="setup.llm.form[field.name] ?? ''"
-                           @input="setup.llm.form[field.name] = $event.target.value">
+                           :placeholder="field.placeholder || (field.kind === 'password' && setup.llm.editingName ? 'оставьте пустым чтобы сохранить текущий' : '')"
+                           :disabled="field.name === 'name' && !!setup.llm.editingName"
+                           :value="setup.llm.form[field.name] ?? (field.default ?? '')"
+                           @input="setup.llm.form[field.name] = $event.target.value;
+                                   if (field.name === 'base_url') loadOllamaModels('llm')">
+                    <div class="help" x-show="field.name === 'name' && setup.llm.editingName"
+                         style="color:var(--muted)">При редактировании имя менять нельзя — сначала удалите и создайте заново.</div>
                     <div class="help" x-show="field.help" x-text="field.help"></div>
                   </div>
                 </template>
@@ -710,18 +841,131 @@
               </div>
             </template>
             <div class="actions" style="margin-top:1rem">
-              <button class="btn" :disabled="setup.llm.busy" @click="addItem('llm')">Добавить</button>
-              <span x-show="setup.llm.busy" class="busy-spinner">⏳</span>
+              <button class="btn" :disabled="setup.llm.busy" @click="addItem('llm')"
+                      x-text="setup.llm.editingName ? 'Сохранить' : 'Добавить'"></button>
+              <button class="btn secondary" :disabled="setup.llm.testing"
+                      @click="testForm('llm')">Проверить</button>
+              <button x-show="setup.llm.editingName" class="btn secondary"
+                      @click="cancelEdit('llm')">Отмена</button>
+              <span x-show="setup.llm.busy || setup.llm.testing" class="busy-spinner">⏳</span>
             </div>
+            <div x-show="setup.llm.testResult"
+                 :class="'result ' + (setup.llm.testResultKind || '')"
+                 x-text="setup.llm.testResult"></div>
             <div x-show="setup.llm.result" :class="'result ' + (setup.llm.resultKind || '')"
                  x-text="setup.llm.result"></div>
           </div>
         </details>
       </div>
 
-      <!-- ─── 3. Roles (assign LLMs from pool) ─── -->
+      <!-- ─── 3. Embedder (single, replace, не пул) ─── -->
       <div class="card" style="margin-bottom:1rem">
-        <h2>3. Роли</h2>
+        <h2>3. Embedder</h2>
+        <div class="help" style="margin-bottom:0.85rem">
+          Один dense-эмбеддер для индексации и поиска. Стандарт morag — qwen3-embedding:4b
+          (Ollama, 2560 dim). При смене модели — потребуется полная переиндексация.
+        </div>
+
+        <template x-if="config?.indexing?.dense_embedder">
+          <div style="margin:0.5rem 0; padding:0.5rem 0.7rem; background:var(--code-bg); border-radius:5px; font-size:0.88rem">
+            <div style="display:flex; align-items:center; gap:0.5rem">
+              <div style="flex:1">
+                <b x-text="config.indexing.dense_embedder.model"></b>
+                <span class="empty" style="margin-left:0.5rem"
+                      x-text="`dim=${config.indexing.dense_embedder.dim || '?'}`"></span>
+              </div>
+              <button class="btn secondary" style="padding:0.15rem 0.5rem; font-size:0.78rem"
+                      @click="testEmbedder()">Проверить</button>
+              <button class="btn secondary" style="padding:0.15rem 0.5rem; font-size:0.78rem"
+                      @click="editEmbedder()">Изменить</button>
+            </div>
+            <div x-show="embedderTestResult"
+                 :class="'result ' + (embedderTestResultKind || '')"
+                 style="margin-top:0.4rem; padding:0.35rem 0.5rem; font-size:0.82rem"
+                 x-text="embedderTestResult"></div>
+          </div>
+        </template>
+
+        <div x-show="setup.embedder.editing || !config?.indexing?.dense_embedder"
+             style="margin-top:1rem; padding-top:0.5rem; border-top:1px solid var(--border)">
+          <div>
+            <label>Провайдер</label>
+            <select x-model="setup.embedder.preset_id"
+                    @change="loadOllamaModels('embedder')">
+              <template x-for="p in (presets?.embedder || [])" :key="p.id">
+                <option :value="p.id" x-text="p.name"></option>
+              </template>
+            </select>
+            <div class="help" x-text="setup.embedder.preset_id ? presetDesc('embedder', setup.embedder.preset_id) : ''"></div>
+            <template x-for="field in selectedFields('embedder')" :key="field.name">
+              <div>
+                <template x-if="field.name === 'model' && setup.embedder.preset_id === 'ollama'">
+                  <div>
+                    <label x-text="field.label + (field.required ? ' *' : '')"></label>
+                    <select x-model="setup.embedder.form.model">
+                      <option value="">— выберите модель —</option>
+                      <template x-if="setup.embedder.form.model && !setup.embedder.ollamaModels.models.includes(setup.embedder.form.model)">
+                        <option :value="setup.embedder.form.model"
+                                x-text="setup.embedder.form.model"></option>
+                      </template>
+                      <template x-for="m in setup.embedder.ollamaModels.models" :key="m">
+                        <option :value="m" x-text="m"></option>
+                      </template>
+                    </select>
+                    <div class="help" x-show="setup.embedder.ollamaModels.error" style="color:var(--warn)"
+                         x-text="`Не удалось получить список моделей: ${setup.embedder.ollamaModels.error}`"></div>
+                  </div>
+                </template>
+                <template x-if="field.kind !== 'checkbox' && !(field.name === 'model' && setup.embedder.preset_id === 'ollama')">
+                  <div>
+                    <label x-text="field.label + (field.required ? ' *' : '')"></label>
+                    <div x-show="field.name === 'dim'"
+                         style="display:flex; gap:0.4rem; align-items:stretch">
+                      <input type="number"
+                             :placeholder="field.placeholder || ''"
+                             :value="setup.embedder.form[field.name] ?? (field.default ?? '')"
+                             @input="setup.embedder.form[field.name] = $event.target.value"
+                             style="flex:1; width:auto; min-width:0">
+                      <button class="btn secondary"
+                              :disabled="setup.embedder.dimProbing || !setup.embedder.form.model"
+                              @click="probeEmbedderDim()"
+                              style="white-space:nowrap; padding:0.5rem 0.85rem; font-size:0.85rem; flex-shrink:0"
+                              x-text="setup.embedder.dimProbing ? '⏳ ...' : 'Выяснить'"></button>
+                    </div>
+                    <input x-show="field.name !== 'dim'"
+                           :type="field.kind === 'password' ? 'password' : (field.kind === 'number' ? 'number' : 'text')"
+                           :placeholder="field.placeholder || (field.kind === 'password' && config?.indexing?.dense_embedder?.api_key ? 'оставьте пустым чтобы сохранить текущий' : '')"
+                           :value="setup.embedder.form[field.name] ?? (field.default ?? '')"
+                           @input="setup.embedder.form[field.name] = $event.target.value;
+                                   if (field.name === 'base_url') loadOllamaModels('embedder')">
+                    <div class="help" x-show="field.name === 'dim' && setup.embedder.dimProbeError"
+                         style="color:var(--warn)"
+                         x-text="`Не удалось узнать: ${setup.embedder.dimProbeError}`"></div>
+                    <div class="help" x-show="field.help" x-text="field.help"></div>
+                  </div>
+                </template>
+              </div>
+            </template>
+            <div class="actions" style="margin-top:1rem">
+              <button class="btn" :disabled="setup.embedder.busy" @click="saveEmbedder()">Сохранить</button>
+              <button class="btn secondary" :disabled="setup.embedder.testing"
+                      @click="testForm('embedder')">Проверить</button>
+              <button x-show="config?.indexing?.dense_embedder" class="btn secondary"
+                      @click="cancelEditEmbedder()">Отмена</button>
+              <span x-show="setup.embedder.busy || setup.embedder.testing" class="busy-spinner">⏳</span>
+            </div>
+            <div x-show="setup.embedder.testResult"
+                 :class="'result ' + (setup.embedder.testResultKind || '')"
+                 x-text="setup.embedder.testResult"></div>
+            <div x-show="setup.embedder.result" :class="'result ' + (setup.embedder.resultKind || '')"
+                 x-text="setup.embedder.result"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ─── 4. Roles (assign LLMs from pool) ─── -->
+      <div class="card" style="margin-bottom:1rem">
+        <h2>4. Роли</h2>
         <div class="help" style="margin-bottom:0.85rem">
           Какая LLM из пула используется для каких задач индексации. Список vision-моделей фильтруется по capability.
         </div>
@@ -753,9 +997,9 @@
              x-text="setup.roles.result"></div>
       </div>
 
-      <!-- ─── 4. Schedule (cron, default OFF) ─── -->
+      <!-- ─── 5. Schedule (cron, default OFF) ─── -->
       <div class="card" style="margin-bottom:1rem">
-        <h2>4. Расписание</h2>
+        <h2>5. Расписание</h2>
         <div class="help" style="margin-bottom:0.85rem">
           Автоматическая индексация по cron. По умолчанию <b>выключена</b> —
           включается осознанно. Запись в <code>config.local.yml</code>, применяется без перезапуска контейнера.
@@ -825,11 +1069,29 @@
         presets: null,
         checklist: null,    // {config_ok, qdrant, ollama:[], loading?}
         gate: null,         // {ok, blockers:[]}
+        llmTestResults: {}, // { [llmName]: { msg, kind } } — для inline-результата кнопки Проверить
+        quickstart: null,   // { ollama_available, models:[], can_apply, applying, refreshing, result, resultKind }
+        embedderTestResult: '', embedderTestResultKind: '',  // для inline-результата кнопки Проверить у embedder
 
         setup: {
-          // ADR-0012: Sources, LLMs, Roles — три секции wizard'а; + Schedule (cron)
-          source: { preset_id: 'local', form: {}, result: '', resultKind: '', busy: false },
-          llm: { preset_id: 'openai-compatible', form: {}, result: '', resultKind: '', busy: false },
+          // ADR-0012: Sources, LLMs, Embedder, Roles — секции wizard'а; + Schedule (cron)
+          source: {
+            preset_id: 'local', form: {}, result: '', resultKind: '', busy: false,
+            editingName: '',                      // для edit-режима: оригинальное имя (заблокировано)
+          },
+          llm: {
+            preset_id: 'openai-compatible', form: {}, result: '', resultKind: '', busy: false,
+            editingName: '',
+            ollamaModels: { models: [], error: '' },   // autoload-список для dropdown
+            testResult: '', testResultKind: '', testing: false,
+          },
+          embedder: {
+            preset_id: 'ollama', form: {}, result: '', resultKind: '', busy: false,
+            editing: false,                     // открыта ли форма редактирования
+            ollamaModels: { models: [], error: '' },
+            testResult: '', testResultKind: '', testing: false,
+            dimProbing: false, dimProbeError: '',
+          },
           roles: { llm: '', vision: '', result: '', resultKind: '', busy: false },
           schedule: { enabled: false, cron: '0 */6 * * *', result: '', resultKind: '', busy: false },
         },
@@ -847,7 +1109,8 @@
         // завершения текущего документа.
         stopState: '',          // '' | 'graceful' | 'killing'
         stopMessage: '',
-        runStartError: '',      // ошибка из startIndex — показывается в карточке Indexing, не toast'ом
+        runStartError: '',           // ошибка из startIndex — в карточке Indexing
+        runStartSuccess: '',         // success-сообщение запуска — в той же карточке
         stopResultKind: '',
 
         // Knowledge Map viewer (read-only, expandable)
@@ -877,7 +1140,45 @@
             this.refreshChecklist(),
             this.refreshGate(),
             this.refreshSchedule(),
+            this.refreshQuickstart(),
           ]);
+        },
+
+        async refreshQuickstart() {
+          this.quickstart = { ...(this.quickstart || {}), refreshing: true };
+          try {
+            const data = await this.fetchJson('/api/setup/quickstart-status');
+            this.quickstart = { ...data, refreshing: false };
+          } catch (e) {
+            this.quickstart = { ollama_available: false, ollama_error: e.message,
+                                models: [], can_apply: false, refreshing: false };
+          }
+        },
+
+        quickstartButtonHint() {
+          if (!this.quickstart) return 'Проверка доступности Ollama…';
+          if (!this.quickstart.ollama_available) return 'Ollama недоступна — запустите ollama serve';
+          const missing = (this.quickstart.models || []).filter(m => !m.installed);
+          if (missing.length) {
+            return 'Сначала установите модели: ' + missing.map(m => m.model).join(', ');
+          }
+          return '';
+        },
+
+        async quickstartApply() {
+          this.quickstart = { ...(this.quickstart || {}), applying: true, result: '' };
+          try {
+            await this.fetchJson('/api/setup/quickstart-apply', {method: 'POST'});
+            // justApplied → карточка превращается в отчёт о выполненном
+            // (юзер сам закрывает кнопкой «Закрыть»).
+            this.quickstart.justApplied = true;
+            await Promise.all([this.refreshConfig(), this.refreshGate(), this.refreshChecklist()]);
+          } catch (e) {
+            this.quickstart.result = '✗ ' + e.message;
+            this.quickstart.resultKind = 'error';
+          } finally {
+            this.quickstart.applying = false;
+          }
         },
 
         async refreshGate() {
@@ -1024,13 +1325,14 @@
 
         async startIndex(reset) {
           this.runStartError = '';
+          this.runStartSuccess = '';
           try {
             await this.fetchJson('/api/index/start', {
               method: 'POST',
               headers: {'content-type': 'application/json'},
               body: JSON.stringify({reset}),
             });
-            this.showToast(reset ? 'Запущено со сбросом' : 'Индексация запущена', 'success');
+            this.runStartSuccess = reset ? '✓ Запущено со сбросом' : '✓ Индексация запущена';
             await this.refreshStatus();
           } catch (e) {
             // 412 — setup incomplete; обновим gate чтобы баннер появился
@@ -1081,15 +1383,19 @@
         },
 
         async rebuildKM() {
+          this.runStartError = '';
+          this.runStartSuccess = '';
           try {
             await this.fetchJson('/api/knowledge-map/rebuild', {method: 'POST'});
-            this.showToast('Пересборка карты знаний запущена', 'success');
+            this.runStartSuccess = '✓ Пересборка карты знаний запущена';
             await this.refreshStatus();
-          } catch (e) { this.showToast('Пересборка: ' + e.message, 'error'); }
+          } catch (e) {
+            this.runStartError = 'Пересборка: ' + e.message;
+          }
         },
 
         async addItem(target) {
-          // target: 'source' | 'llm' — добавить новый item в pool/list
+          // target: 'source' | 'llm' | 'embedder' — submit формы (add или edit)
           this._setSetupResult(target, '', '');
           this.setup[target].busy = true;
           try {
@@ -1102,13 +1408,15 @@
                 form: this.setup[target].form,
               }),
             });
-            const labelMap = { source: 'источник', llm: 'LLM' };
+            const wasEdit = !!this.setup[target].editingName;
+            const labelMap = { source: 'источник', llm: 'LLM', embedder: 'embedder' };
+            const action = wasEdit ? 'Сохранено' : 'Добавлено';
+            const sizeNote = r.list_size != null ? `, всего: ${r.list_size}` : '';
             this._setSetupResult(
-              target,
-              `✓ Добавлено (${labelMap[target] || target}, всего: ${r.list_size})`,
-              'success',
+              target, `✓ ${action} (${labelMap[target] || target}${sizeNote})`, 'success',
             );
-            this.setup[target].form = {};  // reset
+            this.setup[target].form = {};
+            this.setup[target].editingName = '';
             await Promise.all([this.refreshConfig(), this.refreshGate()]);
           } catch (e) {
             this._setSetupResult(target, '✗ ' + e.message, 'error');
@@ -1117,21 +1425,222 @@
           }
         },
 
+        async editItem(target, item) {
+          // Открыть форму с заполненными значениями. Name заблокирован.
+          const preset = this._guessPresetForItem(target, item);
+          if (!preset) {
+            this.showToast('Не нашёл подходящий preset для редактирования', 'error');
+            return;
+          }
+          this.setup[target].preset_id = preset.id;
+          // Для Ollama: ДОЖДАТЬСЯ загрузки моделей ДО установки form, чтобы
+          // <select x-model="form.model"> увидел соответствующий <option>
+          // и правильно отобразил текущее значение (не пустое).
+          if ((target === 'llm' || target === 'embedder') && preset.id === 'ollama') {
+            await this.loadOllamaModels(target);
+          }
+          // Form pre-fill: копируем те поля item, которые есть в preset.fields.
+          // ВАЖНО: secret-поля (kind=password) НЕ копируем — в API они приходят
+          // замаскированными как '***'. Юзер либо вводит новый секрет, либо
+          // оставляет пустым (бэкенд при пустом значении сохранит существующий).
+          const form = {};
+          for (const f of preset.fields) {
+            if (f.kind === 'password') continue;
+            if (item[f.name] !== undefined) form[f.name] = item[f.name];
+          }
+          // Special mappings: некоторые поля формы вычисляются из вложенных полей item.
+          if (Array.isArray(item.spaces)) form.spaces = item.spaces.join(', ');
+          if (Array.isArray(item.ancestor_ids)) form.ancestor_ids = item.ancestor_ids.join(', ');
+          if (item.attachments?.enabled) form.attachments_enabled = true;
+          if (Array.isArray(item.capabilities) && item.capabilities.includes('vision')) {
+            form.vision_capable = true;
+          }
+          this.setup[target].form = form;
+          this.setup[target].editingName = item.name;
+          this._setSetupResult(target, '', '');
+        },
+
+        cancelEdit(target) {
+          this.setup[target].form = {};
+          this.setup[target].editingName = '';
+          this._setSetupResult(target, '', '');
+        },
+
+        _guessPresetForItem(target, item) {
+          if (target === 'source') {
+            // source.kind определяет preset (local → 'local', confluence → 'confluence', jira → 'jira')
+            const list = this.presets?.source || [];
+            return list.find(p => p.id === item.kind);
+          }
+          // llm / embedder: мы храним preset_id отдельно, но если редактируем существующий
+          // item — точно ли мы знаем который preset был?
+          // Эвристика: openai-compatible если есть base_url не похожий на ollama, иначе ollama.
+          const list = this.presets?.[target] || [];
+          const isOllama = item.base_url && /11434/.test(item.base_url);
+          return list.find(p => p.id === (isOllama ? 'ollama' : 'openai-compatible')) || list[0];
+        },
+
+        async deleteItem(target, item) {
+          const what = target === 'source' ? `${item.kind}/${item.name}` : item.name;
+          if (!confirm(`Удалить ${target === 'source' ? 'источник' : 'LLM'} «${what}»?`)) return;
+          try {
+            const body = { target, name: item.name };
+            if (target === 'source') body.kind = item.kind;
+            await this.fetchJson('/api/presets/delete', {
+              method: 'POST',
+              headers: {'content-type': 'application/json'},
+              body: JSON.stringify(body),
+            });
+            this.showToast(`Удалено: ${what}`, 'success');
+            await Promise.all([this.refreshConfig(), this.refreshGate()]);
+          } catch (e) {
+            this.showToast(`Ошибка удаления: ${e.message}`, 'error');
+          }
+        },
+
+        async loadOllamaModels(target) {
+          // Подтягивает список моделей Ollama для текущего base_url пресета.
+          // Дёргается при открытии формы и при ручном изменении base_url.
+          const preset = this.presets?.[target]?.find(p => p.id === this.setup[target].preset_id);
+          if (!preset || preset.id !== 'ollama') {
+            this.setup[target].ollamaModels = { models: [], error: '' };
+            return;
+          }
+          // base_url из формы или дефолт пресета
+          const baseUrlField = preset.fields.find(f => f.name === 'base_url');
+          const baseUrl = this.setup[target].form.base_url || baseUrlField?.default || '';
+          if (!baseUrl) return;
+          try {
+            const r = await this.fetchJson(`/api/setup/ollama-models?base_url=${encodeURIComponent(baseUrl)}`);
+            this.setup[target].ollamaModels = {
+              models: r.models || [], error: r.error || '',
+            };
+          } catch (e) {
+            this.setup[target].ollamaModels = { models: [], error: e.message };
+          }
+        },
+
+        async probeEmbedderDim() {
+          // Спросить embedder его размерность — для кнопки «Выяснить» возле dim.
+          // Использует текущие base_url/model/api_key из формы.
+          this.setup.embedder.dimProbing = true;
+          this.setup.embedder.dimProbeError = '';
+          try {
+            const r = await this.fetchJson('/api/presets/embedder/probe-dim', {
+              method: 'POST',
+              headers: {'content-type': 'application/json'},
+              body: JSON.stringify({
+                target: 'embedder',
+                preset_id: this.setup.embedder.preset_id,
+                form: this.setup.embedder.form,
+              }),
+            });
+            if (r.ok) {
+              this.setup.embedder.form.dim = r.dim;
+            } else {
+              this.setup.embedder.dimProbeError = r.error;
+            }
+          } catch (e) {
+            this.setup.embedder.dimProbeError = e.message;
+          } finally {
+            this.setup.embedder.dimProbing = false;
+          }
+        },
+
+        async editEmbedder() {
+          const cur = this.config?.indexing?.dense_embedder;
+          if (!cur) {
+            this.setup.embedder.editing = true;
+            return;
+          }
+          const isOllama = cur.base_url && /11434/.test(cur.base_url);
+          this.setup.embedder.preset_id = isOllama ? 'ollama' : 'openai-compatible';
+          // Дожидаемся загрузки списка моделей до установки form (для x-model на select)
+          if (isOllama) await this.loadOllamaModels('embedder');
+          this.setup.embedder.form = {
+            base_url: cur.base_url || '',
+            model: cur.model || '',
+            dim: cur.dim || '',
+            max_concurrent: cur.max_concurrent || '',
+            // api_key — НЕ копируем (masked); пустое = preserve старое
+          };
+          this.setup.embedder.editing = true;
+          this.setup.embedder.result = '';
+          this.setup.embedder.testResult = '';
+        },
+
+        cancelEditEmbedder() {
+          this.setup.embedder.editing = false;
+          this.setup.embedder.form = {};
+          this.setup.embedder.result = '';
+          this.setup.embedder.testResult = '';
+        },
+
+        async saveEmbedder() {
+          await this.addItem('embedder');
+          if (this.setup.embedder.resultKind === 'success') {
+            this.setup.embedder.editing = false;
+          }
+        },
+
+        async testEmbedder() {
+          // Inline-проверка существующего embedder через /api/config/test (по конфигу).
+          this.embedderTestResult = 'проверка…';
+          this.embedderTestResultKind = 'info';
+          try {
+            const r = await this.fetchJson('/api/config/test', {
+              method: 'POST',
+              headers: {'content-type': 'application/json'},
+              body: JSON.stringify({target: 'dense_embedder'}),
+            });
+            this.embedderTestResult = (r.ok ? '✓ ' : '✗ ') + r.detail;
+            this.embedderTestResultKind = r.ok ? 'success' : 'error';
+          } catch (e) {
+            this.embedderTestResult = '✗ ' + e.message;
+            this.embedderTestResultKind = 'error';
+          }
+        },
+
+        async testForm(target) {
+          // Проверка LLM/embedder по введённой форме — без сохранения.
+          this.setup[target].testResult = '';
+          this.setup[target].testing = true;
+          try {
+            const r = await this.fetchJson('/api/presets/test', {
+              method: 'POST',
+              headers: {'content-type': 'application/json'},
+              body: JSON.stringify({
+                target,
+                preset_id: this.setup[target].preset_id,
+                form: this.setup[target].form,
+              }),
+            });
+            this.setup[target].testResult = (r.ok ? '✓ ' : '✗ ') + r.detail;
+            this.setup[target].testResultKind = r.ok ? 'success' : 'error';
+          } catch (e) {
+            this.setup[target].testResult = '✗ ' + e.message;
+            this.setup[target].testResultKind = 'error';
+          } finally {
+            this.setup[target].testing = false;
+          }
+        },
+
         async testLLM(name) {
-          // Pings LLM-инстанс из пула.
-          this.showToast(`Проверка LLM «${name}»...`, '');
+          // Pings LLM-инстанс из пула. Результат показывается в строке LLM (не toast).
+          if (!this.llmTestResults) this.llmTestResults = {};
+          this.llmTestResults[name] = { msg: 'проверка...', kind: 'info' };
           try {
             const r = await this.fetchJson('/api/config/test', {
               method: 'POST',
               headers: {'content-type': 'application/json'},
               body: JSON.stringify({target: 'llm', name}),
             });
-            this.showToast(
-              r.ok ? `✓ ${name}: ${r.detail}` : `✗ ${name}: ${r.detail}`,
-              r.ok ? 'success' : 'error',
-            );
+            this.llmTestResults[name] = {
+              msg: (r.ok ? '✓ ' : '✗ ') + r.detail,
+              kind: r.ok ? 'success' : 'error',
+            };
           } catch (e) {
-            this.showToast(`✗ Проверка ${name}: ${e.message}`, 'error');
+            this.llmTestResults[name] = { msg: '✗ ' + e.message, kind: 'error' };
           }
         },
 
@@ -1227,6 +1736,9 @@
         setupOpen() {
           this.tab = 'setup';
           if (!this.presets) this.loadPresets();
+          // Подгрузить список Ollama-моделей для активных пресетов
+          this.loadOllamaModels('llm');
+          this.loadOllamaModels('embedder');
         },
 
         settingsOpen() {

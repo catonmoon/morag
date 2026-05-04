@@ -87,6 +87,7 @@ def _make_dense_embedder(cfg: DenseEmbedderConfig) -> Embedder:
         )
     return HttpEmbedder(
         cfg.base_url, cfg.model, cfg.dim,
+        api_key=cfg.api_key or 'ollama',
         document_template=cfg.document_template,
         query_template=cfg.query_template,
         timeout=cfg.timeout,
@@ -238,6 +239,25 @@ async def cmd_index(
     config = load_config(config_path)
     if config.indexing is None:
         raise ValueError(f'{config_path}: секция `indexing` обязательна для команды `index`')
+    # Pydantic-схема ослаблена (для baseline config.yml без секретов), но индексация
+    # требует все компоненты. setup_gate проверяет это в control-plane; здесь —
+    # повторная защита от прямого CLI вызова без полной настройки.
+    missing = []
+    if not config.sources:
+        missing.append('sources')
+    if not config.llms:
+        missing.append('llms')
+    if config.indexing.dense_embedder is None:
+        missing.append('indexing.dense_embedder')
+    if config.indexing.llm is None:
+        missing.append('indexing.llm')
+    if config.indexing.vision is None:
+        missing.append('indexing.vision')
+    if missing:
+        raise ValueError(
+            f'{config_path}: для индексации не настроены: {", ".join(missing)}. '
+            'Настройте через Console UI (http://localhost:8000) или вручную в config.local.yml.'
+        )
 
     if cancel_event is None:
         cancel_event = asyncio.Event()
@@ -318,8 +338,18 @@ async def cmd_index(
     # 'tiktoken' — спец-значение: использовать TikToken вместо HF-токенайзера.
     # Подходит для моделей с большим max_tokens (Qwen3, 1024+) где точность ±40% терпима
     # и позволяет избежать HF-зависимости при индексации.
-    if embed_tokenizer == 'tiktoken':
+    # Также fallback на tiktoken если model не выглядит как HF repo id
+    # (например 'qwen3-embedding:4b' — Ollama-нотация: AutoTokenizer бы упал).
+    looks_like_hf_id = '/' in embed_tokenizer and ':' not in embed_tokenizer
+    if embed_tokenizer == 'tiktoken' or not looks_like_hf_id:
         embed_counter = TiktokenCounter()
+        if embed_tokenizer != 'tiktoken':
+            logger.warning(
+                'tokenizer %r не похож на HuggingFace repo id (формат org/name); '
+                'использую TikToken-counter (приближение). Задайте explicit '
+                'indexing.dense_embedder.tokenizer для точного подсчёта.',
+                embed_tokenizer,
+            )
         logger.info('Token counters: llm=TikToken, embed=TikToken')
     else:
         embed_counter = HuggingFaceTokenCounter(embed_tokenizer)

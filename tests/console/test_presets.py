@@ -180,3 +180,48 @@ class TestPresetsValidateUnderNewSchema:
             'llms': [{'name': 'm', 'base_url': 'x', 'model': 'm', 'api_key': 'k'}],
         })
         assert cfg.sources[0].name == 'mydocs'
+
+
+class TestApplyEmbedderPresets:
+    def test_ollama_minimal(self):
+        snippet = apply_preset('embedder', 'ollama', {
+            'model': 'qwen3-embedding:4b',
+            'dim': '2560',
+        })
+        assert snippet['model'] == 'qwen3-embedding:4b'
+        assert snippet['api_key'] == 'ollama'
+        assert snippet['dim'] == 2560
+        assert snippet['max_concurrent'] == 1
+        assert snippet['base_url'].endswith(':11434/v1')
+
+    def test_openai_compatible(self):
+        snippet = apply_preset('embedder', 'openai-compatible', {
+            'base_url': 'https://api.openai.com/v1',
+            'model': 'text-embedding-3-small',
+            'api_key': 'sk-test',
+            'dim': '1536',
+        })
+        assert snippet == {
+            'base_url': 'https://api.openai.com/v1',
+            'model': 'text-embedding-3-small',
+            'api_key': 'sk-test',
+            'dim': 1536,
+            'max_concurrent': 4,
+        }
+
+    def test_validates_under_schema(self):
+        from morag.config import Config
+        snippet = apply_preset('embedder', 'ollama', {
+            'model': 'qwen3-embedding:4b', 'dim': '2560',
+        })
+        cfg = Config.model_validate({
+            'sources': [{'kind': 'local', 'name': 'd', 'path': '/x'}],
+            'llms': [{'name': 'm', 'base_url': 'x', 'model': 'm', 'api_key': 'k',
+                      'capabilities': ['text', 'vision']}],
+            'indexing': {
+                'llm': 'm', 'vision': 'm',
+                'dense_embedder': snippet,
+            },
+        })
+        assert cfg.indexing.dense_embedder.dim == 2560
+        assert cfg.indexing.dense_embedder.api_key == 'ollama'
