@@ -6,16 +6,30 @@ Layering:
 
 Console читает merged-вид (primary deep-merged с local) для отображения,
 маскирует секреты перед отдачей наружу, и пишет правки только в local.
+
+Используем ruamel.yaml round-trip parser — он сохраняет inline-комменты
+при чтении/записи. Например, для Confluence ancestor_ids backend записывает
+ID + breadcrumb-путь как комментарий, чтобы юзер мог глазами понять
+содержимое overlay'а.
 """
 from __future__ import annotations
 
+import io
 from pathlib import Path
 from typing import Any
 
-import yaml
 from pydantic import ValidationError
+from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedSeq
 
 from morag.config import Config, _deep_merge
+
+# Один глобальный YAML-парсер. typ='rt' — round-trip с сохранением комментов.
+# allow_unicode не нужен (ruamel пишет UTF-8 по умолчанию).
+_yaml = YAML(typ='rt')
+_yaml.preserve_quotes = True
+_yaml.width = 4096                  # не лочить длинные строки
+_yaml.indent(mapping=2, sequence=4, offset=2)
 
 # Поля, значение которых маскируется в API-выдаче.
 # Пробег рекурсивный по всем dict'ам — match по точному имени ключа.
@@ -33,12 +47,12 @@ def read_layered(primary_path: str | Path) -> dict[str, Any]:
     """
     primary_path = Path(primary_path)
     with open(primary_path, encoding='utf-8') as f:
-        primary = yaml.safe_load(f) or {}
+        primary = _yaml.load(f) or {}
 
     local_path = _local_path(primary_path)
     if local_path.exists():
         with open(local_path, encoding='utf-8') as f:
-            local = yaml.safe_load(f) or {}
+            local = _yaml.load(f) or {}
         return _deep_merge(primary, local)
 
     return primary
@@ -50,7 +64,7 @@ def read_local(primary_path: str | Path) -> dict[str, Any]:
     if not local_path.exists():
         return {}
     with open(local_path, encoding='utf-8') as f:
-        return yaml.safe_load(f) or {}
+        return _yaml.load(f) or {}
 
 
 def write_local(primary_path: str | Path, local_data: dict[str, Any]) -> None:
@@ -65,7 +79,9 @@ def write_local(primary_path: str | Path, local_data: dict[str, Any]) -> None:
     """
     local_path = _local_path(Path(primary_path))
     local_path.parent.mkdir(parents=True, exist_ok=True)
-    local_path.write_text(yaml.safe_dump(local_data, allow_unicode=True, sort_keys=False))
+    buf = io.StringIO()
+    _yaml.dump(local_data, buf)
+    local_path.write_text(buf.getvalue())
 
 
 def patch_local(primary_path: str | Path, patch: dict[str, Any]) -> dict[str, Any]:
@@ -87,9 +103,31 @@ def validate_merged(primary_path: str | Path, candidate_local: dict[str, Any]) -
     """
     primary_path = Path(primary_path)
     with open(primary_path, encoding='utf-8') as f:
-        primary = yaml.safe_load(f) or {}
+        primary = _yaml.load(f) or {}
     merged = _deep_merge(primary, candidate_local)
     return Config.model_validate(merged)
+
+
+def make_commented_id_list(
+    items: list[dict[str, str]],
+) -> CommentedSeq:
+    """Список ID-чипов с inline-комментами для записи в YAML.
+
+    Вход: [{'id': '1234567', 'comment': 'Space / Раздел / Страница'}, ...].
+    `comment` опционален — без него ID пишется без комментария.
+    Использовать в _build_confluence для ancestor_ids/skip_ancestor_ids.
+
+    Результат — CommentedSeq, который ruamel.yaml сериализует как:
+        - "1234567"   # Space / Раздел / Страница
+    """
+    seq = CommentedSeq()
+    for idx, item in enumerate(items):
+        seq.append(str(item['id']))
+        comment = (item.get('comment') or '').strip()
+        if comment:
+            # column=0 → ruamel сам подберёт отступ; \n не нужен
+            seq.yaml_add_eol_comment(comment, key=idx, column=0)
+    return seq
 
 
 def mask_secrets(data: Any) -> Any:
@@ -133,6 +171,7 @@ def _local_path(primary_path: Path) -> Path:
 __all__ = [
     'SECRET_KEYS',
     'SECRET_MASK',
+    'make_commented_id_list',
     'mask_secrets',
     'patch_local',
     'read_layered',

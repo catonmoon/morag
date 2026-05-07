@@ -5,6 +5,7 @@ import yaml
 
 from services.console.config_io import (
     SECRET_MASK,
+    make_commented_id_list,
     mask_secrets,
     patch_local,
     read_layered,
@@ -185,3 +186,73 @@ class TestValidateMerged:
         # qdrant.port должен быть int; передадим строку
         with pytest.raises(ValidationError):
             validate_merged(cfg, {'qdrant': {'port': 'not-a-number'}})
+
+
+# ---------------------------------------------------------------------------
+# ruamel.yaml inline-комменты для chip-полей
+# ---------------------------------------------------------------------------
+
+class TestCommentedIdList:
+
+    def test_writes_inline_comments(self, tmp_path: Path):
+        cfg = tmp_path / 'config.yml'
+        write_yaml(cfg, PRIMARY)
+
+        seq = make_commented_id_list([
+            {'id': '1234', 'comment': 'DOCS / Архитектура'},
+            {'id': '5678', 'comment': 'DOCS / Требования'},
+        ])
+        write_local(cfg, {'sources': [{
+            'kind': 'confluence', 'name': 'corp', 'ancestor_ids': seq,
+        }]})
+
+        text = (tmp_path / 'config.local.yml').read_text()
+        # Каждый ID на своей строке, в той же строке — комментарий
+        assert '"1234"' in text or "'1234'" in text or '1234' in text
+        assert '# DOCS / Архитектура' in text
+        assert '# DOCS / Требования' in text
+
+    def test_empty_comment_no_hash(self, tmp_path: Path):
+        cfg = tmp_path / 'config.yml'
+        write_yaml(cfg, PRIMARY)
+
+        seq = make_commented_id_list([
+            {'id': '1234', 'comment': ''},
+            {'id': '5678'},                # без поля comment
+        ])
+        write_local(cfg, {'sources': [{'kind': 'c', 'name': 'x', 'ancestor_ids': seq}]})
+
+        text = (tmp_path / 'config.local.yml').read_text()
+        # Когда комментариев нет — символ # вообще не должен фигурировать в этой секции
+        # (мы не добавляем eol-комменты для пустых)
+        assert '#' not in text
+
+    def test_roundtrip_keeps_comments(self, tmp_path: Path):
+        # write → read через ruamel должен сохранить комменты как метаданные.
+        # Здесь проверяем что они хотя бы переживают чтение и не падают.
+        cfg = tmp_path / 'config.yml'
+        write_yaml(cfg, PRIMARY)
+
+        seq = make_commented_id_list([{'id': '1234', 'comment': 'Архитектура'}])
+        write_local(cfg, {'sources': [{
+            'kind': 'confluence', 'name': 'c', 'ancestor_ids': seq,
+        }]})
+
+        local = read_local(cfg)
+        assert list(local['sources'][0]['ancestor_ids']) == ['1234']
+
+    def test_patch_local_preserves_chip_comments(self, tmp_path: Path):
+        # Если мы сделали apply через patch_local — комменты остались в файле
+        cfg = tmp_path / 'config.yml'
+        write_yaml(cfg, PRIMARY)
+
+        seq = make_commented_id_list([{'id': '777', 'comment': 'Раздел A'}])
+        patch_local(cfg, {'sources': [{
+            'kind': 'confluence', 'name': 'c', 'ancestor_ids': seq,
+        }]})
+        # Второй patch — не трогаем sources, добавляем qdrant overlay
+        patch_local(cfg, {'qdrant': {'host': 'newhost'}})
+
+        text = (tmp_path / 'config.local.yml').read_text()
+        assert '# Раздел A' in text
+        assert 'newhost' in text

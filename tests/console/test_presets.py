@@ -7,7 +7,57 @@ from services.console.presets import (
     apply_preset,
     find_preset,
     serialize_preset,
+    suggest_llm_name,
+    suggest_source_name,
+    unique_name,
 )
+
+
+class TestNameAutoGeneration:
+
+    def test_local_singleton(self):
+        assert suggest_source_name('local', {}) == 'doc'
+
+    def test_confluence_subdomain(self):
+        assert suggest_source_name('confluence', {'url': 'https://corp.atlassian.net'}) == 'corp'
+
+    def test_confluence_skips_generic(self):
+        assert suggest_source_name(
+            'confluence', {'url': 'https://confluence.acme.com'},
+        ) == 'acme'
+
+    def test_jira_subdomain(self):
+        assert suggest_source_name('jira', {'url': 'https://jira.bigco.com'}) == 'bigco'
+
+    def test_no_url_falls_back_to_kind(self):
+        assert suggest_source_name('confluence', {}) == 'confluence'
+
+    def test_llm_known_provider(self):
+        assert suggest_llm_name({'base_url': 'https://api.x.ai/v1'}) == 'grok'
+        assert suggest_llm_name({'base_url': 'https://openrouter.ai/api/v1'}) == 'openrouter'
+        assert suggest_llm_name({'base_url': 'https://api.openai.com/v1'}) == 'openai'
+
+    def test_llm_ollama_localhost(self):
+        assert suggest_llm_name(
+            {'base_url': 'http://host.docker.internal:11434/v1'},
+        ) == 'ollama'
+
+    def test_llm_unknown_provider_subdomain(self):
+        # Кастомный vLLM: vllm.kth.pro → 'kth' (skip 'vllm' generic? нет, vllm НЕ generic)
+        # Тут должен взять первый non-generic — vllm → берётся, т.к. не в _GENERIC_HOST_PARTS
+        # Но _domainFirstLabel пропускает только {www, api, confluence, jira, wiki, docs}
+        assert suggest_llm_name({'base_url': 'https://vllm.kth.pro'}) == 'vllm'
+
+    def test_unique_name_no_collision(self):
+        assert unique_name('grok', set()) == 'grok'
+        assert unique_name('grok', {'other'}) == 'grok'
+
+    def test_unique_name_with_collision(self):
+        assert unique_name('grok', {'grok'}) == 'grok-2'
+        assert unique_name('grok', {'grok', 'grok-2'}) == 'grok-3'
+
+    def test_unique_name_empty_base(self):
+        assert unique_name('', set()) == 'main'
 
 
 class TestFindPreset:
@@ -57,11 +107,28 @@ class TestApplyLLMPresets:
         })
         assert 'vision' in snippet['capabilities']
 
-    def test_default_name_when_empty(self):
+    def test_name_auto_generated_from_url(self):
+        # Auto-suggest имя по subdomain URL (или провайдеру). 'http://x' → 'x'.
         snippet = apply_preset('llm', 'openai-compatible', {
-            'name': '', 'base_url': 'http://x', 'model': 'm', 'api_key': 'k',
+            'base_url': 'http://x', 'model': 'm', 'api_key': 'k',
         })
-        assert snippet['name'] == 'main'  # default name для openai-пресета
+        assert snippet['name'] == 'x'
+
+    def test_name_grok_from_xai(self):
+        snippet = apply_preset('llm', 'openai-compatible', {
+            'base_url': 'https://api.x.ai/v1', 'model': 'grok-4',
+        })
+        assert snippet['name'] == 'grok'
+
+    def test_name_openrouter(self):
+        snippet = apply_preset('llm', 'openai-compatible', {
+            'base_url': 'https://openrouter.ai/api/v1', 'model': 'anthropic/claude',
+        })
+        assert snippet['name'] == 'openrouter'
+
+    def test_name_ollama(self):
+        snippet = apply_preset('llm', 'ollama', {'model': 'qwen3:4b'})
+        assert snippet['name'] == 'ollama'
 
     def test_openai_custom_concurrent(self):
         snippet = apply_preset('llm', 'openai-compatible', {
@@ -72,9 +139,7 @@ class TestApplyLLMPresets:
         assert snippet['max_concurrent'] == 8
 
     def test_ollama(self):
-        snippet = apply_preset('llm', 'ollama', {
-            'name': 'local-qwen', 'model': 'qwen3:4b',
-        })
+        snippet = apply_preset('llm', 'ollama', {'model': 'qwen3:4b'})
         assert snippet['api_key'] == 'ollama'           # hardcoded для Ollama
         assert snippet['enable_thinking'] is False
         assert snippet['max_concurrent'] == 1           # дефолт для Ollama
@@ -83,21 +148,36 @@ class TestApplyLLMPresets:
 
 class TestApplySourcePresets:
     def test_local(self):
-        # path зашит в /app/data, форма принимает только name
-        s = apply_preset('source', 'local', {'name': 'docs'})
-        assert s == {'kind': 'local', 'name': 'docs', 'path': '/app/data'}
+        # singleton: name всегда 'doc', path всегда /app/data, форма пустая
+        s = apply_preset('source', 'local', {})
+        assert s == {'kind': 'local', 'name': 'doc', 'path': '/app/data'}
 
-    def test_local_default_name(self):
-        s = apply_preset('source', 'local', {'name': ''})
-        assert s['name'] == 'docs'
+    def test_local_ignores_form_fields(self):
+        # любые попытки задать name через форму игнорируются
+        s = apply_preset('source', 'local', {'name': 'something-else'})
+        assert s['name'] == 'doc'
 
     def test_confluence_cloud_minimal(self):
         s = apply_preset('source', 'confluence', {
-            'name': 'corp', 'url': 'https://corp/', 'username': 'u', 'api_token': 't',
+            'url': 'https://corp.atlassian.net/', 'username': 'u', 'api_token': 't',
         })
         assert s['kind'] == 'confluence'
+        assert s['name'] == 'corp'              # auto: subdomain → name
         assert s['api_token'] == 't'
         assert 'password' not in s
+
+    def test_confluence_name_skips_generic_prefix(self):
+        # 'confluence.acme.com' → пропускаем generic 'confluence', берём 'acme'
+        s = apply_preset('source', 'confluence', {
+            'url': 'https://confluence.acme.com', 'username': 'u', 'password': 'p',
+        })
+        assert s['name'] == 'acme'
+
+    def test_jira_name_from_subdomain(self):
+        s = apply_preset('source', 'jira', {
+            'url': 'https://jira.internal.bigco.com', 'username': 'u', 'password': 'p',
+        })
+        assert s['name'] == 'internal'         # skip 'jira', take next non-generic
 
     def test_confluence_with_spaces(self):
         s = apply_preset('source', 'confluence', {
@@ -119,6 +199,40 @@ class TestApplySourcePresets:
         })
         assert s['password'] == 'p'
         assert 'api_token' not in s
+
+    def test_confluence_ancestor_chips(self):
+        # UI-формат: list[{id, comment}]. Должен попасть в YAML с inline-комментами.
+        s = apply_preset('source', 'confluence', {
+            'name': 'c', 'url': 'x', 'username': 'u', 'api_token': 't',
+            'ancestor_ids': [
+                {'id': '1234', 'comment': 'DOCS / Архитектура'},
+                {'id': '5678', 'comment': 'DOCS / Требования'},
+            ],
+            'skip_ancestor_ids': [
+                {'id': '9999', 'comment': 'DOCS / Архив'},
+            ],
+        })
+        # IDs as strings
+        assert list(s['ancestor_ids']) == ['1234', '5678']
+        assert list(s['skip_ancestor_ids']) == ['9999']
+        # round-trip через ruamel сохраняет комменты — проверим в test_config_io
+
+    def test_confluence_ancestor_legacy_csv(self):
+        # Старый формат (CSV-строка) тоже работает — для ручной правки
+        s = apply_preset('source', 'confluence', {
+            'name': 'c', 'url': 'x', 'username': 'u', 'api_token': 't',
+            'ancestor_ids': '1234, 5678 9999',
+        })
+        assert list(s['ancestor_ids']) == ['1234', '5678', '9999']
+
+    def test_confluence_no_ancestors_omitted(self):
+        # Пустой ancestor_ids → ключ вообще не пишется
+        s = apply_preset('source', 'confluence', {
+            'name': 'c', 'url': 'x', 'username': 'u', 'api_token': 't',
+            'ancestor_ids': [],
+        })
+        assert 'ancestor_ids' not in s
+        assert 'skip_ancestor_ids' not in s
 
     def test_confluence_api_token_wins_over_password(self):
         # Если юзер по ошибке заполнил оба поля — приоритет api_token (Cloud-режим)
@@ -175,12 +289,12 @@ class TestPresetsValidateUnderNewSchema:
 
     def test_local_source_validates(self):
         from morag.config import Config
-        snippet = apply_preset('source', 'local', {'name': 'mydocs', 'path': 'data/'})
+        snippet = apply_preset('source', 'local', {})
         cfg = Config.model_validate({
             'sources': [snippet],
             'llms': [{'name': 'm', 'base_url': 'x', 'model': 'm', 'api_key': 'k'}],
         })
-        assert cfg.sources[0].name == 'mydocs'
+        assert cfg.sources[0].name == 'doc'      # singleton hardcoded
 
 
 class TestApplyEmbedderPresets:

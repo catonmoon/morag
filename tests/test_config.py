@@ -524,3 +524,129 @@ class TestSchemaVersion:
                 'sources': [{'kind': 'local', 'name': 'd', 'path': 'a'}],
                 'llms': [{'name': 'm', 'base_url': 'x', 'model': 'm', 'api_key': 'k'}],
             })
+
+
+# ---------------------------------------------------------------------------
+# RetrievalConfig
+# ---------------------------------------------------------------------------
+
+class TestRetrievalConfig:
+
+    _BASE = {
+        'sources': [{'kind': 'local', 'name': 'd', 'path': 'a'}],
+        'llms': [
+            {'name': 'main', 'base_url': 'x', 'model': 'm', 'api_key': 'k'},
+            {'name': 'cheap', 'base_url': 'x', 'model': 'm2', 'api_key': 'k'},
+        ],
+    }
+
+    def test_minimal_valid(self):
+        from morag.config import Config
+        cfg = Config.model_validate({
+            **self._BASE,
+            'retrieval': {
+                'agent': {'llm': 'main'},
+                'reranker': {'llm': 'cheap'},
+            },
+        })
+        assert cfg.retrieval.agent.llm == 'main'
+        assert cfg.retrieval.reranker.llm == 'cheap'
+        # Defaults применились
+        assert cfg.retrieval.search.limit == 50
+        assert cfg.retrieval.search.find_section.doc_pool == 20
+        assert cfg.retrieval.features.enable_diversity_nudge is True
+        assert cfg.retrieval.prompts.admin_instructions == ''
+        assert cfg.retrieval.http_timeout == 300
+
+    def test_optional_section(self):
+        from morag.config import Config
+        cfg = Config.model_validate(self._BASE)
+        assert cfg.retrieval is None
+
+    def test_retrieval_without_agent_reranker(self):
+        # Baseline-сценарий: search/features есть, agent/reranker None.
+        from morag.config import Config
+        cfg = Config.model_validate({
+            **self._BASE,
+            'retrieval': {
+                'search': {'limit': 80},
+                'features': {'enable_diversity_nudge': False},
+            },
+        })
+        assert cfg.retrieval.agent is None
+        assert cfg.retrieval.reranker is None
+        assert cfg.retrieval.search.limit == 80
+        assert cfg.retrieval.features.enable_diversity_nudge is False
+
+    def test_retrieval_with_only_agent(self):
+        # agent задан, reranker None — валидируется только agent.llm.
+        from morag.config import Config
+        cfg = Config.model_validate({
+            **self._BASE,
+            'retrieval': {'agent': {'llm': 'main'}},
+        })
+        assert cfg.retrieval.agent.llm == 'main'
+        assert cfg.retrieval.reranker is None
+
+    def test_unknown_agent_llm_rejected(self):
+        from morag.config import Config
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError) as exc_info:
+            Config.model_validate({
+                **self._BASE,
+                'retrieval': {
+                    'agent': {'llm': 'nonexistent'},
+                    'reranker': {'llm': 'main'},
+                },
+            })
+        assert 'retrieval.agent.llm' in str(exc_info.value)
+
+    def test_unknown_reranker_llm_rejected(self):
+        from morag.config import Config
+        from pydantic import ValidationError
+        with pytest.raises(ValidationError):
+            Config.model_validate({
+                **self._BASE,
+                'retrieval': {
+                    'agent': {'llm': 'main'},
+                    'reranker': {'llm': 'nonexistent'},
+                },
+            })
+
+    def test_enable_thinking_three_state(self):
+        from morag.config import Config
+        for value in (None, True, False):
+            cfg = Config.model_validate({
+                **self._BASE,
+                'retrieval': {
+                    'agent': {'llm': 'main', 'enable_thinking': value},
+                    'reranker': {'llm': 'main'},
+                },
+            })
+            assert cfg.retrieval.agent.enable_thinking is value
+
+    def test_per_role_max_tokens(self):
+        from morag.config import Config
+        cfg = Config.model_validate({
+            **self._BASE,
+            'retrieval': {
+                'agent': {'llm': 'main', 'max_tokens': 8192, 'temperature': 0.5},
+                'reranker': {'llm': 'cheap', 'max_tokens': 50},
+            },
+        })
+        assert cfg.retrieval.agent.max_tokens == 8192
+        assert cfg.retrieval.agent.temperature == 0.5
+        assert cfg.retrieval.reranker.max_tokens == 50
+
+    def test_admin_instructions_preserved(self):
+        from morag.config import Config
+        text = 'Если ответа нет — обязательно повтори search без section_ids.'
+        cfg = Config.model_validate({
+            **self._BASE,
+            'retrieval': {
+                'agent': {'llm': 'main'},
+                'reranker': {'llm': 'main'},
+                'prompts': {'admin_instructions': text},
+            },
+        })
+        assert cfg.retrieval.prompts.admin_instructions == text

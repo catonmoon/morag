@@ -18,6 +18,7 @@ from services.console.presets import (
     SOURCE_PRESETS,
     apply_preset,
     serialize_preset,
+    unique_name,
 )
 
 router = APIRouter()
@@ -105,15 +106,33 @@ async def apply(req: ApplyPresetRequest, request: Request) -> dict[str, Any]:
     list_field = 'llms' if req.target == 'llm' else 'sources'
     current_list = list(merged_view.get(list_field, []))
 
-    # Preserve secret-поля из existing item если в форме пусто
+    # Editing-mode: form может прислать имя. Если присланное имя совпадает с
+    # existing — это edit (preserve secrets, replace by name). Иначе — add,
+    # auto-generated имя через collision-detect.
+    incoming_name = item.get('name', '')
     if req.target == 'llm':
-        existing = next((it for it in current_list if it.get('name') == item.get('name')), None)
+        existing = next(
+            (it for it in current_list if it.get('name') == incoming_name), None,
+        )
     else:  # source
         existing = next(
             (it for it in current_list
-             if it.get('kind') == item.get('kind') and it.get('name') == item.get('name')),
+             if it.get('kind') == item.get('kind') and it.get('name') == incoming_name),
             None,
         )
+
+    # Add (no existing match): collision-detect — если имя занято, добавим -2/-3.
+    # local source — singleton, не дублируется (имя 'doc' жёстко).
+    if existing is None and req.target != 'embedder':
+        if req.target == 'llm':
+            taken = {it.get('name') for it in current_list}
+        else:
+            taken = {
+                it.get('name') for it in current_list
+                if it.get('kind') == item.get('kind')
+            }
+        item['name'] = unique_name(incoming_name, taken)
+
     item = _preserve_secrets(item, existing)
 
     if req.target == 'llm':

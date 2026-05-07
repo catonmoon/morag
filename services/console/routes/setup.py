@@ -7,12 +7,14 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
 
 from morag.config import load_config
 from morag.setup_gate import is_setup_complete
@@ -300,6 +302,170 @@ def _build_ollama_status(
                 'pull_cmd': f'ollama pull {model}',
             })
     return out
+
+
+# ---------------------------------------------------------------------------
+# POST /api/setup/confluence-page-paths
+# Резолв названий + breadcrumb-путей для page IDs из chip-инпутов wizard'а.
+# ---------------------------------------------------------------------------
+
+class ConfluencePagePathsRequest(BaseModel):
+    """Поля совпадают с form'ой Confluence-пресета.
+
+    Если api_token и password оба пустые, но source_name задан — backend
+    возьмёт секрет из текущего config (case Edit, где UI не отдаёт секрет).
+    """
+    url: str
+    username: str
+    api_token: str | None = None
+    password: str | None = None
+    source_name: str | None = None
+    ids: list[str]
+
+
+@router.post('/confluence-page-paths')
+async def confluence_page_paths(
+    req: ConfluencePagePathsRequest, request: Request,
+) -> dict[str, dict[str, Any]]:
+    """Резолв названий + breadcrumb-путей по списку Confluence page IDs.
+
+    Возвращает {id: {title, path, url, error?}}. Один HTTP-вызов на ID
+    (atlassian-python-api не имеет batch-API для ancestors). Параллелит
+    через asyncio.gather с ограничением concurrency.
+    """
+    cfg_path = request.app.state.config_path
+
+    # Resolve secret (case Edit: UI отдаёт пустой секрет → fall back на config).
+    auth_secret = (req.api_token or '').strip() or (req.password or '').strip()
+    if not auth_secret and req.source_name:
+        from services.console.config_io import read_layered
+        merged = read_layered(cfg_path)
+        existing = next(
+            (s for s in (merged.get('sources') or [])
+             if s.get('kind') == 'confluence' and s.get('name') == req.source_name),
+            None,
+        )
+        if existing:
+            auth_secret = existing.get('api_token') or existing.get('password') or ''
+    if not auth_secret:
+        raise HTTPException(
+            status_code=400,
+            detail='Заполните api_token (Cloud) или password (on-prem).',
+        )
+
+    # Items могут быть numeric IDs ИЛИ URLs (Confluence display/spaces).
+    # Дедупликация по input-ключу (то что прислал юзер).
+    clean_inputs: list[str] = []
+    seen: set[str] = set()
+    for raw in req.ids:
+        s = str(raw).strip()
+        if not s or s in seen:
+            continue
+        seen.add(s)
+        clean_inputs.append(s)
+
+    if not clean_inputs:
+        return {}
+
+    # atlassian-python-api — sync. Через run_in_executor чтобы не блочить event loop.
+    from atlassian import Confluence
+    is_cloud = bool(req.api_token and not req.password)
+    cf = Confluence(
+        url=req.url.rstrip('/'),
+        username=req.username,
+        password=auth_secret,
+        cloud=is_cloud,
+        timeout=10,
+    )
+
+    sem = asyncio.Semaphore(8)
+
+    def _build_response(input_str: str, page: dict) -> dict[str, Any]:
+        title = page.get('title') or input_str
+        ancestors = page.get('ancestors') or []
+        space = (page.get('space') or {}).get('name') or (page.get('space') or {}).get('key')
+        parts = []
+        if space:
+            parts.append(space)
+        parts.extend(a.get('title') or a.get('id') for a in ancestors)
+        parts.append(title)
+        return {
+            'id': str(page.get('id') or ''),
+            'title': title,
+            'path': ' / '.join(parts),
+            'url': _confluence_page_url(req.url, page),
+        }
+
+    async def fetch_one(input_str: str) -> tuple[str, dict[str, Any]]:
+        async with sem:
+            loop = asyncio.get_event_loop()
+            try:
+                page = await loop.run_in_executor(None, lambda: _resolve_page(cf, input_str))
+                return input_str, _build_response(input_str, page)
+            except Exception as e:
+                logger.info('Failed to resolve confluence input %r: %s', input_str, e)
+                return input_str, {
+                    'id': input_str if input_str.isdigit() else '',
+                    'title': input_str,
+                    'path': '',
+                    'error': f'{type(e).__name__}: {e}',
+                }
+
+    pairs = await asyncio.gather(*(fetch_one(inp) for inp in clean_inputs))
+    return dict(pairs)
+
+
+def _resolve_page(cf, input_str: str) -> dict:
+    """Универсальный резолв: numeric ID, URL с pageId=, /display/SPACE/Title,
+    /spaces/SPACE/pages/N/Title. Возвращает page-dict с ancestors+space.
+    """
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    if input_str.isdigit():
+        return cf.get_page_by_id(input_str, expand='ancestors,space')
+
+    u = urlparse(input_str)
+    if not u.scheme:
+        # Не URL и не числа — попытаться как title без space неоднозначно. Падаем.
+        raise ValueError(f'Не URL и не numeric ID: {input_str!r}')
+
+    # 1. Query string ?pageId=...
+    qs = parse_qs(u.query)
+    if 'pageId' in qs and qs['pageId'][0].isdigit():
+        return cf.get_page_by_id(qs['pageId'][0], expand='ancestors,space')
+
+    path_parts = [p for p in u.path.split('/') if p]
+
+    # 2. /display/{space}/{title} (on-prem стиль)
+    if len(path_parts) >= 3 and path_parts[0] == 'display':
+        space = path_parts[1]
+        title = unquote(path_parts[2].replace('+', ' '))
+        return cf.get_page_by_title(space, title, expand='ancestors,space')
+
+    # 3. /spaces/{space}/pages/{id}/{title-slug} (Cloud) или /wiki/spaces/...
+    if 'pages' in path_parts:
+        idx = path_parts.index('pages')
+        if idx + 1 < len(path_parts) and path_parts[idx + 1].isdigit():
+            return cf.get_page_by_id(path_parts[idx + 1], expand='ancestors,space')
+
+    # 4. /wiki/display/{space}/{title} (на всякий)
+    if len(path_parts) >= 4 and path_parts[0] == 'wiki' and path_parts[1] == 'display':
+        space = path_parts[2]
+        title = unquote(path_parts[3].replace('+', ' '))
+        return cf.get_page_by_title(space, title, expand='ancestors,space')
+
+    raise ValueError(f'Не удалось распарсить URL: {input_str!r}')
+
+
+def _confluence_page_url(base_url: str, page: dict) -> str:
+    """Собрать прямой URL страницы. atlassian-python-api отдаёт _links.webui — относительный."""
+    rel = (page.get('_links') or {}).get('webui') or ''
+    if not rel:
+        # fallback: viewpage.action
+        return f"{base_url.rstrip('/')}/pages/viewpage.action?pageId={page.get('id')}"
+    if rel.startswith('http'):
+        return rel
+    return f"{base_url.rstrip('/')}{rel}"
 
 
 async def _check_qdrant(qdrant_cfg) -> dict[str, Any]:

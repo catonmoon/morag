@@ -39,9 +39,20 @@ class LLMReranker:
     (fallback — не теряем recall).
     """
 
-    def __init__(self, llm_client: LLMClient, max_tokens: int = 100) -> None:
+    def __init__(
+        self,
+        llm_client: LLMClient,
+        max_tokens: int = 100,
+        enable_thinking: bool | None = False,
+    ) -> None:
+        """enable_thinking — передаётся в каждый rerank-вызов как override.
+        Default False = поведение сохранено для существующих коллеров.
+        None = не отправлять reasoning-флаги (нужно для xAI Grok, который
+        реджектит unknown body fields).
+        """
         self._llm = llm_client
         self._max_tokens = max_tokens
+        self._enable_thinking = enable_thinking
 
     async def rerank(self, query: str, chunks: list[dict]) -> list[dict]:
         if not chunks:
@@ -62,7 +73,7 @@ class LLMReranker:
         try:
             answer = (await self._llm.complete(
                 [{'role': 'user', 'content': prompt}],
-                params=GenerationParams(temperature=0.0, enable_thinking=False),
+                params=GenerationParams(temperature=0.0, enable_thinking=self._enable_thinking),
                 max_tokens=self._max_tokens,
             )).strip()
         except Exception as exc:

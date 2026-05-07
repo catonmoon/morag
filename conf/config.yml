@@ -118,3 +118,35 @@ indexing:
 
   # schedule: '0 */6 * * *'          # cron для serve-режима. По умолчанию выключен —
                                       # включается через Console UI (Setup → Schedule).
+
+
+# ----------------------------------------------------------------------------
+# Retrieval — настройки агентского RAG-pipeline.
+# Дефолты тут (search/features/prompts) — общие для всех. agent/reranker
+# (выбор LLM из пула) задаются юзером через Console UI → пишутся в
+# config.local.yml поверх. Изменения требуют `docker compose restart pipelines`.
+# ----------------------------------------------------------------------------
+retrieval:
+  # agent / reranker — задаются через Console UI (требуют llm-имя из llms-pool)
+  # agent: { llm: main, enable_thinking: false, temperature: 0.3, max_tokens: 4096 }
+  # reranker: { llm: main, enable_thinking: false, max_tokens: 100 }
+
+  search:
+    limit: 50                        # чанков из Qdrant до rerank
+    unique_docs_cap: 10              # hard cap уникальных документов после rerank (0 = без лимита)
+    sections_limit: 5                # top секций find_section
+    max_iterations: 9                # лимит agent loop
+    citation_max_chars: 5000
+    answer_max_tokens: 0             # 0 = не ограничивать ответ
+    find_section:
+      doc_pool: 20                   # сколько документов берём из _search_docs для агрегации
+      descent_threshold: 0.5         # 0..1; ребёнок секции с ≥% votes — спускаемся в него
+      top_docs: 3                    # топ документов как страховка одинокого чемпиона
+
+  features:
+    enable_diversity_nudge: true     # расширять поиск, если все чанки из одного документа
+
+  prompts:
+    admin_instructions: ''           # вклеивается в system prompt как «Обязательные инструкции администратора»
+
+  http_timeout: 300

@@ -13,23 +13,122 @@ Apply-логика (services/console/routes/presets.py): list-append/replace by 
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
+from urllib.parse import urlparse
+
+from .config_io import make_commented_id_list
 
 
 PresetTarget = Literal['llm', 'source', 'embedder']
 
 
+# ---------------------------------------------------------------------------
+# Name auto-generation (заменяет ручной ввод name в форме)
+# ---------------------------------------------------------------------------
+
+# Generic technical-host префиксы которые НЕ несут смысла для name —
+# пропускаем при выборе subdomain'а.
+_GENERIC_HOST_PARTS = frozenset({'www', 'api', 'confluence', 'jira', 'wiki', 'docs'})
+
+# Известные облачные LLM-провайдеры по hostname (полный или substring matching).
+_KNOWN_LLM_PROVIDERS: list[tuple[str, str]] = [
+    ('x.ai', 'grok'),
+    ('openrouter.ai', 'openrouter'),
+    ('openai.com', 'openai'),
+    ('anthropic.com', 'claude'),
+    ('together.ai', 'together'),
+    ('together.xyz', 'together'),
+    ('deepinfra.com', 'deepinfra'),
+    ('mistral.ai', 'mistral'),
+    ('groq.com', 'groq'),
+    ('host.docker.internal', 'ollama'),       # docker-compose default
+    ('localhost', 'ollama'),                   # native default
+]
+
+
+def _sanitize_name(s: str) -> str:
+    """Lowercase, оставить [a-z0-9_-], схлопнуть/обрезать дефисы."""
+    s = (s or '').lower()
+    s = re.sub(r'[^a-z0-9_-]+', '-', s)
+    s = re.sub(r'-+', '-', s).strip('-')
+    return s
+
+
+def _extract_subdomain(url: str) -> str:
+    """Из `https://corp.atlassian.net/...` → `corp`. Skip generic-prefixes."""
+    if not url:
+        return ''
+    try:
+        host = urlparse(url).hostname or ''
+    except Exception:
+        return ''
+    if not host:
+        return ''
+    parts = host.split('.')
+    for p in parts:
+        if p and p not in _GENERIC_HOST_PARTS and len(p) >= 2:
+            return _sanitize_name(p)
+    return _sanitize_name(parts[0]) if parts else ''
+
+
+def suggest_source_name(kind: str, form: dict[str, Any]) -> str:
+    """Базовое имя источника (без collision-suffix). Caller добавит -2/-3 если нужно."""
+    if kind == 'local':
+        return 'doc'                          # singleton; путь зашит в /app/data
+    if kind in ('confluence', 'jira'):
+        sub = _extract_subdomain(form.get('url') or '')
+        return sub or kind                    # fallback на kind если URL нет
+    return kind or 'main'
+
+
+def suggest_llm_name(form: dict[str, Any]) -> str:
+    """Базовое имя LLM. Provider hint для известных + модель-короткая."""
+    base_url = form.get('base_url') or ''
+    host = (urlparse(base_url).hostname or '').lower() if base_url else ''
+    provider = ''
+    for hint, name in _KNOWN_LLM_PROVIDERS:
+        if hint in host:
+            provider = name
+            break
+    if not provider:
+        provider = _extract_subdomain(base_url) or 'main'
+    return provider
+
+
+def unique_name(base: str, existing: set[str]) -> str:
+    """Если base уже занят — добавить -2/-3/...; иначе вернуть как есть."""
+    if not base:
+        base = 'main'
+    if base not in existing:
+        return base
+    i = 2
+    while f'{base}-{i}' in existing:
+        i += 1
+    return f'{base}-{i}'
+
+
 @dataclass(frozen=True)
 class PresetField:
-    """Описание одного поля формы пресета."""
+    """Описание одного поля формы пресета.
+
+    kind='chips' — список ID-чипов (page-id для Confluence). UI парсит вход
+    с любыми разделителями, рендерит как теги, лениво подтягивает названия
+    через resolver_endpoint. Значение в form: list[{id, comment}].
+    variant='danger' — визуально красный (для skip/exclude-семантики).
+    """
     name: str
     label: str
-    kind: Literal['text', 'password', 'number', 'checkbox'] = 'text'
+    kind: Literal['text', 'password', 'number', 'checkbox', 'chips'] = 'text'
     required: bool = True
     default: str | int | bool | None = None
     placeholder: str | None = None
     help: str | None = None
+    variant: Literal['default', 'danger'] | None = None
+    # Для kind='chips': URL endpoint'а для resolve названий по ID.
+    # Получает {url, username, secret_key, secret_value, ids[]} → {id: {title, path, error}}.
+    resolver_endpoint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -57,11 +156,12 @@ def _capabilities(form: dict[str, Any]) -> list[str]:
 def _build_openai_compatible(form: dict[str, Any]) -> dict[str, Any]:
     """Любой OpenAI-совместимый endpoint: Grok, OpenRouter, vLLM, OpenAI.
 
+    Имя генерируется автоматически (apply route добавит -2/-3 при коллизии).
     api_key может быть пустым — это валидно при Edit-режиме (бэкенд подтянет
     существующий секрет из текущего конфига). См. routes/presets.py::apply.
     """
     out = {
-        'name': form.get('name') or 'main',
+        'name': form.get('name') or suggest_llm_name(form),
         'base_url': form['base_url'],
         'model': form['model'],
         'capabilities': _capabilities(form),
@@ -75,7 +175,9 @@ def _build_openai_compatible(form: dict[str, Any]) -> dict[str, Any]:
 
 def _build_ollama_llm(form: dict[str, Any]) -> dict[str, Any]:
     return {
-        'name': form.get('name') or 'ollama',
+        'name': form.get('name') or suggest_llm_name(
+            {**form, 'base_url': form.get('base_url') or 'http://host.docker.internal:11434/v1'},
+        ),
         'base_url': form.get('base_url') or 'http://host.docker.internal:11434/v1',
         'model': form['model'],
         'api_key': 'ollama',                # Ollama игнорирует, но SDK требует
@@ -86,13 +188,9 @@ def _build_ollama_llm(form: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# Общие поля для обоих LLM-пресетов (name + vision-capable)
-def _llm_common_fields(default_name: str = '') -> list[PresetField]:
+# Общие поля для обоих LLM-пресетов (только vision-флаг — имя генерится auto)
+def _llm_common_fields() -> list[PresetField]:
     return [
-        PresetField('name', 'Имя (уникальное в пуле)',
-                    default=default_name,
-                    help='Используется для ссылок в indexing.llm/.vision. '
-                         'Lowercase, без пробелов (a-z 0-9 _ -).'),
         PresetField('vision_capable', 'Vision-capable (multimodal)',
                     kind='checkbox', required=False, default=False,
                     help='Отметьте, если модель умеет обрабатывать изображения '
@@ -107,7 +205,7 @@ LLM_PRESETS: list[Preset] = [
         description='Любой OpenAI-совместимый endpoint: Grok, OpenRouter, vLLM, '
                     'OpenAI, Together, и др. В будущем — отдельные пресеты '
                     'для известных провайдеров с проверенными настройками.',
-        fields=_llm_common_fields(default_name='main') + [
+        fields=_llm_common_fields() + [
             PresetField('base_url', 'Base URL',
                         placeholder='https://api.x.ai/v1'),
             PresetField('model', 'Модель',
@@ -130,7 +228,7 @@ LLM_PRESETS: list[Preset] = [
         description='Локальный Ollama-сервер. По умолчанию max_concurrent=1 — '
                     'Ollama сериализует запросы. Thinking-режим выключается '
                     'автоматически (для qwen3, которые думают по умолчанию).',
-        fields=_llm_common_fields(default_name='ollama') + [
+        fields=_llm_common_fields() + [
             PresetField('model', 'Модель', placeholder='qwen3.5:9b',
                         help='Имя модели как в выводе `ollama list`.'),
             PresetField('base_url', 'Base URL',
@@ -159,9 +257,10 @@ LOCAL_SOURCE_PATH = '/app/data'
 
 
 def _build_local_source(form: dict[str, Any]) -> dict[str, Any]:
+    """Singleton: имя всегда 'doc', путь зашит в /app/data."""
     return {
         'kind': 'local',
-        'name': form.get('name') or 'docs',
+        'name': 'doc',
         'path': LOCAL_SOURCE_PATH,
     }
 
@@ -172,10 +271,16 @@ def _build_confluence(form: dict[str, Any]) -> dict[str, Any]:
     Auth: одно из двух — `password` (on-prem) или `api_token` (Cloud).
     Pydantic-валидатор на уровне ConfluenceSourceConfig потребует ровно одно из них.
     Секреты опциональны — при пустом значении бэкенд подтянет существующий.
+
+    Имя инстанса генерируется из subdomain URL (apply route добавит -2/-3 при коллизии).
+
+    ancestor_ids/skip_ancestor_ids приходят из UI как chip-list:
+    [{id, comment}, ...] — конвертируем в CommentedSeq, чтобы YAML overlay
+    содержал inline-комменты с breadcrumb-путём страницы.
     """
-    out = {
+    out: dict[str, Any] = {
         'kind': 'confluence',
-        'name': form.get('name') or 'main',
+        'name': form.get('name') or suggest_source_name('confluence', form),
         'url': form['url'],
         'username': form['username'],
     }
@@ -185,18 +290,57 @@ def _build_confluence(form: dict[str, Any]) -> dict[str, Any]:
     elif form.get('password'):
         out['password'] = form['password']
     if form.get('spaces'):
-        out['spaces'] = [s.strip() for s in form['spaces'].split(',') if s.strip()]
-    if form.get('ancestor_ids'):
-        out['ancestor_ids'] = [s.strip() for s in form['ancestor_ids'].split(',') if s.strip()]
+        out['spaces'] = _parse_csv_field(form['spaces'])
+    chips = _parse_chips(form.get('ancestor_ids'))
+    if chips:
+        out['ancestor_ids'] = make_commented_id_list(chips)
+    skip_chips = _parse_chips(form.get('skip_ancestor_ids'))
+    if skip_chips:
+        out['skip_ancestor_ids'] = make_commented_id_list(skip_chips)
     if form.get('attachments_enabled') in (True, 'true', 'on', '1'):
         out['attachments'] = {'enabled': True}
     return out
 
 
+def _parse_csv_field(value: Any) -> list[str]:
+    """Универсальный парсер: list[str] возвращает as-is (фильтруя пустые),
+    str разбивает по запятой/пробелу/переносам.
+    """
+    if isinstance(value, list):
+        return [str(s).strip() for s in value if str(s).strip()]
+    if isinstance(value, str):
+        # любые из ',', ';', whitespace в качестве разделителя
+        import re
+        return [s.strip() for s in re.split(r'[,;\s]+', value) if s.strip()]
+    return []
+
+
+def _parse_chips(value: Any) -> list[dict[str, str]]:
+    """UI шлёт chips как list[{id, comment}]. Старый формат (csv-строка) тоже
+    поддерживается на случай ручной правки — там comment будет пустой.
+    """
+    if isinstance(value, list):
+        result = []
+        for item in value:
+            if isinstance(item, dict) and item.get('id'):
+                result.append({
+                    'id': str(item['id']).strip(),
+                    'comment': str(item.get('comment') or '').strip(),
+                })
+            elif isinstance(item, (str, int)):
+                s = str(item).strip()
+                if s:
+                    result.append({'id': s, 'comment': ''})
+        return result
+    if isinstance(value, str):
+        return [{'id': s, 'comment': ''} for s in _parse_csv_field(value)]
+    return []
+
+
 def _build_jira(form: dict[str, Any]) -> dict[str, Any]:
     out = {
         'kind': 'jira',
-        'name': form.get('name') or 'main',
+        'name': form.get('name') or suggest_source_name('jira', form),
         'url': form['url'],
         'username': form['username'],
     }
@@ -211,10 +355,7 @@ SOURCE_PRESETS: list[Preset] = [
         description='Markdown и PDF из локальной папки. Путь зашит на /app/data — '
                     'это volume в docker-compose, на хосте — ./data/. '
                     'Положите файлы туда; для смены пути правьте docker-compose.yml.',
-        fields=[
-            PresetField('name', 'Имя', default='docs', required=False,
-                        help='Уникальный id среди local-источников. Lowercase.'),
-        ],
+        fields=[],                            # singleton — никаких полей
         build=_build_local_source,
     ),
     Preset(
@@ -222,8 +363,6 @@ SOURCE_PRESETS: list[Preset] = [
         description='Atlassian Confluence — Cloud или on-premise. '
                     'Заполните либо API token (Cloud), либо password (on-prem).',
         fields=[
-            PresetField('name', 'Имя', default='main', required=False,
-                        help='Уникальный id (например "corp", "vendor").'),
             PresetField('url', 'URL',
                         placeholder='https://your-company.atlassian.net'
                                     ' или https://confluence.your-company.com'),
@@ -235,11 +374,24 @@ SOURCE_PRESETS: list[Preset] = [
             PresetField('password', 'Password (для on-premise)',
                         kind='password', required=False,
                         help='Для self-hosted Confluence Server / Data Center.'),
-            PresetField('spaces', 'Spaces (через запятую)', required=False,
-                        placeholder='DOCS, ENG'),
-            PresetField('ancestor_ids', 'Ancestor IDs (через запятую)', required=False,
-                        placeholder='123456, 789012',
-                        help='Только потомки этих страниц. Приоритет над spaces.'),
+            PresetField('spaces', 'Spaces', required=False,
+                        placeholder='DOCS, ENG (через запятую/пробел)',
+                        help='Space keys (как в URL Confluence /spaces/DOCS/...).'),
+            PresetField('ancestor_ids', 'Включить разделы',
+                        kind='chips', required=False,
+                        placeholder='ID или URL страниц (любые разделители)',
+                        resolver_endpoint='/api/setup/confluence-page-paths',
+                        help='Загружаются ТОЛЬКО потомки этих страниц '
+                             '(включая их сами). Приоритет над spaces. '
+                             'Можно вставлять как ID (1234567), так и URL '
+                             '(https://confluence/display/SPACE/Title или '
+                             'https://confluence/pages/viewpage.action?pageId=...).'),
+            PresetField('skip_ancestor_ids', 'Исключить разделы',
+                        kind='chips', required=False, variant='danger',
+                        placeholder='ID или URL страниц, которые НЕ загружать',
+                        resolver_endpoint='/api/setup/confluence-page-paths',
+                        help='Эти страницы и все их потомки пропускаются '
+                             '(исключение применяется поверх ancestor_ids/spaces).'),
             PresetField('attachments_enabled', 'Индексировать PDF-вложения',
                         kind='checkbox', required=False, default=False),
         ],
@@ -250,7 +402,6 @@ SOURCE_PRESETS: list[Preset] = [
         description='Jira (on-premise). Задачи берутся по ссылкам в '
                     'уже-проиндексированных документах (Confluence/Local).',
         fields=[
-            PresetField('name', 'Имя', default='main', required=False),
             PresetField('url', 'URL', placeholder='https://jira.your-company.com'),
             PresetField('username', 'Username'),
             PresetField('password', 'Password', kind='password'),
@@ -386,6 +537,8 @@ def serialize_preset(p: Preset) -> dict[str, Any]:
                 'default': f.default,
                 'placeholder': f.placeholder,
                 'help': f.help,
+                'variant': f.variant,
+                'resolver_endpoint': f.resolver_endpoint,
             }
             for f in p.fields
         ],

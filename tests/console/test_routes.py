@@ -247,16 +247,17 @@ class TestPresetsRoutes:
         assert g['api_key'] == 'k2'
 
     async def test_apply_local_source_appends(self, client, workspace):
+        # Local — singleton: имя всегда 'doc', путь /app/data; форма игнорируется.
         r = await client.post('/api/presets/apply', json={
             'target': 'source',
             'preset_id': 'local',
-            'form': {'name': 'extra', 'path': '/data/extra'},
+            'form': {},
         })
         assert r.status_code == 200, r.text
         local_path = workspace['cfg'].with_name('config.local.yml')
         local = yaml.safe_load(local_path.read_text())
         kinds_names = [(s['kind'], s['name']) for s in local['sources']]
-        assert ('local', 'extra') in kinds_names
+        assert ('local', 'doc') in kinds_names
 
     async def test_apply_unknown_preset_400(self, client):
         r = await client.post('/api/presets/apply', json={

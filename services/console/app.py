@@ -26,6 +26,7 @@ from services.console.routes import config as config_routes
 from services.console.routes import index as index_routes
 from services.console.routes import knowledge_map as km_routes
 from services.console.routes import presets as presets_routes
+from services.console.routes import retrieval as retrieval_routes
 from services.console.routes import schedule as schedule_routes
 from services.console.routes import setup as setup_routes
 from services.console.routes import stats as stats_routes
@@ -72,6 +73,7 @@ def create_app() -> FastAPI:
     app.include_router(stats_routes.router, prefix='/api', tags=['stats'])
     app.include_router(km_routes.router, prefix='/api/knowledge-map', tags=['knowledge-map'])
     app.include_router(presets_routes.router, prefix='/api/presets', tags=['presets'])
+    app.include_router(retrieval_routes.router, prefix='/api/retrieval', tags=['retrieval'])
     app.include_router(setup_routes.router, prefix='/api/setup', tags=['setup'])
     app.include_router(schedule_routes.router, prefix='/api/schedule', tags=['schedule'])
 

@@ -2,6 +2,14 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 pydantic>=2.0
 pyyaml>=6.0
+# ruamel.yaml — для записи overlay (config.local.yml) с inline-комментами
+# (например, путь Confluence-страницы рядом с её ID). PyYAML комменты не пишет.
+ruamel.yaml>=0.18
+# atlassian-python-api — для probing Confluence из Setup wizard'а:
+# резолв названий страниц и breadcrumb-путей по ancestor_ids/skip_ancestor_ids.
+# В morag pyproject.toml эта зависимость только в [indexing], а console image
+# ставится без extras — поэтому объявляем здесь явно.
+atlassian-python-api>=3.41
 # qdrant-client — нужен для /api/stats (counts collections в Qdrant).
 # Управление индексацией идёт через HTTP-control-plane morag-indexer'а
 # (см. IndexerClient), не через qdrant напрямую.

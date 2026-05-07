@@ -19,6 +19,7 @@ from qdrant_client import AsyncQdrantClient
 # Импорт из installed morag-пакета (ставится через services/pipeline/Dockerfile).
 # Файл специально назван morag_pipeline.py (не morag.py) чтобы избежать коллизии с
 # пакетом в sys.modules — OWUI регистрирует файл по filename как имя модуля.
+from morag.config import Config, load_config
 from morag.llm.client import GenerationParams, LLMClient
 from morag.indexing.embedder import HttpEmbedder, HttpGteSparseEmbedder
 from morag.retrieval import (
@@ -33,15 +34,51 @@ logger = logging.getLogger(__name__)
 _T = TypeVar('_T')
 
 
-def _required_env(name: str) -> str:
-    """Прочитать обязательную env. RuntimeError если пусто или не задано."""
-    value = os.getenv(name, '').strip()
-    if not value:
-        raise RuntimeError(
-            f'Required environment variable {name!r} is not set. '
-            f'Configure it in docker-compose.yml or OWUI Admin → Pipelines → Valves.'
-        )
-    return value
+# ── Config ↔ Valves merge helpers ─────────────────────────────────────────────
+# Источник истины — config.yml (читается в __init__). OWUI Valves остаются как
+# OVERRIDE: значение Valve != sentinel (пусто/0/None) → перебивает config.
+# Sentinel-defaults в Valves позволяют свежим установкам сразу унаследовать config.
+
+def _str_or(valve: str, cfg: str | None, default: str = '') -> str:
+    if valve and valve.strip():
+        return valve.strip()
+    return cfg if cfg is not None else default
+
+
+def _int_or(valve: int, cfg: int | None, default: int = 0) -> int:
+    if valve:                                        # 0 = sentinel (use config)
+        return valve
+    return cfg if cfg is not None else default
+
+
+def _float_or(valve: float, cfg: float | None, default: float = 0.0) -> float:
+    if valve:                                        # 0.0 = sentinel
+        return valve
+    return cfg if cfg is not None else default
+
+
+def _bool_or(valve: bool | None, cfg: bool | None, default: bool = True) -> bool:
+    if valve is not None:                            # None = sentinel
+        return valve
+    return cfg if cfg is not None else default
+
+
+def _try_load_config() -> Config | None:
+    """Прочитать config.yml + overlay. None если не нашли/не валиден.
+
+    Pipeline должен загружаться даже на свежей установке без config — тогда
+    он работает в env-only mode. Все обязательные поля должны быть заданы
+    через Valves либо env-vars.
+    """
+    cfg_path = os.getenv('MORAG_CONFIG_PATH', '/app/conf/config.yml')
+    if not os.path.exists(cfg_path):
+        logger.info('Config file not found at %s — env-only mode', cfg_path)
+        return None
+    try:
+        return load_config(cfg_path)
+    except Exception as exc:
+        logger.warning('Failed to load config %s: %s — env-only mode', cfg_path, exc)
+        return None
 
 _md = MarkdownIt()
 
@@ -201,142 +238,347 @@ _SYSTEM_PROMPT = (
     'Если старый и новый документ противоречат — доверяй новому.\n'
 )
 
-class Pipeline:
-    class Valves(BaseModel):
-        QDRANT_URL: str
-        QDRANT_COLLECTION: str
-        QDRANT_DOCS_COLLECTION: str
-        QDRANT_KNOWLEDGE_MAP_COLLECTION: str
+def _init_valves_from_env() -> dict:
+    """Bootstrap-инициализация Valves из env. Существующие OWUI-инсталляции
+    могли указывать значения через docker-compose env (легаси-режим). Эти env
+    становятся initial-значениями Valves; OWUI потом override'ит из своей DB.
 
-        SPARSE_EMBED_URL: str
-        DENSE_EMBED_URL: str            # OpenAI-compat endpoint, ОБЯЗАТЕЛЬНО с /v1 (для AsyncOpenAI SDK)
-        DENSE_EMBEDDER_MODEL: str       # имя модели для /v1/embeddings (Ollama-нотация / HF-имя)
-        DENSE_DIM: int                  # размерность вектора (Qwen3-Embedding-4B = 2560)
-        QUERY_TEMPLATE: str             # формат входа query-side; {text} → текст запроса
+    Default '' / 0 / None — sentinel «брать из config».
+    """
+    def _e(name: str) -> str:
+        return os.getenv(name, '').strip()
 
-        LLM_URL: str
-        LLM_MODEL: str
-        LLM_API_KEY: str
-        LLM_TEMPERATURE: float
-        LLM_MAX_TOKENS: int
-        LLM_ANSWER_MAX_TOKENS: int
+    def _ei(name: str) -> int:
+        v = _e(name)
+        return int(v) if v.isdigit() or (v.startswith('-') and v[1:].isdigit()) else 0
 
-        SEARCH_LIMIT: int
-        UNIQUE_DOCS_CAP: int            # hard cap на число уникальных документов в результате search (0 = без лимита)
-        SECTIONS_LIMIT: int             # сколько top-секций возвращает find_section
-        FIND_SECTION_DOC_POOL: int      # сколько документов берём из _search_docs для агрегации
-        FIND_SECTION_DESCENT_THRESHOLD: float  # 0..1; если ребёнок секции покрывает ≥% votes — спускаемся в него. 0 отключает
-        FIND_SECTION_TOP_DOCS: int      # сколько топовых документов из _search_docs добавляем как doc_ids в дополнение к секциям (страхует от потери одинокого чемпиона-секции при vote counting)
-        MAX_ITERATIONS: int
-        ENABLE_THINKING: bool
-        ENABLE_DIVERSITY_NUDGE: bool
-        CITATION_MAX_CHARS: int
-        HTTP_TIMEOUT: int
-        ADMIN_INSTRUCTIONS: str
+    def _ef(name: str) -> float:
+        v = _e(name)
+        try:
+            return float(v) if v else 0.0
+        except ValueError:
+            return 0.0
 
-    def __init__(self):
-        self.valves = self.Valves(
-            QDRANT_URL=os.getenv('QDRANT_URL', 'http://qdrant:6333'),
-            QDRANT_COLLECTION=os.getenv('QDRANT_COLLECTION', 'chunks'),
-            QDRANT_DOCS_COLLECTION=os.getenv('QDRANT_DOCS_COLLECTION', 'docs'),
-            QDRANT_KNOWLEDGE_MAP_COLLECTION=os.getenv(
-                'QDRANT_KNOWLEDGE_MAP_COLLECTION', 'knowledge_map',
+    def _eb(name: str) -> bool | None:
+        v = _e(name).lower()
+        if v in ('true', '1', 'yes', 'on'):
+            return True
+        if v in ('false', '0', 'no', 'off'):
+            return False
+        return None
+
+    return {
+        'QDRANT_URL': _e('QDRANT_URL'),
+        'QDRANT_COLLECTION': _e('QDRANT_COLLECTION'),
+        'QDRANT_DOCS_COLLECTION': _e('QDRANT_DOCS_COLLECTION'),
+        'QDRANT_KNOWLEDGE_MAP_COLLECTION': _e('QDRANT_KNOWLEDGE_MAP_COLLECTION'),
+        'SPARSE_EMBED_URL': _e('SPARSE_EMBED_URL'),
+        'DENSE_EMBED_URL': _e('DENSE_EMBED_URL'),
+        'DENSE_EMBEDDER_MODEL': _e('DENSE_EMBEDDER_MODEL'),
+        'DENSE_DIM': _ei('DENSE_DIM'),
+        'QUERY_TEMPLATE': _e('QUERY_TEMPLATE'),
+        'LLM_URL': _e('LLM_URL'),
+        'LLM_MODEL': _e('LLM_MODEL'),
+        'LLM_API_KEY': _e('LLM_API_KEY'),
+        'LLM_TEMPERATURE': _ef('LLM_TEMPERATURE'),
+        'LLM_MAX_TOKENS': _ei('LLM_MAX_TOKENS'),
+        'LLM_ANSWER_MAX_TOKENS': _ei('LLM_ANSWER_MAX_TOKENS'),
+        'RERANK_LLM_URL': _e('RERANK_LLM_URL'),
+        'RERANK_LLM_MODEL': _e('RERANK_LLM_MODEL'),
+        'RERANK_LLM_API_KEY': _e('RERANK_LLM_API_KEY'),
+        'RERANK_MAX_TOKENS': _ei('RERANK_MAX_TOKENS'),
+        'SEARCH_LIMIT': _ei('SEARCH_LIMIT'),
+        'UNIQUE_DOCS_CAP': _ei('UNIQUE_DOCS_CAP'),
+        'SECTIONS_LIMIT': _ei('SECTIONS_LIMIT'),
+        'FIND_SECTION_DOC_POOL': _ei('FIND_SECTION_DOC_POOL'),
+        'FIND_SECTION_DESCENT_THRESHOLD': _ef('FIND_SECTION_DESCENT_THRESHOLD'),
+        'FIND_SECTION_TOP_DOCS': _ei('FIND_SECTION_TOP_DOCS'),
+        'MAX_ITERATIONS': _ei('MAX_ITERATIONS'),
+        'ENABLE_THINKING': _eb('ENABLE_THINKING'),
+        'RERANK_ENABLE_THINKING': _eb('RERANK_ENABLE_THINKING'),
+        'ENABLE_DIVERSITY_NUDGE': _eb('ENABLE_DIVERSITY_NUDGE'),
+        'CITATION_MAX_CHARS': _ei('CITATION_MAX_CHARS'),
+        'HTTP_TIMEOUT': _ei('HTTP_TIMEOUT'),
+        'ADMIN_INSTRUCTIONS': _e('ADMIN_INSTRUCTIONS'),
+    }
+
+
+def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
+    """Merge Valves + config → плоский dict с финальными значениями.
+
+    Приоритет: Valve (если != sentinel) → config → hardcoded fallback.
+    """
+    retr = cfg.retrieval if cfg else None
+    idx = cfg.indexing if cfg else None
+    qdrant_cfg = cfg.qdrant if cfg else None
+    dense = idx.dense_embedder if (idx and idx.dense_embedder) else None
+    sparse = idx.sparse_embedder if idx else None
+    km = idx.knowledge_map if idx else None
+    agent_role = retr.agent if retr else None
+    rerank_role = retr.reranker if retr else None
+    search = retr.search if retr else None
+    find_sec = search.find_section if search else None
+    features = retr.features if retr else None
+    prompts = retr.prompts if retr else None
+
+    # Резолв agent LLM-инстанса из llms-pool
+    agent_llm = cfg.llm_by_name(agent_role.llm) if (agent_role and cfg) else None
+    rerank_llm = cfg.llm_by_name(rerank_role.llm) if (rerank_role and cfg) else None
+
+    # Default fallback для Qdrant URL: docker-compose hostname
+    qdrant_url_cfg = (
+        f'http://{qdrant_cfg.host}:{qdrant_cfg.port}' if qdrant_cfg else None
+    )
+
+    s = {
+        'qdrant_url': _str_or(v.QDRANT_URL, qdrant_url_cfg, default='http://qdrant:6333'),
+        'chunks_collection': _str_or(
+            v.QDRANT_COLLECTION,
+            qdrant_cfg.collection_chunks if qdrant_cfg else None,
+            default='chunks',
+        ),
+        'docs_collection': _str_or(
+            v.QDRANT_DOCS_COLLECTION,
+            qdrant_cfg.collection_docs if qdrant_cfg else None,
+            default='docs',
+        ),
+        'knowledge_map_collection': _str_or(
+            v.QDRANT_KNOWLEDGE_MAP_COLLECTION,
+            km.collection if km else None,
+            default='knowledge_map',
+        ),
+
+        'sparse_url': _str_or(
+            v.SPARSE_EMBED_URL, sparse.base_url if sparse else None,
+            default='http://embedder-gte:8081',
+        ),
+        'dense_url': _str_or(v.DENSE_EMBED_URL, dense.base_url if dense else None),
+        'dense_model': _str_or(v.DENSE_EMBEDDER_MODEL, dense.model if dense else None),
+        'dense_dim': _int_or(v.DENSE_DIM, dense.dim if dense else None),
+        'query_template': _str_or(
+            v.QUERY_TEMPLATE,
+            (dense.query_template if dense else None),
+            default=(
+                'Instruct: Given a user question, retrieve passages that answer '
+                'the question\nQuery:{text}'
             ),
+        ),
 
-            SPARSE_EMBED_URL=os.getenv('SPARSE_EMBED_URL', 'http://embedder-gte:8081'),
-            # ОБЯЗАТЕЛЬНЫЕ env vars — без них pipeline бесполезен. Лучше fail-fast чем
-            # дефолты на конкретный хост (host.docker.internal или localhost) — это путает
-            # на проде и оставляет позорные значения в логах.
-            DENSE_EMBED_URL=_required_env('DENSE_EMBED_URL'),
-            DENSE_EMBEDDER_MODEL=_required_env('DENSE_EMBEDDER_MODEL'),
-            DENSE_DIM=int(_required_env('DENSE_DIM')),
-            # Qwen3 Instruct template — ДОЛЖЕН совпадать с indexing query_template
-            # иначе query и docs эмбеддятся разными функциями → потеря качества dense-канала.
-            QUERY_TEMPLATE=os.getenv(
-                'QUERY_TEMPLATE',
-                'Instruct: Given a user question, retrieve passages that answer the question\nQuery:{text}',
-            ),
+        'agent_url': _str_or(v.LLM_URL, agent_llm.base_url if agent_llm else None),
+        'agent_model': _str_or(v.LLM_MODEL, agent_llm.model if agent_llm else None),
+        'agent_api_key': _str_or(v.LLM_API_KEY, agent_llm.api_key if agent_llm else None),
+        'agent_temperature': _float_or(
+            v.LLM_TEMPERATURE,
+            agent_role.temperature if agent_role else None,
+            default=0.3,
+        ),
+        'agent_max_tokens': _int_or(
+            v.LLM_MAX_TOKENS,
+            agent_role.max_tokens if agent_role else None,
+            default=4096,
+        ),
+        'agent_answer_max_tokens': _int_or(v.LLM_ANSWER_MAX_TOKENS, None, default=0),
+        # bool|None: None = НЕ слать reasoning-флаги (xAI compat). Значение из
+        # valve приоритетнее; при отсутствии — из config; иначе None (default).
+        'agent_enable_thinking': (
+            v.ENABLE_THINKING if v.ENABLE_THINKING is not None
+            else (agent_role.enable_thinking if agent_role else None)
+        ),
 
-            LLM_URL=_required_env('LLM_URL'),
-            LLM_MODEL=_required_env('LLM_MODEL'),
-            LLM_API_KEY=_required_env('LLM_API_KEY'),
-            LLM_TEMPERATURE=float(os.getenv('LLM_TEMPERATURE', '0.3')),
-            LLM_MAX_TOKENS=int(os.getenv('LLM_MAX_TOKENS', '4096')),
-            LLM_ANSWER_MAX_TOKENS=int(os.getenv('LLM_ANSWER_MAX_TOKENS', '0')),
+        # Reranker — fallback на agent (через config OR через valves) если не задан отдельно.
+        # Цепочка: RERANK Valve → reranker config → agent Valve → agent config.
+        'rerank_url': _str_or(
+            v.RERANK_LLM_URL,
+            rerank_llm.base_url if rerank_llm else None,
+        ) or _str_or(v.LLM_URL, agent_llm.base_url if agent_llm else None),
+        'rerank_model': _str_or(
+            v.RERANK_LLM_MODEL,
+            rerank_llm.model if rerank_llm else None,
+        ) or _str_or(v.LLM_MODEL, agent_llm.model if agent_llm else None),
+        'rerank_api_key': _str_or(
+            v.RERANK_LLM_API_KEY,
+            rerank_llm.api_key if rerank_llm else None,
+        ) or _str_or(v.LLM_API_KEY, agent_llm.api_key if agent_llm else None),
+        'rerank_max_tokens': _int_or(
+            v.RERANK_MAX_TOKENS,
+            rerank_role.max_tokens if rerank_role else None,
+            default=100,
+        ),
+        # rerank по умолчанию thinking=False (быстрее, structured output);
+        # None допустим если юзер явно хочет «не слать флаги».
+        'rerank_enable_thinking': (
+            v.RERANK_ENABLE_THINKING if v.RERANK_ENABLE_THINKING is not None
+            else (rerank_role.enable_thinking if rerank_role else False)
+        ),
 
-            SEARCH_LIMIT=int(os.getenv('SEARCH_LIMIT', '50')),
-            UNIQUE_DOCS_CAP=int(os.getenv('UNIQUE_DOCS_CAP', '10')),
-            SECTIONS_LIMIT=int(os.getenv('SECTIONS_LIMIT', '5')),
-            FIND_SECTION_DOC_POOL=int(os.getenv('FIND_SECTION_DOC_POOL', '20')),
-            FIND_SECTION_DESCENT_THRESHOLD=float(os.getenv('FIND_SECTION_DESCENT_THRESHOLD', '0.5')),
-            FIND_SECTION_TOP_DOCS=int(os.getenv('FIND_SECTION_TOP_DOCS', '3')),
-            MAX_ITERATIONS=int(os.getenv('MAX_ITERATIONS', '9')),
-            ENABLE_THINKING=os.getenv('ENABLE_THINKING', 'true').lower() == 'true',
-            ENABLE_DIVERSITY_NUDGE=os.getenv('ENABLE_DIVERSITY_NUDGE', 'true').lower() == 'true',
-            CITATION_MAX_CHARS=int(os.getenv('CITATION_MAX_CHARS', '5000')),
-            HTTP_TIMEOUT=int(os.getenv('HTTP_TIMEOUT', '300')),
-            ADMIN_INSTRUCTIONS=os.getenv('ADMIN_INSTRUCTIONS',
+        'search_limit': _int_or(v.SEARCH_LIMIT, search.limit if search else None, default=50),
+        'unique_docs_cap': _int_or(
+            v.UNIQUE_DOCS_CAP, search.unique_docs_cap if search else None, default=10,
+        ),
+        'sections_limit': _int_or(
+            v.SECTIONS_LIMIT, search.sections_limit if search else None, default=5,
+        ),
+        'find_section_doc_pool': _int_or(
+            v.FIND_SECTION_DOC_POOL,
+            find_sec.doc_pool if find_sec else None, default=20,
+        ),
+        'find_section_descent_threshold': _float_or(
+            v.FIND_SECTION_DESCENT_THRESHOLD,
+            find_sec.descent_threshold if find_sec else None, default=0.5,
+        ),
+        'find_section_top_docs': _int_or(
+            v.FIND_SECTION_TOP_DOCS,
+            find_sec.top_docs if find_sec else None, default=3,
+        ),
+        'max_iterations': _int_or(
+            v.MAX_ITERATIONS, search.max_iterations if search else None, default=9,
+        ),
+        'citation_max_chars': _int_or(
+            v.CITATION_MAX_CHARS, search.citation_max_chars if search else None,
+            default=5000,
+        ),
+        'enable_diversity_nudge': _bool_or(
+            v.ENABLE_DIVERSITY_NUDGE,
+            features.enable_diversity_nudge if features else None,
+            default=True,
+        ),
+
+        'http_timeout': _int_or(
+            v.HTTP_TIMEOUT, retr.http_timeout if retr else None, default=300,
+        ),
+        'admin_instructions': _str_or(
+            v.ADMIN_INSTRUCTIONS,
+            prompts.admin_instructions if prompts else None,
+            default=(
                 'Если информация не была найдена в конкретном разделе знаний '
                 'или её недостаточно для полного ответа, ОБЯЗАТЕЛЬНО сделай '
                 'дополнительный поиск без указания раздела (section_ids) — '
-                'по всей базе знаний.',
+                'по всей базе знаний.'
             ),
-        )
-        # Persistent event loop для async LLMClient/embedders из morag-пакета.
-        # OWUI Pipelines pipe() — sync-генератор, поэтому каждый async-вызов
-        # пробрасываем через self._run(coro).
+        ),
+    }
+    return s
+
+
+class Pipeline:
+    """OWUI Pipelines class. Конфигурация source-of-truth — `config.yml` в
+    bind-mount'е `/app/conf/`. Pipeline читает его в `__init__` и больше не
+    перечитывает (изменения требуют `docker compose restart pipelines`).
+
+    Valves остаются как override-механизм для админа через OWUI UI: пустые/
+    нулевые значения = «использовать config», непустые = override этого поля.
+    """
+
+    class Valves(BaseModel):
+        # Все sentinel-default ('' / 0 / 0.0 / None) — означают «брать из config».
+        # OWUI юзер вписывает реальное значение → перебивает config-сторону.
+        QDRANT_URL: str = ''
+        QDRANT_COLLECTION: str = ''
+        QDRANT_DOCS_COLLECTION: str = ''
+        QDRANT_KNOWLEDGE_MAP_COLLECTION: str = ''
+
+        SPARSE_EMBED_URL: str = ''
+        DENSE_EMBED_URL: str = ''           # OpenAI-compat endpoint, ОБЯЗАТЕЛЬНО с /v1
+        DENSE_EMBEDDER_MODEL: str = ''
+        DENSE_DIM: int = 0
+        QUERY_TEMPLATE: str = ''
+
+        # Agent LLM (function calling)
+        LLM_URL: str = ''
+        LLM_MODEL: str = ''
+        LLM_API_KEY: str = ''
+        LLM_TEMPERATURE: float = 0.0
+        LLM_MAX_TOKENS: int = 0
+        LLM_ANSWER_MAX_TOKENS: int = 0
+
+        # Reranker LLM (по умолчанию — тот же что agent, override через Valves)
+        RERANK_LLM_URL: str = ''
+        RERANK_LLM_MODEL: str = ''
+        RERANK_LLM_API_KEY: str = ''
+        RERANK_MAX_TOKENS: int = 0
+
+        # Search params
+        SEARCH_LIMIT: int = 0
+        UNIQUE_DOCS_CAP: int = 0            # hard cap на уникальные документы (0 = config / без лимита)
+        SECTIONS_LIMIT: int = 0
+        FIND_SECTION_DOC_POOL: int = 0
+        FIND_SECTION_DESCENT_THRESHOLD: float = 0.0
+        FIND_SECTION_TOP_DOCS: int = 0
+        MAX_ITERATIONS: int = 0
+        ENABLE_THINKING: bool | None = None       # None = config; True/False = override agent thinking
+        RERANK_ENABLE_THINKING: bool | None = None
+        ENABLE_DIVERSITY_NUDGE: bool | None = None
+        CITATION_MAX_CHARS: int = 0
+        HTTP_TIMEOUT: int = 0
+        ADMIN_INSTRUCTIONS: str = ''
+
+    def __init__(self):
+        # 1. Прочитать config (fail-soft) и инициализировать Valves из env (back-compat)
+        self._config: Config | None = _try_load_config()
+        self.valves = self.Valves(**_init_valves_from_env())
+
+        # 2. Резолв всех настроек: Valve если задан, иначе config, иначе hardcoded fallback.
+        s = _resolve_settings(self.valves, self._config)
+
+        # 3. Persistent event loop — pipe() синхронный, async-вызовы через self._run().
         self._loop = asyncio.new_event_loop()
-        # enable_thinking=None — НЕ слать никаких provider-thinking-флагов в extra_body.
-        # Причина: _build_extra_body шлёт 4 формата сразу (vLLM chat_template_kwargs,
-        # Ollama think/options, OpenRouter reasoning). Некоторые провайдеры (xAI Grok)
-        # реджектят неизвестные поля или триггерят `tool_choice='auto'` валидацию vLLM.
-        # Для агентского цикла используем non-reasoning модель — server-default ОК.
-        # Valve ENABLE_THINKING всё ещё управляет финальным ответом через _stream_final
-        # (там raw requests, шлём только chat_template_kwargs — единственный
-        # потенциально безопасный флаг для vLLM-серверов).
-        self._llm = LLMClient(
-            base_url=self.valves.LLM_URL,
-            model=self.valves.LLM_MODEL,
-            api_key=self.valves.LLM_API_KEY,
-            timeout=self.valves.HTTP_TIMEOUT,
-            max_retries=3,
-            enable_thinking=None,
+
+        # 4. Два LLMClient: agent (tool calls + final stream) и reranker.
+        #    enable_thinking=None — НЕ слать reasoning-флаги в extra_body
+        #    (xAI Grok реджектит unknown body fields). True/False — слать явные.
+        #    Если agent_url пустой после полного резолва (нет ни в config, ни в Valves)
+        #    — pipeline технически жив, но при первом вызове ответит юзеру понятной
+        #    ошибкой (см. _ensure_agent_ready в pipe()).
+        self._llm_agent = LLMClient(
+            base_url=s['agent_url'] or 'http://invalid', model=s['agent_model'] or 'invalid',
+            api_key=s['agent_api_key'] or 'invalid',
+            timeout=s['http_timeout'], max_retries=3,
+            enable_thinking=s['agent_enable_thinking'],
         )
-        # Embeddings: те же async-классы что и в indexing — гарантия консистентности
-        # query_template (важно для dense-канала retrieval'а).
+        self._llm_rerank = LLMClient(
+            base_url=s['rerank_url'] or 'http://invalid', model=s['rerank_model'] or 'invalid',
+            api_key=s['rerank_api_key'] or 'invalid',
+            timeout=s['http_timeout'], max_retries=3,
+            enable_thinking=s['rerank_enable_thinking'],
+        )
+
+        # 5. Embedders: те же async-классы что в indexing — гарантия совпадения
+        #    query_template для dense-канала.
         self._dense_embedder = HttpEmbedder(
-            base_url=self.valves.DENSE_EMBED_URL,
-            model=self.valves.DENSE_EMBEDDER_MODEL,
-            dim=self.valves.DENSE_DIM,
-            query_template=self.valves.QUERY_TEMPLATE,
-            timeout=self.valves.HTTP_TIMEOUT,
+            base_url=s['dense_url'], model=s['dense_model'], dim=s['dense_dim'],
+            query_template=s['query_template'], timeout=s['http_timeout'],
         )
         self._sparse_embedder = HttpGteSparseEmbedder(
-            base_url=self.valves.SPARSE_EMBED_URL,
-            timeout=self.valves.HTTP_TIMEOUT,
+            base_url=s['sparse_url'], timeout=s['http_timeout'],
         )
-        # Qdrant-клиент: единый с indexing, вместо ручных requests.post.
-        # Встроенный retry на network-errors + типизированные Prefetch/Filter.
-        self._qdrant = AsyncQdrantClient(
-            url=self.valves.QDRANT_URL,
-            timeout=self.valves.HTTP_TIMEOUT,
-        )
-        # HybridSearcher — инкапсулирует RRF-поиск и Qdrant-fetch хелперы
-        # + ведёт кеши (sparse names, doc tree, titles, knowledge map, cluster).
+        self._qdrant = AsyncQdrantClient(url=s['qdrant_url'], timeout=s['http_timeout'])
         self._searcher = HybridSearcher(
             qdrant=self._qdrant,
-            dense_embedder=self._dense_embedder,
-            sparse_embedder=self._sparse_embedder,
-            chunks_collection=self.valves.QDRANT_COLLECTION,
-            docs_collection=self.valves.QDRANT_DOCS_COLLECTION,
-            knowledge_map_collection=self.valves.QDRANT_KNOWLEDGE_MAP_COLLECTION,
+            dense_embedder=self._dense_embedder, sparse_embedder=self._sparse_embedder,
+            chunks_collection=s['chunks_collection'],
+            docs_collection=s['docs_collection'],
+            knowledge_map_collection=s['knowledge_map_collection'],
         )
-        self._reranker = LLMReranker(self._llm)
+        self._reranker = LLMReranker(
+            self._llm_rerank,
+            max_tokens=s['rerank_max_tokens'] or 100,
+            enable_thinking=s['rerank_enable_thinking'],
+        )
         self._find_section_config = FindSectionConfig(
-            sections_limit=self.valves.SECTIONS_LIMIT,
-            doc_pool=self.valves.FIND_SECTION_DOC_POOL,
-            descent_threshold=self.valves.FIND_SECTION_DESCENT_THRESHOLD,
-            top_docs=self.valves.FIND_SECTION_TOP_DOCS,
+            sections_limit=s['sections_limit'],
+            doc_pool=s['find_section_doc_pool'],
+            descent_threshold=s['find_section_descent_threshold'],
+            top_docs=s['find_section_top_docs'],
+        )
+
+        # 6. Сохранить merged settings — pipe() читает их вместо self.valves
+        #    (там sentinel-defaults, fully resolved тут).
+        self._s = s
+        logger.info(
+            'Pipeline initialized: agent=%s/%s, rerank=%s/%s, qdrant=%s, '
+            'config_loaded=%s', s['agent_url'], s['agent_model'],
+            s['rerank_url'], s['rerank_model'], s['qdrant_url'],
+            self._config is not None,
         )
 
     def _run(self, coro: Coroutine[Any, Any, _T]) -> _T:
@@ -355,15 +597,26 @@ class Pipeline:
         if last_content.startswith('### Task:'):
             return
 
+        # 0.5 Sanity-check agent LLM. Если конфиг неполный (нет retrieval.agent
+        # и Valves пусты) — отвечаем понятным сообщением вместо HTTP-падения.
+        if not self._s.get('agent_url') or not self._s.get('agent_model'):
+            yield (
+                '⚠️ Pipeline не сконфигурирован. Зайдите в Console UI '
+                '(http://localhost:8000) → Retrieval → выберите agent.llm и '
+                'reranker.llm из пула, нажмите «Сохранить retrieval-настройки», '
+                'затем выполните `docker compose restart pipelines`.'
+            )
+            return
+
         # 1. Подтянуть карту документации
         knowledge_map = self._fetch_knowledge_map()
 
         # 2. Собрать system prompt
         system_content = _SYSTEM_PROMPT
-        if self.valves.ADMIN_INSTRUCTIONS:
+        if self._s['admin_instructions']:
             system_content += (
                 '\n\n## Обязательные инструкции администратора\n'
-                + self.valves.ADMIN_INSTRUCTIONS
+                + self._s['admin_instructions']
             )
         if knowledge_map:
             system_content += (
@@ -385,7 +638,7 @@ class Pipeline:
         searched_section_ids: set[str] = set()
         diversity_nudge_sent = False
 
-        for iteration in range(self.valves.MAX_ITERATIONS):
+        for iteration in range(self._s['max_iterations']):
             # Вызов LLM с tools
             response = self._llm_call_with_tools(agent_messages)
             message = response['choices'][0]['message']
@@ -397,7 +650,7 @@ class Pipeline:
                 # инжектим nudge и продолжаем цикл вместо ответа
                 unique_docs = {c['doc_id'] for c in all_chunks.values()}
                 if (
-                    self.valves.ENABLE_DIVERSITY_NUDGE
+                    self._s['enable_diversity_nudge']
                     and not diversity_nudge_sent
                     and search_count >= 2
                     and len(unique_docs) <= 1
@@ -469,7 +722,7 @@ class Pipeline:
                 })
 
         # Лимит итераций — принудить ответ без tools
-        yield self._emit_status('⚠️', f'Лимит итераций ({self.valves.MAX_ITERATIONS}), генерирую ответ', False)
+        yield self._emit_status('⚠️', f'Лимит итераций ({self._s["max_iterations"]}), генерирую ответ', False)
         yield from self._emit_grouped_sources(all_chunks)
         doc_count = len({c['doc_id'] for c in all_chunks.values()})
         yield self._emit_status('✅', f'Найдено {_plural(doc_count, "документ", "документа", "документов")}', True)
@@ -544,7 +797,7 @@ class Pipeline:
         section_ids: list[str] | None = None,
         doc_ids: list[str] | None = None,
     ) -> tuple[str, list[dict]]:
-        limit = min(limit or self.valves.SEARCH_LIMIT, self.valves.SEARCH_LIMIT)
+        limit = min(limit or self._s['search_limit'], self._s['search_limit'])
         chunks = self._search(query, limit)
         if not chunks:
             return 'Поиск не дал результатов. Попробуй другую формулировку.', []
@@ -579,7 +832,7 @@ class Pipeline:
         by_doc: dict[str, list[dict]] = {}
         for c in chunks:
             by_doc.setdefault(c['doc_id'], []).append(c)
-        cap = self.valves.UNIQUE_DOCS_CAP
+        cap = self._s['unique_docs_cap']
         if cap > 0 and len(by_doc) > cap:
             kept_doc_ids = list(by_doc.keys())[:cap]
             by_doc = {did: by_doc[did] for did in kept_doc_ids}
@@ -689,11 +942,11 @@ class Pipeline:
         enable_thinking=False всегда (default клиента) — для агентского цикла
         (search/get_neighbors decisions) thinking не нужен.
         """
-        return self._run(self._llm.complete_with_tools(
+        return self._run(self._llm_agent.complete_with_tools(
             messages,
             tools=_TOOLS,
-            params=GenerationParams(temperature=self.valves.LLM_TEMPERATURE),
-            max_tokens=self.valves.LLM_MAX_TOKENS,
+            params=GenerationParams(temperature=self._s['agent_temperature']),
+            max_tokens=self._s['agent_max_tokens'],
         ))
 
     def _stream_final(self, messages: list[dict]) -> Generator:
@@ -722,10 +975,10 @@ class Pipeline:
                 'таблицы. Разбивай информацию на логические блоки. Избегай сплошного текста.'
             ),
         }]
-        max_tokens = self.valves.LLM_ANSWER_MAX_TOKENS if self.valves.LLM_ANSWER_MAX_TOKENS > 0 else None
-        agen = self._llm.stream_complete(
+        max_tokens = self._s['agent_answer_max_tokens'] if self._s['agent_answer_max_tokens'] > 0 else None
+        agen = self._llm_agent.stream_complete(
             final_messages,
-            params=GenerationParams(temperature=self.valves.LLM_TEMPERATURE),
+            params=GenerationParams(temperature=self._s['agent_temperature']),
             max_tokens=max_tokens,
         )
         in_thinking = False
@@ -801,8 +1054,8 @@ class Pipeline:
             url = chunks[0].get('url')
             # Объединить тексты чанков (с разделителем), лимит по CITATION_MAX_CHARS
             combined = '\n\n---\n\n'.join(c['text'] for c in chunks)
-            if len(combined) > self.valves.CITATION_MAX_CHARS:
-                combined = combined[:self.valves.CITATION_MAX_CHARS] + '...'
+            if len(combined) > self._s['citation_max_chars']:
+                combined = combined[:self._s['citation_max_chars']] + '...'
             docs.append((path, doc_name, url, combined, doc_id))
 
         docs.sort(key=lambda d: d[0])

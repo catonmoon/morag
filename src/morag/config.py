@@ -324,6 +324,90 @@ class PdfConfig(BaseModel):
 
 
 # ============================================================================
+# Retrieval (агентский RAG-pipeline)
+# ============================================================================
+
+class _RetrievalRoleBase(BaseModel):
+    """Базовый класс LLM-канала retrieval.
+
+    `enable_thinking=None` — провайдер-флаги reasoning НЕ слать в extra_body.
+    Полезно для xAI Grok, который реджектит unknown body fields. True/False
+    шлёт `chat_template_kwargs.enable_thinking` + `reasoning_effort` +
+    `reasoning.effort` (vLLM/Ollama/OpenRouter одновременно).
+
+    Дефолты temperature/max_tokens разные у agent и reranker — отсюда
+    специализированные подклассы.
+    """
+    llm: str = Field(min_length=1, description='Имя LLM из пула llms[]')
+
+
+class RetrievalAgentConfig(_RetrievalRoleBase):
+    """Agent — function-calling LLM. Открытый формат ответа, нужны токены."""
+    enable_thinking: bool | None = None    # default «не слать флаги» (xAI compat)
+    temperature: float = 0.3
+    max_tokens: int = 4096
+
+
+class RetrievalRerankerConfig(_RetrievalRoleBase):
+    """Reranker — короткий structured вывод (номера в порядке релевантности)."""
+    enable_thinking: bool | None = False   # default явное off — rerank быстрее без thinking
+    temperature: float = 0.0               # детерминизм
+    max_tokens: int = 100
+
+
+# Алиас для обратной совместимости (тесты, внешние импорты)
+RetrievalRoleConfig = RetrievalAgentConfig
+
+
+class RetrievalFindSectionConfig(BaseModel):
+    doc_pool: int = 20
+    descent_threshold: float = 0.5
+    top_docs: int = 3
+
+
+class RetrievalSearchConfig(BaseModel):
+    limit: int = 50
+    unique_docs_cap: int = 10
+    sections_limit: int = 5
+    max_iterations: int = 9
+    citation_max_chars: int = 5000
+    answer_max_tokens: int = 0
+    find_section: RetrievalFindSectionConfig = RetrievalFindSectionConfig()
+
+
+class RetrievalFeaturesConfig(BaseModel):
+    enable_diversity_nudge: bool = True
+
+
+class RetrievalPromptsConfig(BaseModel):
+    admin_instructions: str = ''
+
+
+class RetrievalConfig(BaseModel):
+    """Настройки агентского RAG-pipeline. Используется services/pipeline.
+
+    Pipeline читает этот блок при старте контейнера. Изменения требуют
+    `docker compose restart pipelines`. OWUI Valves остаются как override:
+    значение Valve != sentinel → перебивает config.
+
+    `agent` и `reranker` опциональные — baseline `conf/config.yml` хранит
+    только нейтральные дефолты (search/features/prompts/http_timeout) без
+    LLM-привязок (т.к. `llms[]` в baseline пуст). Юзер задаёт agent/reranker
+    через Console UI → пишутся в `config.local.yml`.
+
+    Если `agent` не задан → pipeline fail-soft в env-only mode (или fall back
+    на agent_url из Valves). Pipeline-проверка обязательности — на runtime,
+    не в Pydantic.
+    """
+    agent: RetrievalAgentConfig | None = None
+    reranker: RetrievalRerankerConfig | None = None
+    search: RetrievalSearchConfig = RetrievalSearchConfig()
+    features: RetrievalFeaturesConfig = RetrievalFeaturesConfig()
+    prompts: RetrievalPromptsConfig = RetrievalPromptsConfig()
+    http_timeout: int = 300
+
+
+# ============================================================================
 # Top-level Config
 # ============================================================================
 
@@ -341,6 +425,7 @@ class Config(BaseModel):
     qdrant: QdrantConfig = QdrantConfig()
     pdf: PdfConfig | None = None
     indexing: IndexingConfig | None = None  # None для retrieval-only setup'ов
+    retrieval: RetrievalConfig | None = None  # None — pipeline в env-only mode
 
     # ---------- Validators ----------
 
@@ -399,6 +484,27 @@ class Config(BaseModel):
             raise ValueError(
                 f'LLM reference(s) not found in llms pool: {", ".join(unknown)}. '
                 f'Available: {available}'
+            )
+        return self
+
+    @model_validator(mode='after')
+    def _validate_retrieval_references(self) -> 'Config':
+        """retrieval.agent.llm и retrieval.reranker.llm должны быть в llms-pool.
+
+        Роли опциональны: если agent или reranker не заданы — пропускаем проверку
+        (baseline config.yml хранит только default'ы без LLM-привязок).
+        """
+        if self.retrieval is None:
+            return self
+        pool = {llm.name for llm in self.llms}
+        unknown = []
+        for role_name, role in (('agent', self.retrieval.agent), ('reranker', self.retrieval.reranker)):
+            if role is not None and role.llm not in pool:
+                unknown.append(f'retrieval.{role_name}.llm={role.llm!r}')
+        if unknown:
+            raise ValueError(
+                f'LLM reference(s) not found in llms pool: {", ".join(unknown)}. '
+                f'Available: {sorted(pool)}'
             )
         return self
 

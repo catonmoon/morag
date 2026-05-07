@@ -325,19 +325,82 @@
     }
     .row-2 { display: grid; gap: 0.75rem; grid-template-columns: 1fr 1fr; }
     .empty { color: var(--muted); padding: 1rem 0; }
+
+    /* Chip-input для page-id списков (Confluence ancestor_ids etc.) */
+    .chip-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      padding: 0.45rem 0.55rem;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--card-bg);
+      min-height: 2.4rem;
+      align-items: center;
+    }
+    /* Variant=danger применяется только к самим чипам внутри (см. .chip.danger),
+       а не ко всему контейнеру — иначе рамка читается как ошибка ввода. */
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.18rem 0.45rem 0.18rem 0.55rem;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      font-size: 0.82rem;
+      max-width: 100%;
+    }
+    .chip.danger {
+      background: color-mix(in srgb, var(--danger) 12%, var(--card-bg));
+      border-color: color-mix(in srgb, var(--danger) 50%, var(--border));
+      color: var(--danger);
+    }
+    .chip.error { color: var(--warn); border-style: dashed; }
+    .chip.loading { color: var(--muted); font-style: italic; }
+    .chip-id { font-family: ui-monospace, SFMono-Regular, monospace; font-weight: 500; }
+    .chip-sep { color: var(--muted); margin: 0 0.15rem; }
+    .chip-path {
+      max-width: 28rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .chip-rm {
+      cursor: pointer;
+      color: var(--muted);
+      padding: 0 0.2rem;
+      font-weight: 600;
+      line-height: 1;
+      background: none;
+      border: none;
+      font-size: 1.05rem;
+    }
+    .chip-rm:hover { color: var(--danger); }
+    .chip-input {
+      flex: 1 0 100%;            /* всегда на новой строке, занимает всю ширину */
+      min-width: 8rem;
+      border: none;
+      outline: none;
+      background: transparent;
+      color: inherit;
+      font-size: 0.9rem;
+      padding: 0.15rem;
+    }
   </style>
 </head>
 <body x-data="app()" x-init="init()">
 
   <header>
     <h1 title="morag console">    ▄▀▀▀▀▀▀▀▀▄
-   █  /\_/\   █      ╔╦╗ ╔═╗ ┬─┐ ┌─┐ ┌─┐
+   █  /\__/\  █      ╔╦╗ ╔═╗ ┬─┐ ┌─┐ ┌─┐
    █ ( =^.^=) █      ║║║ ║ ║ ├┬┘ ├─┤ │ ┬
-   █  /> < /  █      ╩ ╩ ╚═╝ ┴└─ ┴ ┴ └─┘
+   █  /&gt; &lt;/   █      ╩ ╩ ╚═╝ ┴└─ ┴ ┴ └─┘
     ▀▄▄▄▄▄▄▄▄▀       console</h1>
     <nav>
       <button :class="{active: tab==='dashboard'}" @click="tab='dashboard'">Главная</button>
       <button :class="{active: tab==='setup'}" @click="setupOpen()">Настройка</button>
+      <button :class="{active: tab==='retrieval'}" @click="retrievalOpen()">Агент</button>
       <button :class="{active: tab==='settings'}" @click="settingsOpen()">Параметры</button>
     </nav>
     <div class="pill" :class="status?.progress?.state || 'idle'"
@@ -682,10 +745,26 @@
       <!-- ─── 1. Sources (read-only list + add wizard) ─── -->
       <div class="card" style="margin-bottom:1rem">
         <h2>1. Источники</h2>
-        <div class="empty" x-show="!(config?.sources || []).length">
-          Источников ещё нет. Добавьте хотя бы один — например, локальную папку.
+
+        <!-- Singleton: локальная папка через toggle (не wizard, путь зашит) -->
+        <div style="margin:0.5rem 0; padding:0.5rem 0.7rem; background:var(--code-bg); border-radius:5px; font-size:0.88rem; display:flex; align-items:center; gap:0.5rem">
+          <div style="flex:1">
+            <b>Локальная папка</b>
+            <span class="empty" style="margin-left:0.5rem">/app/data (host: ./data/)</span>
+          </div>
+          <label style="display:flex; align-items:center; gap:0.4rem; margin:0; cursor:pointer">
+            <input type="checkbox"
+                   :checked="hasLocalSource()"
+                   :disabled="setup.source.busy"
+                   @change="toggleLocalSource($event.target.checked)">
+            <span x-text="hasLocalSource() ? 'включена' : 'выключена'"></span>
+          </label>
         </div>
-        <template x-for="src in (config?.sources || [])" :key="src.kind + ':' + src.name">
+
+        <div class="empty" x-show="!nonLocalSources().length">
+          Дополнительных источников нет. При желании добавьте Confluence или Jira ниже.
+        </div>
+        <template x-for="src in nonLocalSources()" :key="src.kind + ':' + src.name">
           <div style="margin:0.5rem 0; padding:0.5rem 0.7rem; background:var(--code-bg); border-radius:5px; font-size:0.88rem; display:flex; align-items:center; gap:0.5rem">
             <div style="flex:1">
               <b x-text="src.kind"></b> · <b x-text="src.name"></b>
@@ -698,20 +777,62 @@
           </div>
         </template>
 
-        <details style="margin-top:1rem" :open="!!setup.source.editingName">
-          <summary style="cursor:pointer; color:var(--accent)"
-                   x-text="setup.source.editingName ? `Редактирование: ${setup.source.editingName}` : '+ Добавить источник'"></summary>
-          <div style="margin-top:0.85rem; padding-top:0.5rem; border-top:1px solid var(--border)">
+        <div style="margin-top:1rem">
+          <button class="btn secondary"
+                  x-show="!setup.source.adding && !setup.source.editingName"
+                  @click="setup.source.adding = true">+ Добавить источник</button>
+        </div>
+
+        <div x-show="setup.source.adding || setup.source.editingName"
+             style="margin-top:1rem; padding-top:0.85rem; border-top:1px solid var(--border)">
+          <h3 style="margin:0 0 0.6rem 0; font-size:0.95rem"
+              x-text="setup.source.editingName ? `Редактирование: ${setup.source.editingName}` : 'Новый источник'"></h3>
+          <div>
             <label>Провайдер</label>
             <select x-model="setup.source.preset_id">
-              <template x-for="p in (presets?.source || [])" :key="p.id">
+              <template x-for="p in nonLocalSourcePresets()" :key="p.id">
                 <option :value="p.id" x-text="p.name"></option>
               </template>
             </select>
             <div class="help" x-text="setup.source.preset_id ? presetDesc('source', setup.source.preset_id) : ''"></div>
             <template x-for="field in selectedFields('source')" :key="field.name">
               <div>
-                <template x-if="field.kind !== 'checkbox'">
+                <template x-if="field.kind === 'chips'">
+                  <div style="margin-top:0.85rem">
+                    <label x-text="field.label + (field.required ? ' *' : '')"></label>
+                    <div :class="'chip-list' + (field.variant === 'danger' ? ' danger' : '')">
+                      <template x-for="(chip, idx) in (setup.source.form[field.name] || [])"
+                                :key="chip.id + ':' + idx">
+                        <span :class="'chip' +
+                                      (field.variant === 'danger' ? ' danger' : '') +
+                                      (chip.status === 'loading' ? ' loading' : '') +
+                                      (chip.status === 'error' ? ' error' : '')"
+                              :title="chip.url || chip.error || chip.id">
+                          <span class="chip-id" x-text="/^\d+$/.test(chip.id) ? chip.id : '🔗'"></span>
+                          <template x-if="chip.status === 'loading'">
+                            <span><span class="chip-sep">·</span>загрузка…</span>
+                          </template>
+                          <template x-if="chip.status === 'error'">
+                            <span><span class="chip-sep">·</span>⚠ не найдено</span>
+                          </template>
+                          <template x-if="chip.status === 'ok' && chip.path">
+                            <span><span class="chip-sep">·</span><span class="chip-path" x-text="chip.path"></span></span>
+                          </template>
+                          <button type="button" class="chip-rm"
+                                  @click="removeChip(field.name, idx)"
+                                  title="Удалить">×</button>
+                        </span>
+                      </template>
+                      <input class="chip-input" type="text"
+                             :placeholder="(setup.source.form[field.name] || []).length ? '' : (field.placeholder || 'IDs через любой разделитель')"
+                             @keydown="onChipKeydown($event, field)"
+                             @paste="onChipPaste($event, field)"
+                             @blur="flushChipInput($event, field)">
+                    </div>
+                    <div class="help" x-show="field.help" x-text="field.help"></div>
+                  </div>
+                </template>
+                <template x-if="field.kind !== 'checkbox' && field.kind !== 'chips'">
                   <div>
                     <label x-text="field.label + (field.required ? ' *' : '')"></label>
                     <input :type="field.kind === 'password' ? 'password' : (field.kind === 'number' ? 'number' : 'text')"
@@ -740,14 +861,14 @@
             <div class="actions" style="margin-top:1rem">
               <button class="btn" :disabled="setup.source.busy" @click="addItem('source')"
                       x-text="setup.source.editingName ? 'Сохранить' : 'Добавить'"></button>
-              <button x-show="setup.source.editingName" class="btn secondary"
+              <button class="btn secondary"
                       @click="cancelEdit('source')">Отмена</button>
               <span x-show="setup.source.busy" class="busy-spinner">⏳</span>
             </div>
             <div x-show="setup.source.result" :class="'result ' + (setup.source.resultKind || '')"
                  x-text="setup.source.result"></div>
           </div>
-        </details>
+        </div>
       </div>
 
       <!-- ─── 2. LLMs pool (read-only list + add wizard) ─── -->
@@ -777,10 +898,17 @@
           </div>
         </template>
 
-        <details style="margin-top:1rem" :open="!!setup.llm.editingName">
-          <summary style="cursor:pointer; color:var(--accent)"
-                   x-text="setup.llm.editingName ? `Редактирование: ${setup.llm.editingName}` : '+ Добавить LLM'"></summary>
-          <div style="margin-top:0.85rem; padding-top:0.5rem; border-top:1px solid var(--border)">
+        <div style="margin-top:1rem">
+          <button class="btn secondary"
+                  x-show="!setup.llm.adding && !setup.llm.editingName"
+                  @click="setup.llm.adding = true">+ Добавить LLM</button>
+        </div>
+
+        <div x-show="setup.llm.adding || setup.llm.editingName"
+             style="margin-top:1rem; padding-top:0.85rem; border-top:1px solid var(--border)">
+          <h3 style="margin:0 0 0.6rem 0; font-size:0.95rem"
+              x-text="setup.llm.editingName ? `Редактирование: ${setup.llm.editingName}` : 'Новый LLM'"></h3>
+          <div>
             <label>Провайдер</label>
             <select x-model="setup.llm.preset_id"
                     @change="loadOllamaModels('llm')">
@@ -845,7 +973,7 @@
                       x-text="setup.llm.editingName ? 'Сохранить' : 'Добавить'"></button>
               <button class="btn secondary" :disabled="setup.llm.testing"
                       @click="testForm('llm')">Проверить</button>
-              <button x-show="setup.llm.editingName" class="btn secondary"
+              <button class="btn secondary"
                       @click="cancelEdit('llm')">Отмена</button>
               <span x-show="setup.llm.busy || setup.llm.testing" class="busy-spinner">⏳</span>
             </div>
@@ -855,7 +983,7 @@
             <div x-show="setup.llm.result" :class="'result ' + (setup.llm.resultKind || '')"
                  x-text="setup.llm.result"></div>
           </div>
-        </details>
+        </div>
       </div>
 
       <!-- ─── 3. Embedder (single, replace, не пул) ─── -->
@@ -1031,6 +1159,198 @@
     </section>
 
 
+    <!-- ============ АГЕНТ (retrieval pipeline) ============ -->
+    <section class="view" :class="{active: tab==='retrieval'}">
+      <div class="card" style="margin-bottom:1rem">
+        <h2>Агент</h2>
+        <div class="help" style="margin-bottom:0.85rem">
+          Настройки агентского RAG-пайплайна — LLM-роли, поиск, system prompt.
+          Хранятся в <code>config.local.yml → retrieval</code>.
+          <b>Изменения применяются после <code>docker compose restart pipelines</code></b>
+          — pipeline-контейнер читает config один раз при старте.
+          OWUI Valves остаются как override (пустое значение в Valve → берётся из config).
+        </div>
+
+        <div x-show="setup.retrieval.restart_pending"
+             style="margin-bottom:1rem; padding:0.75rem 0.9rem; border:1px solid var(--warn); background:var(--warn-banner-bg); color:var(--warn-banner-fg); border-radius:5px">
+          ⚠ Сохранено. Чтобы изменения вступили в силу, выполните в терминале:<br>
+          <code style="display:inline-block; margin-top:0.4rem; padding:0.2rem 0.5rem; background:var(--code-bg); border-radius:3px">docker compose restart pipelines</code>
+        </div>
+
+        <h3 style="margin-top:0.5rem; margin-bottom:0.4rem; font-size:0.95rem">Agent — function-calling LLM</h3>
+        <div class="row-2">
+          <div>
+            <label>LLM (из пула llms[])</label>
+            <select x-model="setup.retrieval.agent.llm">
+              <option value="">— выберите —</option>
+              <template x-for="llm in setup.retrieval.llms" :key="llm.name">
+                <option :value="llm.name" x-text="`${llm.name} (${llm.model})`"></option>
+              </template>
+            </select>
+          </div>
+          <div>
+            <label>Reasoning (thinking)</label>
+            <select :value="_thinkingValue(setup.retrieval.agent.enable_thinking)"
+                    @change="setup.retrieval.agent.enable_thinking = _thinkingFromValue($event.target.value)">
+              <option value="null">не отправлять флаг (для xAI Grok и пр.)</option>
+              <option value="true">включён (true)</option>
+              <option value="false">выключен (false)</option>
+            </select>
+            <div class="help">
+              «Не отправлять» = провайдер сам решает (обычно off).
+              «Выключен» — явно false для Ollama qwen3 (иначе он думает по умолчанию).
+            </div>
+          </div>
+        </div>
+        <div class="row-2" style="margin-top:0.5rem">
+          <div>
+            <label>Temperature</label>
+            <input type="number" step="0.05" min="0" max="2"
+                   :value="setup.retrieval.agent.temperature ?? ''"
+                   @input="setup.retrieval.agent.temperature = $event.target.value === '' ? null : parseFloat($event.target.value)">
+          </div>
+          <div>
+            <label>Max tokens на agent-вызов</label>
+            <input type="number" min="1"
+                   :value="setup.retrieval.agent.max_tokens ?? ''"
+                   @input="setup.retrieval.agent.max_tokens = $event.target.value === '' ? null : parseInt($event.target.value)">
+          </div>
+        </div>
+
+        <h3 style="margin-top:1.2rem; margin-bottom:0.4rem; font-size:0.95rem">Reranker — фильтрация чанков</h3>
+        <div class="row-2">
+          <div>
+            <label>LLM (из пула llms[])</label>
+            <select x-model="setup.retrieval.reranker.llm">
+              <option value="">— выберите —</option>
+              <template x-for="llm in setup.retrieval.llms" :key="llm.name">
+                <option :value="llm.name" x-text="`${llm.name} (${llm.model})`"></option>
+              </template>
+            </select>
+            <div class="help">
+              Можно тот же что agent, можно дешевле (rerank — короткие structured ответы).
+            </div>
+          </div>
+          <div>
+            <label>Reasoning (thinking)</label>
+            <select :value="_thinkingValue(setup.retrieval.reranker.enable_thinking)"
+                    @change="setup.retrieval.reranker.enable_thinking = _thinkingFromValue($event.target.value)">
+              <option value="null">не отправлять флаг</option>
+              <option value="true">включён (true)</option>
+              <option value="false">выключен (false) — рекомендуется</option>
+            </select>
+          </div>
+        </div>
+        <div class="row-2" style="margin-top:0.5rem">
+          <div>
+            <label>Temperature</label>
+            <input type="number" step="0.05" min="0" max="2"
+                   :value="setup.retrieval.reranker.temperature ?? ''"
+                   @input="setup.retrieval.reranker.temperature = $event.target.value === '' ? null : parseFloat($event.target.value)">
+          </div>
+          <div>
+            <label>Max tokens на rerank</label>
+            <input type="number" min="1"
+                   :value="setup.retrieval.reranker.max_tokens ?? ''"
+                   @input="setup.retrieval.reranker.max_tokens = $event.target.value === '' ? null : parseInt($event.target.value)">
+          </div>
+        </div>
+
+        <h3 style="margin-top:1.2rem; margin-bottom:0.4rem; font-size:0.95rem">Поиск</h3>
+        <div class="row-2">
+          <div>
+            <label>Search limit (чанков из Qdrant до rerank)</label>
+            <input type="number" min="1"
+                   :value="setup.retrieval.search.limit ?? ''"
+                   @input="setup.retrieval.search.limit = $event.target.value === '' ? null : parseInt($event.target.value)">
+          </div>
+          <div>
+            <label>Unique docs cap (после rerank, 0 = без лимита)</label>
+            <input type="number" min="0"
+                   :value="setup.retrieval.search.unique_docs_cap ?? ''"
+                   @input="setup.retrieval.search.unique_docs_cap = $event.target.value === '' ? null : parseInt($event.target.value)">
+          </div>
+        </div>
+        <div class="row-2" style="margin-top:0.5rem">
+          <div>
+            <label>Max agent iterations</label>
+            <input type="number" min="1"
+                   :value="setup.retrieval.search.max_iterations ?? ''"
+                   @input="setup.retrieval.search.max_iterations = $event.target.value === '' ? null : parseInt($event.target.value)">
+          </div>
+          <div>
+            <label>find_section: top секций</label>
+            <input type="number" min="1"
+                   :value="setup.retrieval.search.sections_limit ?? ''"
+                   @input="setup.retrieval.search.sections_limit = $event.target.value === '' ? null : parseInt($event.target.value)">
+          </div>
+        </div>
+        <div class="row-2" style="margin-top:0.5rem">
+          <div>
+            <label>find_section: doc pool</label>
+            <input type="number" min="1"
+                   :value="setup.retrieval.search.find_section.doc_pool ?? ''"
+                   @input="setup.retrieval.search.find_section.doc_pool = $event.target.value === '' ? null : parseInt($event.target.value)">
+          </div>
+          <div>
+            <label>find_section: descent threshold (0..1)</label>
+            <input type="number" step="0.05" min="0" max="1"
+                   :value="setup.retrieval.search.find_section.descent_threshold ?? ''"
+                   @input="setup.retrieval.search.find_section.descent_threshold = $event.target.value === '' ? null : parseFloat($event.target.value)">
+          </div>
+        </div>
+        <div class="row-2" style="margin-top:0.5rem">
+          <div>
+            <label>find_section: top docs (страховка)</label>
+            <input type="number" min="0"
+                   :value="setup.retrieval.search.find_section.top_docs ?? ''"
+                   @input="setup.retrieval.search.find_section.top_docs = $event.target.value === '' ? null : parseInt($event.target.value)">
+          </div>
+          <div>
+            <label>Citation max chars</label>
+            <input type="number" min="100"
+                   :value="setup.retrieval.search.citation_max_chars ?? ''"
+                   @input="setup.retrieval.search.citation_max_chars = $event.target.value === '' ? null : parseInt($event.target.value)">
+          </div>
+        </div>
+
+        <h3 style="margin-top:1.2rem; margin-bottom:0.4rem; font-size:0.95rem">Прочее</h3>
+        <div class="row-2">
+          <div>
+            <label style="display:flex; align-items:center; gap:0.5rem; margin:0">
+              <input type="checkbox"
+                     :checked="setup.retrieval.features.enable_diversity_nudge ?? true"
+                     @change="setup.retrieval.features.enable_diversity_nudge = $event.target.checked">
+              <span>Diversity nudge (расширять поиск, если все чанки из 1 документа)</span>
+            </label>
+          </div>
+          <div>
+            <label>HTTP timeout, сек</label>
+            <input type="number" min="10"
+                   :value="setup.retrieval.http_timeout ?? ''"
+                   @input="setup.retrieval.http_timeout = $event.target.value === '' ? null : parseInt($event.target.value)">
+          </div>
+        </div>
+
+        <h3 style="margin-top:1.2rem; margin-bottom:0.4rem; font-size:0.95rem">System prompt</h3>
+        <label>Admin instructions (вклеиваются в system prompt)</label>
+        <textarea x-model="setup.retrieval.prompts.admin_instructions"
+                  placeholder="Например: «Если информация не найдена — обязательно сделай повторный поиск без section_ids»."
+                  style="min-height:6rem"></textarea>
+
+        <div class="actions" style="margin-top:1rem">
+          <button class="btn"
+                  :disabled="setup.retrieval.busy || !setup.retrieval.agent.llm || !setup.retrieval.reranker.llm"
+                  @click="saveRetrieval()">Сохранить настройки агента</button>
+          <button class="btn secondary" @click="loadRetrieval()">Перечитать</button>
+          <span x-show="setup.retrieval.busy" class="busy-spinner">⏳</span>
+        </div>
+        <div x-show="setup.retrieval.result" :class="'result ' + (setup.retrieval.resultKind || '')"
+             x-text="setup.retrieval.result"></div>
+      </div>
+    </section>
+
+
     <!-- ============ SETTINGS (raw YAML) ============ -->
     <section class="view" :class="{active: tab==='settings'}">
 
@@ -1076,12 +1396,14 @@
         setup: {
           // ADR-0012: Sources, LLMs, Embedder, Roles — секции wizard'а; + Schedule (cron)
           source: {
-            preset_id: 'local', form: {}, result: '', resultKind: '', busy: false,
+            preset_id: 'confluence', form: {}, result: '', resultKind: '', busy: false,
             editingName: '',                      // для edit-режима: оригинальное имя (заблокировано)
+            adding: false,                        // показана ли форма «+ Добавить»
           },
           llm: {
             preset_id: 'openai-compatible', form: {}, result: '', resultKind: '', busy: false,
             editingName: '',
+            adding: false,
             ollamaModels: { models: [], error: '' },   // autoload-список для dropdown
             testResult: '', testResultKind: '', testing: false,
           },
@@ -1093,6 +1415,27 @@
             dimProbing: false, dimProbeError: '',
           },
           roles: { llm: '', vision: '', result: '', resultKind: '', busy: false },
+          retrieval: {
+            // Заполняется loadRetrieval() из /api/retrieval/config. Поля Optional —
+            // null/'' означает «использовать default». UI сам не подставляет дефолты,
+            // pipeline применит их при чтении config.yml.
+            agent: { llm: '', enable_thinking: null, temperature: null, max_tokens: null },
+            reranker: { llm: '', enable_thinking: null, temperature: null, max_tokens: null },
+            search: {
+              limit: null, unique_docs_cap: null, sections_limit: null,
+              max_iterations: null, citation_max_chars: null, answer_max_tokens: null,
+              find_section: { doc_pool: null, descent_threshold: null, top_docs: null },
+            },
+            features: { enable_diversity_nudge: null },
+            prompts: { admin_instructions: '' },
+            http_timeout: null,
+            // UI state
+            llms: [],                             // подгружаются с /api/retrieval/config
+            loaded: false,
+            busy: false,
+            result: '', resultKind: '',
+            restart_pending: false,               // показывать ли баннер «перезапустите pipelines»
+          },
           schedule: { enabled: false, cron: '0 */6 * * *', result: '', resultKind: '', busy: false },
         },
 
@@ -1399,13 +1742,18 @@
           this._setSetupResult(target, '', '');
           this.setup[target].busy = true;
           try {
+            const preset = (this.presets?.[target] || []).find(
+              p => p.id === this.setup[target].preset_id);
+            const formToSend = preset
+              ? this._serializeChipsForApply(this.setup[target].form, preset)
+              : this.setup[target].form;
             const r = await this.fetchJson('/api/presets/apply', {
               method: 'POST',
               headers: {'content-type': 'application/json'},
               body: JSON.stringify({
                 target,
                 preset_id: this.setup[target].preset_id,
-                form: this.setup[target].form,
+                form: formToSend,
               }),
             });
             const wasEdit = !!this.setup[target].editingName;
@@ -1417,6 +1765,8 @@
             );
             this.setup[target].form = {};
             this.setup[target].editingName = '';
+            // adding флаг есть только для source/llm (не для embedder)
+            if ('adding' in this.setup[target]) this.setup[target].adding = false;
             await Promise.all([this.refreshConfig(), this.refreshGate()]);
           } catch (e) {
             this._setSetupResult(target, '✗ ' + e.message, 'error');
@@ -1443,14 +1793,25 @@
           // ВАЖНО: secret-поля (kind=password) НЕ копируем — в API они приходят
           // замаскированными как '***'. Юзер либо вводит новый секрет, либо
           // оставляет пустым (бэкенд при пустом значении сохранит существующий).
-          const form = {};
+          // Имя НЕ в preset.fields (auto-generated при add), но при edit нужно
+          // сохранить — иначе suggest_* перегенерирует и edit станет re-add.
+          const form = { name: item.name };
+          const chipFields = [];      // для последующего pre-fetch путей
           for (const f of preset.fields) {
             if (f.kind === 'password') continue;
+            if (f.kind === 'chips') {
+              // ancestor_ids в item — list[str]. Конвертируем в chip-array со status='loading'.
+              const raw = item[f.name];
+              if (Array.isArray(raw) && raw.length) {
+                form[f.name] = raw.map(id => ({ id: String(id), status: 'loading' }));
+                chipFields.push(f);
+              }
+              continue;
+            }
             if (item[f.name] !== undefined) form[f.name] = item[f.name];
           }
           // Special mappings: некоторые поля формы вычисляются из вложенных полей item.
           if (Array.isArray(item.spaces)) form.spaces = item.spaces.join(', ');
-          if (Array.isArray(item.ancestor_ids)) form.ancestor_ids = item.ancestor_ids.join(', ');
           if (item.attachments?.enabled) form.attachments_enabled = true;
           if (Array.isArray(item.capabilities) && item.capabilities.includes('vision')) {
             form.vision_capable = true;
@@ -1458,11 +1819,193 @@
           this.setup[target].form = form;
           this.setup[target].editingName = item.name;
           this._setSetupResult(target, '', '');
+
+          // Лениво подтягиваем breadcrumb-пути для chip-полей (Confluence только)
+          for (const f of chipFields) {
+            this.resolveChipPaths(f);
+          }
+        },
+
+        // ───────── Chip-input helpers ─────────
+
+        _parseChipTokens(text) {
+          // Парсит вход юзера: разделители — запятая, точка-с-запятой, пробел, перенос.
+          // Принимает: numeric IDs, либо URLs (на резолв backend'ом).
+          // Если URL содержит pageId=N в query — извлекаем сразу как numeric.
+          if (!text) return [];
+          const result = [];
+          for (const raw of text.split(/[\s,;]+/)) {
+            const s = raw.trim();
+            if (!s) continue;
+            if (/^\d+$/.test(s)) {
+              result.push({ id: s, kind: 'id' });
+              continue;
+            }
+            if (/^https?:\/\//i.test(s)) {
+              try {
+                const u = new URL(s);
+                const pid = u.searchParams.get('pageId');
+                if (pid && /^\d+$/.test(pid)) {
+                  result.push({ id: pid, kind: 'id' });
+                } else {
+                  result.push({ id: s, kind: 'url' });
+                }
+              } catch { /* bad URL — skip */ }
+            }
+            // Прочее (slug-имена, текст) — игнорируем
+          }
+          return result;
+        },
+
+        _addChips(fieldName, tokens) {
+          // tokens: list of {id, kind}. Append уникальных в form[fieldName].
+          const list = this.setup.source.form[fieldName] || [];
+          const existing = new Set(list.map(c => c.id));
+          const added = [];
+          for (const tok of tokens) {
+            if (existing.has(tok.id)) continue;
+            existing.add(tok.id);
+            const chip = { id: tok.id, status: 'loading', kind: tok.kind || 'id' };
+            list.push(chip);
+            added.push(chip);
+          }
+          this.setup.source.form[fieldName] = list;
+          return added;
+        },
+
+        async _resolveChipsByIds(field, ids) {
+          // Вызывает resolver_endpoint с текущими auth-полями формы.
+          // Обновляет статус соответствующих чипов в form[field.name].
+          // Если backend вернул resolved-ID отличный от input (был URL, стал N),
+          // мы перетираем chip.id на resolved — для записи в YAML нужен numeric.
+          if (!ids.length || !field.resolver_endpoint) return;
+          const list = this.setup.source.form[field.name] || [];
+          const indexByKey = key => list.findIndex(c => c.id === key);
+          let data;
+          try {
+            const f = this.setup.source.form;
+            data = await this.fetchJson(field.resolver_endpoint, {
+              method: 'POST',
+              headers: {'content-type': 'application/json'},
+              body: JSON.stringify({
+                url: f.url || '',
+                username: f.username || '',
+                api_token: f.api_token || '',
+                password: f.password || '',
+                source_name: this.setup.source.editingName || null,
+                ids,
+              }),
+            });
+          } catch (e) {
+            for (const key of ids) {
+              const i = indexByKey(key);
+              if (i >= 0) list[i] = { ...list[i], status: 'error', error: e.message };
+            }
+            this.setup.source.form[field.name] = [...list];
+            return;
+          }
+          for (const key of ids) {
+            const i = indexByKey(key);
+            if (i < 0) continue;
+            const info = data[key];
+            if (info?.error) {
+              list[i] = { ...list[i], status: 'error', error: info.error };
+            } else if (info) {
+              const resolvedId = (info.id && /^\d+$/.test(info.id)) ? info.id : list[i].id;
+              list[i] = {
+                ...list[i],
+                id: resolvedId,           // URL → numeric ID для YAML
+                kind: 'id',
+                status: 'ok',
+                title: info.title || '',
+                path: info.path || '',
+                url: info.url || '',
+              };
+            } else {
+              list[i] = { ...list[i], status: 'error', error: 'не получен ответ' };
+            }
+          }
+          // Trigger reactivity
+          this.setup.source.form[field.name] = [...list];
+        },
+
+        resolveChipPaths(field) {
+          // Резолв всех chip с status='loading' (или явно повторно).
+          const list = this.setup.source.form[field.name] || [];
+          const ids = list.filter(c => c.status === 'loading').map(c => c.id);
+          if (ids.length) this._resolveChipsByIds(field, ids);
+        },
+
+        onChipKeydown(event, field) {
+          // Enter / запятая / пробел / Tab → flush текущего ввода в чипы.
+          if (event.key === 'Enter' || event.key === ',' || event.key === ' ' || event.key === 'Tab') {
+            const text = event.target.value;
+            const ids = this._parseChipTokens(text);
+            if (ids.length) {
+              event.preventDefault();
+              event.target.value = '';
+              const added = this._addChips(field.name, ids);
+              if (added.length) this._resolveChipsByIds(field, added.map(c => c.id));
+            } else if (event.key === 'Enter') {
+              event.preventDefault();
+            }
+          } else if (event.key === 'Backspace' && !event.target.value) {
+            // Backspace на пустом инпуте — удалить последний чип
+            const list = this.setup.source.form[field.name] || [];
+            if (list.length) {
+              list.pop();
+              this.setup.source.form[field.name] = [...list];
+            }
+          }
+        },
+
+        onChipPaste(event, field) {
+          // Перехватываем paste — парсим всё что пришло и добавляем чипами.
+          const text = (event.clipboardData || window.clipboardData).getData('text');
+          const ids = this._parseChipTokens(text);
+          if (ids.length) {
+            event.preventDefault();
+            const added = this._addChips(field.name, ids);
+            if (added.length) this._resolveChipsByIds(field, added.map(c => c.id));
+          }
+        },
+
+        flushChipInput(event, field) {
+          // На blur — добить остаток ввода в чипы (если юзер не нажал Enter).
+          const text = event.target.value;
+          const ids = this._parseChipTokens(text);
+          if (ids.length) {
+            event.target.value = '';
+            const added = this._addChips(field.name, ids);
+            if (added.length) this._resolveChipsByIds(field, added.map(c => c.id));
+          }
+        },
+
+        removeChip(fieldName, idx) {
+          const list = this.setup.source.form[fieldName] || [];
+          list.splice(idx, 1);
+          this.setup.source.form[fieldName] = [...list];
+        },
+
+        _serializeChipsForApply(form, preset) {
+          // Перед отправкой формы в /api/presets/apply — для chip-полей оставляем
+          // только {id, comment} (без runtime-полей status/error).
+          const out = { ...form };
+          for (const f of preset.fields) {
+            if (f.kind === 'chips' && Array.isArray(out[f.name])) {
+              out[f.name] = out[f.name].map(c => ({
+                id: c.id,
+                comment: c.path || c.title || '',
+              }));
+            }
+          }
+          return out;
         },
 
         cancelEdit(target) {
           this.setup[target].form = {};
           this.setup[target].editingName = '';
+          if ('adding' in this.setup[target]) this.setup[target].adding = false;
           this._setSetupResult(target, '', '');
         },
 
@@ -1667,7 +2210,144 @@
           }
         },
 
+        // ─── Retrieval ───
+
+        async loadRetrieval() {
+          // Подтянуть текущий retrieval-блок (raw + effective).
+          // Используем effective (Pydantic-defaults уже заполнены) — все поля
+          // сразу видны юзеру с реальными значениями, которые применит pipeline.
+          try {
+            const r = await this.fetchJson('/api/retrieval/config');
+            this.setup.retrieval.llms = r.llms || [];
+            const eff = r.effective || {};
+            this.setup.retrieval.agent = {
+              llm: eff.agent?.llm || '',
+              enable_thinking: eff.agent?.enable_thinking ?? null,
+              temperature: eff.agent?.temperature ?? null,
+              max_tokens: eff.agent?.max_tokens ?? null,
+            };
+            this.setup.retrieval.reranker = {
+              llm: eff.reranker?.llm || '',
+              enable_thinking: eff.reranker?.enable_thinking ?? null,
+              temperature: eff.reranker?.temperature ?? null,
+              max_tokens: eff.reranker?.max_tokens ?? null,
+            };
+            const search = eff.search || {};
+            const fs = search.find_section || {};
+            this.setup.retrieval.search = {
+              limit: search.limit ?? null,
+              unique_docs_cap: search.unique_docs_cap ?? null,
+              sections_limit: search.sections_limit ?? null,
+              max_iterations: search.max_iterations ?? null,
+              citation_max_chars: search.citation_max_chars ?? null,
+              answer_max_tokens: search.answer_max_tokens ?? null,
+              find_section: {
+                doc_pool: fs.doc_pool ?? null,
+                descent_threshold: fs.descent_threshold ?? null,
+                top_docs: fs.top_docs ?? null,
+              },
+            };
+            this.setup.retrieval.features = {
+              enable_diversity_nudge: eff.features?.enable_diversity_nudge ?? true,
+            };
+            this.setup.retrieval.prompts = {
+              admin_instructions: eff.prompts?.admin_instructions ?? '',
+            };
+            this.setup.retrieval.http_timeout = eff.http_timeout ?? null;
+            this.setup.retrieval.loaded = true;
+            this.setup.retrieval.result = '';
+          } catch (e) {
+            this.setup.retrieval.result = '✗ Не удалось загрузить: ' + e.message;
+            this.setup.retrieval.resultKind = 'error';
+          }
+        },
+
+        async saveRetrieval() {
+          this.setup.retrieval.result = '';
+          this.setup.retrieval.busy = true;
+          try {
+            const body = {
+              agent: this.setup.retrieval.agent,
+              reranker: this.setup.retrieval.reranker,
+              search: this.setup.retrieval.search,
+              features: this.setup.retrieval.features,
+              prompts: this.setup.retrieval.prompts,
+              http_timeout: this.setup.retrieval.http_timeout,
+            };
+            const r = await this.fetchJson('/api/retrieval/config', {
+              method: 'PUT',
+              headers: {'content-type': 'application/json'},
+              body: JSON.stringify(body),
+            });
+            this.setup.retrieval.result = '✓ Сохранено';
+            this.setup.retrieval.resultKind = 'success';
+            this.setup.retrieval.restart_pending = !!r.restart_required;
+            await this.refreshConfig();
+          } catch (e) {
+            this.setup.retrieval.result = '✗ ' + e.message;
+            this.setup.retrieval.resultKind = 'error';
+          } finally {
+            this.setup.retrieval.busy = false;
+          }
+        },
+
+        _thinkingValue(val) {
+          // bool|null → строка для <select>
+          if (val === true) return 'true';
+          if (val === false) return 'false';
+          return 'null';
+        },
+
+        _thinkingFromValue(str) {
+          if (str === 'true') return true;
+          if (str === 'false') return false;
+          return null;
+        },
+
         // ─── helpers ───
+
+        nonLocalSources() {
+          // Local source — singleton управляется через toggle, не через список
+          return (this.config?.sources || []).filter(s => s.kind !== 'local');
+        },
+
+        nonLocalSourcePresets() {
+          // Local не показываем в dropdown «Провайдер» wizard'а
+          return (this.presets?.source || []).filter(p => p.id !== 'local');
+        },
+
+        hasLocalSource() {
+          return (this.config?.sources || []).some(s => s.kind === 'local');
+        },
+
+        async toggleLocalSource(enable) {
+          this.setup.source.busy = true;
+          this.setup.source.result = '';
+          try {
+            if (enable) {
+              await this.fetchJson('/api/presets/apply', {
+                method: 'POST',
+                headers: {'content-type': 'application/json'},
+                body: JSON.stringify({ target: 'source', preset_id: 'local', form: {} }),
+              });
+            } else {
+              const local = (this.config?.sources || []).find(s => s.kind === 'local');
+              if (local) {
+                await this.fetchJson('/api/presets/delete', {
+                  method: 'POST',
+                  headers: {'content-type': 'application/json'},
+                  body: JSON.stringify({ target: 'source', kind: 'local', name: local.name }),
+                });
+              }
+            }
+            await Promise.all([this.refreshConfig(), this.refreshGate()]);
+          } catch (e) {
+            this.setup.source.result = '✗ ' + e.message;
+            this.setup.source.resultKind = 'error';
+          } finally {
+            this.setup.source.busy = false;
+          }
+        },
 
         srcBrief(src) {
           if (src.kind === 'local') return src.path;
@@ -1739,6 +2419,11 @@
           // Подгрузить список Ollama-моделей для активных пресетов
           this.loadOllamaModels('llm');
           this.loadOllamaModels('embedder');
+        },
+
+        retrievalOpen() {
+          this.tab = 'retrieval';
+          this.loadRetrieval();   // подтягиваем свежий config + effective с дефолтами
         },
 
         settingsOpen() {
