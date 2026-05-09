@@ -257,26 +257,26 @@ class IndexingPipeline:
                         self._status_reporter.document_done(stub.id)
                         return False
 
-                    document = await source.load_one(stub.id)
-                    if document is None:
-                        logger.warning('%sFailed to load document: %s', w, stub.id)
-                        self._status_reporter.document_done(stub.id)
-                        return False
+                    self._status_reporter.document_start(stub.id, stub.title, stub.url)
+                    try:
+                        document = await source.load_one(stub.id)
+                        if document is None:
+                            logger.warning('%sFailed to load document: %s', w, stub.id)
+                            return False
 
-                    prepared = await self._prepare_document(document, w=w)
-                    if prepared is None:
-                        self._status_reporter.document_done(stub.id)
-                        return False
+                        prepared = await self._prepare_document(document, w=w)
+                        if prepared is None:
+                            return False
 
-                    if prepared.structural:
-                        logger.info('%sStructural document, skipping chunking: %s', w, prepared.id)
-                    else:
-                        await self._chunk_document(prepared, w=w)
-                    self._status_reporter.document_done(stub.id)
-                    return True
+                        if prepared.structural:
+                            logger.info('%sStructural document, skipping chunking: %s', w, prepared.id)
+                        else:
+                            await self._chunk_document(prepared, w=w)
+                        return True
+                    finally:
+                        self._status_reporter.document_done(stub.id)
                 except Exception:
                     logger.exception('%sDocument failed, skipping: %s', w, stub.id)
-                    self._status_reporter.document_done(stub.id)
                     return False
 
         levels = _topological_levels(stubs)
@@ -392,6 +392,7 @@ class IndexingPipeline:
 
         total = len(chunk_results)
         logger.info('%s  Total chunks: %d', w, total)
+        self._status_reporter.document_set_chunks(document.id, total)
 
         # Чанки наследуют version от родительского документа (атомарность прогона)
         doc_version = document.payload.get('version')
@@ -426,6 +427,7 @@ class IndexingPipeline:
             # Stamp run-versioning + fingerprint (наследуем version от документа)
             self._stamp_payload(chunk.payload, version=doc_version)
             chunks.append(chunk)
+            self._status_reporter.document_chunk_done(document.id)
 
         # Post-chunk: разрезать чанки, содержащие большие markdown-таблицы.
         # Делаем ДО ChunkProcessors — embeddings/metadata считаются уже по

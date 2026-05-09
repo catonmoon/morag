@@ -19,14 +19,36 @@ State = Literal['idle', 'running', 'completed', 'cancelled', 'failed']
 
 
 class StatusReporter(Protocol):
-    """Интерфейс публикации статуса индексации."""
+    """Интерфейс публикации статуса индексации.
+
+    Жизненный цикл документа в активном пути:
+        document_start(doc_id, title, url)   → попадает в current_docs (in-flight)
+        document_set_chunks(doc_id, total)   → когда чанкер посчитал чанки
+        document_chunk_done(doc_id) × N      → по мере генерации context per chunk
+        document_done(doc_id)                → удаление из current_docs + processed += 1
+
+    Skip-up-to-date / phase-counter callers вызывают только document_done — это
+    просто инкремент processed без in-flight записи.
+    """
 
     def start_phase(self, name: str, total: int) -> None:
         """Начать новую фазу с известным числом единиц работы."""
         ...
 
+    def document_start(self, doc_id: str, title: str | None = None, url: str | None = None) -> None:
+        """Начать обработку документа — добавить в in-flight список."""
+        ...
+
+    def document_set_chunks(self, doc_id: str, total: int) -> None:
+        """Зафиксировать количество чанков документа (после чанкинга)."""
+        ...
+
+    def document_chunk_done(self, doc_id: str) -> None:
+        """Инкремент chunks_done для документа в in-flight."""
+        ...
+
     def document_done(self, doc_id: str) -> None:
-        """Отметить обработку одного документа."""
+        """Завершить обработку: убрать из in-flight (если был) + processed += 1."""
         ...
 
     def finish(self, state: State, error: str | None = None) -> None:
@@ -40,6 +62,15 @@ class NullStatusReporter:
     def start_phase(self, name: str, total: int) -> None:
         pass
 
+    def document_start(self, doc_id: str, title: str | None = None, url: str | None = None) -> None:
+        pass
+
+    def document_set_chunks(self, doc_id: str, total: int) -> None:
+        pass
+
+    def document_chunk_done(self, doc_id: str) -> None:
+        pass
+
     def document_done(self, doc_id: str) -> None:
         pass
 
@@ -51,11 +82,15 @@ class FileStatusReporter:
     """Пишет статус в JSON-файл с atomic rename.
 
     Поток событий:
-      start_phase('indexing_local', 42) → state=running, processed=0, total=42
-      document_done('id1') → processed=1
+      start_phase('indexing_local', 42)
+      document_start('id1', title='Foo', url='http://...')   # in-flight: 1
+      document_set_chunks('id1', 12)
+      document_chunk_done('id1') × 12
+      document_done('id1')                                   # processed=1, in-flight: 0
       ...
-      start_phase('bm25_chunks', 1) → новая фаза, processed сбрасывается
-      finish('completed') → state=completed
+      start_phase('bm25_chunks', 1)
+      document_done('bm25_chunks')                            # phase-counter, без start
+      finish('completed')
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -67,7 +102,7 @@ class FileStatusReporter:
         self._phase = ''
         self._processed = 0
         self._total = 0
-        self._current_doc_id: str | None = None
+        self._in_flight: dict[str, dict] = {}  # doc_id -> {title, url, started_at, chunks_done, chunks_total}
         self._error: str | None = None
         self._write()
 
@@ -77,13 +112,39 @@ class FileStatusReporter:
             self._phase = name
             self._processed = 0
             self._total = total
-            self._current_doc_id = None
+            self._in_flight.clear()
             self._write()
+
+    def document_start(self, doc_id: str, title: str | None = None, url: str | None = None) -> None:
+        with self._lock:
+            self._in_flight[doc_id] = {
+                'doc_id': doc_id,
+                'title': title,
+                'url': url,
+                'started_at': _now_iso(),
+                'chunks_done': 0,
+                'chunks_total': None,
+            }
+            self._write()
+
+    def document_set_chunks(self, doc_id: str, total: int) -> None:
+        with self._lock:
+            entry = self._in_flight.get(doc_id)
+            if entry is not None:
+                entry['chunks_total'] = total
+                self._write()
+
+    def document_chunk_done(self, doc_id: str) -> None:
+        with self._lock:
+            entry = self._in_flight.get(doc_id)
+            if entry is not None:
+                entry['chunks_done'] = entry.get('chunks_done', 0) + 1
+                self._write()
 
     def document_done(self, doc_id: str) -> None:
         with self._lock:
+            self._in_flight.pop(doc_id, None)
             self._processed += 1
-            self._current_doc_id = doc_id
             self._write()
 
     def finish(self, state: State, error: str | None = None) -> None:
@@ -98,7 +159,7 @@ class FileStatusReporter:
             'phase': self._phase,
             'processed': self._processed,
             'total': self._total,
-            'current_doc_id': self._current_doc_id,
+            'current_docs': list(self._in_flight.values()),
             'started_at': self._started_at,
             'updated_at': _now_iso(),
             'error': self._error,

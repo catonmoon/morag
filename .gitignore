@@ -41,6 +41,12 @@ config.*.yml
 # Local docker-compose override (не для production)
 docker-compose.override.yml
 
+# Build-time data: NLTK ресурсы и HF tokenizer-кеш.
+# Готовятся на машине с интернетом, COPY'ятся в образ при docker build.
+# На air-gapped контуре привозятся отдельно (см. инструкции в CLAUDE.md / README).
+nltk_data/
+hf_cache/
+
 # Reports — experiment logs
 reports/
 

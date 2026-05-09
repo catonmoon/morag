@@ -48,7 +48,7 @@ async def get_status(request: Request) -> IndexStatusResponse:
             is_running=False, run=None,
             progress={'state': 'unreachable', 'phase': '', 'processed': 0, 'total': 0,
                       'started_at': None, 'updated_at': None,
-                      'error': str(e), 'current_doc_id': None},
+                      'error': str(e), 'current_docs': []},
         )
     return IndexStatusResponse(**s)
 

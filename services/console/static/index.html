@@ -395,7 +395,7 @@
     <h1 title="morag console">    ▄▀▀▀▀▀▀▀▀▄
    █  /\__/\  █      ╔╦╗ ╔═╗ ┬─┐ ┌─┐ ┌─┐
    █ ( =^.^=) █      ║║║ ║ ║ ├┬┘ ├─┤ │ ┬
-   █  /&gt; &lt;/   █      ╩ ╩ ╚═╝ ┴└─ ┴ ┴ └─┘
+   █  / &gt;&lt;/   █      ╩ ╩ ╚═╝ ┴└─ ┴ ┴ └─┘
     ▀▄▄▄▄▄▄▄▄▀       console</h1>
     <nav>
       <button :class="{active: tab==='dashboard'}" @click="tab='dashboard'">Главная</button>
@@ -606,8 +606,31 @@
             </div>
             <div class="meta">
               <span><b>⏱ <span x-text="runningFor()"></span></b><span x-show="etaText()" x-text="' • ' + etaText()"></span></span>
-              <span x-text="status.progress?.current_doc_id ? `Текущий: ${status.progress.current_doc_id}` : ''"></span>
+              <span x-show="(status.progress?.current_docs?.length || 0) > 0"
+                    x-text="`в работе: ${status.progress.current_docs.length}`"></span>
             </div>
+            <ul x-show="(status.progress?.current_docs?.length || 0) > 0"
+                style="list-style:none; padding:0; margin:0.4rem 0 0; font-family:'SF Mono','Menlo','Consolas',monospace; font-size:0.82rem">
+              <template x-for="d in (status.progress?.current_docs || [])" :key="d.doc_id">
+                <li style="display:flex; gap:0.6rem; align-items:baseline; padding:0.15rem 0">
+                  <span style="color:var(--muted); min-width:3rem; text-align:right; flex-shrink:0"
+                        x-text="docElapsed(d) + 's'"></span>
+                  <template x-if="d.url">
+                    <a :href="d.url" target="_blank" rel="noopener"
+                       style="text-decoration:none; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">
+                      <span style="color:var(--accent)" x-text="revealedTitle(d).bright"></span><span style="color:var(--muted); opacity:0.55" x-text="revealedTitle(d).dim"></span>
+                    </a>
+                  </template>
+                  <template x-if="!d.url">
+                    <span style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">
+                      <span style="color:var(--accent)" x-text="revealedTitle(d).bright"></span><span style="color:var(--muted); opacity:0.55" x-text="revealedTitle(d).dim"></span>
+                    </span>
+                  </template>
+                  <span style="color:var(--muted); white-space:nowrap; flex-shrink:0"
+                        x-text="(d.chunks_total != null) ? `${d.chunks_done}/${d.chunks_total}` : '…'"></span>
+                </li>
+              </template>
+            </ul>
             <div class="actions" style="margin-top:1rem">
               <button class="btn" :disabled="stopState !== ''" @click="stopIndex(false)">Остановить (мягко)</button>
               <button class="btn danger" :disabled="stopState === 'killing'" @click="stopIndex(true)">Прервать</button>
@@ -2515,6 +2538,26 @@
           const remaining = (p.total - p.processed) / rate;
           if (!isFinite(remaining)) return '';
           return `ETA ~${formatDuration(remaining)}`;
+        },
+
+        revealedTitle(d) {
+          // Char-by-char title reveal по chunks_done/chunks_total — bright slice
+          // постепенно растёт от начала названия. Пока chunks_total не известно
+          // (фаза load/prepare) — всё в dim-цвете.
+          const title = d.title || d.doc_id || '';
+          const total = d.chunks_total || 0;
+          const done = d.chunks_done || 0;
+          const ratio = total > 0 ? Math.min(1, done / total) : 0;
+          const cut = Math.floor(title.length * ratio);
+          return { bright: title.slice(0, cut), dim: title.slice(cut) };
+        },
+
+        docElapsed(d) {
+          // Зависимость от _now_tick — пересчёт каждую секунду.
+          this._now_tick;
+          if (!d.started_at) return 0;
+          const start = Date.parse(d.started_at);
+          return Math.max(0, Math.floor((Date.now() - start) / 1000));
         },
 
         dumpYaml(obj) {

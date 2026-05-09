@@ -15,8 +15,10 @@ RUN pip install --no-cache-dir --timeout 300 --retries 5 -r requirements.txt
 # Скачать tiktoken-энкодинг во время сборки, чтобы не делать это при запуске
 RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
 
-# Скачать nltk stopwords (русские + английские) для BM25
-RUN python -c "import nltk; nltk.download('stopwords', download_dir='/usr/local/nltk_data')"
+# Скачать nltk-ресурсы:
+#   stopwords — русские + английские для BM25
+#   punkt_tab — sent_tokenize для split-by-sentences стратегии (HybridChunker oversized=split)
+RUN python -c "import nltk; nltk.download('stopwords', download_dir='/usr/local/nltk_data'); nltk.download('punkt_tab', download_dir='/usr/local/nltk_data')"
 
 # Скачать токенизатор Qwen3-Embedding-4B заранее — HuggingFaceTokenCounter
 # использует его для точного подсчёта токенов в SectionChunker/HybridChunker.

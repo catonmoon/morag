@@ -66,6 +66,15 @@ class FakeReporter:
     def start_phase(self, name: str, total: int) -> None:
         self.phases.append((name, total))
 
+    def document_start(self, doc_id: str, title: str | None = None, url: str | None = None) -> None:
+        pass
+
+    def document_set_chunks(self, doc_id: str, total: int) -> None:
+        pass
+
+    def document_chunk_done(self, doc_id: str) -> None:
+        pass
+
     def document_done(self, doc_id: str) -> None:
         self.done.append(doc_id)
 
