@@ -388,20 +388,68 @@
       padding: 0.15rem;
     }
 
-    /* In-flight title — per-char волна с фазовым сдвигом по позиции буквы.
-       На пике (10-25% цикла) буква ярче, остальное — базовая яркость.
-       title-char-bright = revealed (chunks_done/total прошёл эту позицию),
-       title-char-dim    = ещё не дошёл. */
+    /* In-flight title — две декларативные анимации без per-char delay:
+
+       1. wave-bounce — row-level. Через @property-typed --wave-pos (типа
+          <number>) ease-in-out плавно гоняет позицию 0 ↔ max-idx ↔ 0 за 6с.
+          Sin-like замедление у краёв даёт «отскок». Каждая буква читает
+          var(--wave-pos) и считает intensity по расстоянию до неё (bell
+          ширины 3 символа). Brightness и glow scale'ятся от intensity.
+          --pulse-strength: bright=1, dim=0 → волна затрагивает только
+          revealed-часть. Без anim-restart при переходе dim↔bright (свойство
+          --pulse-strength меняется без перезапуска анимации).
+
+       2. title-breathe — per-row мрачное дыхание dim-части. delay из
+          started_at для каждой строки → разнобой между строками.
+          --breathe-* переменные подавляют эффект на bright. */
+
+    @property --wave-pos {
+      syntax: '<number>';
+      initial-value: 0;
+      inherits: true;
+    }
+    @property --max-idx {
+      syntax: '<number>';
+      initial-value: 1;
+      inherits: true;
+    }
+    @property --idx {
+      syntax: '<number>';
+      initial-value: 0;
+      inherits: false;
+    }
+
+    .in-flight-row {
+      animation: wave-bounce 6s ease-in-out infinite;
+    }
+    @keyframes wave-bounce {
+      0%, 100% { --wave-pos: 0; }
+      50%      { --wave-pos: var(--max-idx); }
+    }
+
     .title-char {
       display: inline-block;
-      animation: title-wave 2.4s ease-in-out infinite;
-      will-change: filter;
+      --pulse-strength: 0;
+      --breathe-base: 1;
+      --breathe-low: 1;
+      --intensity: clamp(0, calc(1 - abs(var(--idx) - var(--wave-pos)) / 3), 1);
+      filter: brightness(calc(1 + 0.22 * var(--intensity) * var(--pulse-strength)));
+      animation: title-breathe 3s ease-in-out infinite;
+      will-change: filter, opacity;
     }
-    .title-char-bright { color: var(--accent); }
-    .title-char-dim { color: var(--muted); opacity: 0.5; }
-    @keyframes title-wave {
-      0%, 60%, 100% { filter: brightness(1); text-shadow: none; }
-      15%, 25%      { filter: brightness(1.55); text-shadow: 0 0 5px currentColor; }
+    .title-char-bright {
+      color: var(--accent);
+      --pulse-strength: 1;
+      text-shadow: 0 0 calc(5px * var(--intensity)) currentColor;
+    }
+    .title-char-dim {
+      color: var(--muted);
+      --breathe-base: 0.5;
+      --breathe-low: 0.28;
+    }
+    @keyframes title-breathe {
+      0%, 100% { opacity: var(--breathe-base); }
+      50%      { opacity: var(--breathe-low); }
     }
   </style>
 </head>
@@ -628,7 +676,8 @@
             <ul x-show="(status.progress?.current_docs?.length || 0) > 0"
                 style="list-style:none; padding:0; margin:0.4rem 0 0; font-family:'SF Mono','Menlo','Consolas',monospace; font-size:0.82rem">
               <template x-for="d in (status.progress?.current_docs || [])" :key="d.doc_id">
-                <li style="display:flex; gap:0.6rem; align-items:baseline; padding:0.15rem 0">
+                <li class="in-flight-row"
+                    :style="`--max-idx: ${titleChars(d).length}; animation-delay: ${waveDelay(d)}s; display:flex; gap:0.6rem; align-items:baseline; padding:0.15rem 0`">
                   <span style="color:var(--muted); min-width:3rem; text-align:right; flex-shrink:0"
                         x-text="docElapsed(d) + 's'"></span>
                   <template x-if="d.url">
@@ -637,7 +686,7 @@
                       <template x-for="(c, idx) in titleChars(d)" :key="idx">
                         <span class="title-char"
                               :class="c.bright ? 'title-char-bright' : 'title-char-dim'"
-                              :style="`animation-delay: ${idx * 0.05}s`"
+                              :style="`--idx: ${idx}; animation-delay: ${breatheDelay(d)}s`"
                               x-text="c.ch"></span>
                       </template>
                     </a>
@@ -647,7 +696,7 @@
                       <template x-for="(c, idx) in titleChars(d)" :key="idx">
                         <span class="title-char"
                               :class="c.bright ? 'title-char-bright' : 'title-char-dim'"
-                              :style="`animation-delay: ${idx * 0.05}s`"
+                              :style="`--idx: ${idx}; animation-delay: ${breatheDelay(d)}s`"
                               x-text="c.ch"></span>
                       </template>
                     </span>
@@ -2607,6 +2656,27 @@
             return `${p.processed}/${p.total} (real: ${real}, skipped: ${skipped})`;
           }
           return `${p.processed ?? 0}/${p.total ?? 0}`;
+        },
+
+        breatheDelay(d) {
+          // Стабильный per-doc сдвиг фазы breathe из started_at. Строки появляются
+          // в in-flight в разное время → разные фазы дыхания, естественный «разнобой»
+          // без искусственной рандомизации. Negative animation-delay = fast-forward
+          // в анимации; mod cycle (3с) держит значение в диапазоне [-3, 0].
+          if (!d.started_at) return 0;
+          const startMs = Date.parse(d.started_at);
+          if (isNaN(startMs)) return 0;
+          return -((startMs % 3000) / 1000);
+        },
+
+        waveDelay(d) {
+          // То же что breatheDelay, но для row-level wave-bounce (цикл 6с).
+          // Каждая строка отрабатывает отскок волны со своей фазы → не выглядят
+          // синхронно зеркальными.
+          if (!d.started_at) return 0;
+          const startMs = Date.parse(d.started_at);
+          if (isNaN(startMs)) return 0;
+          return -((startMs % 6000) / 1000);
         },
 
         titleChars(d) {
