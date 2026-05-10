@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Protocol
@@ -101,8 +102,14 @@ class FileStatusReporter:
         self._state: State = 'idle'
         self._phase = ''
         self._processed = 0
+        self._processed_real = 0
         self._total = 0
         self._in_flight: dict[str, dict] = {}  # doc_id -> {title, url, started_at, chunks_done, chunks_total}
+        # Кольцевой буфер последних N completion-событий — UI считает rolling-rate
+        # за окно (60с) для адаптивного ETA. kind='real' если документ прошёл
+        # полный цикл (document_start был), 'skip' если только document_done
+        # (idempotency пропуск). 300 хватает на ~5 минут плотного потока.
+        self._recent_completions: deque[dict] = deque(maxlen=300)
         self._error: str | None = None
         self._write()
 
@@ -111,8 +118,10 @@ class FileStatusReporter:
             self._state = 'running'
             self._phase = name
             self._processed = 0
+            self._processed_real = 0
             self._total = total
             self._in_flight.clear()
+            self._recent_completions.clear()
             self._write()
 
     def document_start(self, doc_id: str, title: str | None = None, url: str | None = None) -> None:
@@ -143,8 +152,14 @@ class FileStatusReporter:
 
     def document_done(self, doc_id: str) -> None:
         with self._lock:
-            self._in_flight.pop(doc_id, None)
+            was_in_flight = self._in_flight.pop(doc_id, None) is not None
             self._processed += 1
+            if was_in_flight:
+                self._processed_real += 1
+            self._recent_completions.append({
+                'ts': _now_iso(),
+                'kind': 'real' if was_in_flight else 'skip',
+            })
             self._write()
 
     def finish(self, state: State, error: str | None = None) -> None:
@@ -158,8 +173,10 @@ class FileStatusReporter:
             'state': self._state,
             'phase': self._phase,
             'processed': self._processed,
+            'processed_real': self._processed_real,
             'total': self._total,
             'current_docs': list(self._in_flight.values()),
+            'recent_completions': list(self._recent_completions),
             'started_at': self._started_at,
             'updated_at': _now_iso(),
             'error': self._error,

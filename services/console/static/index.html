@@ -387,6 +387,22 @@
       font-size: 0.9rem;
       padding: 0.15rem;
     }
+
+    /* In-flight title — per-char волна с фазовым сдвигом по позиции буквы.
+       На пике (10-25% цикла) буква ярче, остальное — базовая яркость.
+       title-char-bright = revealed (chunks_done/total прошёл эту позицию),
+       title-char-dim    = ещё не дошёл. */
+    .title-char {
+      display: inline-block;
+      animation: title-wave 2.4s ease-in-out infinite;
+      will-change: filter;
+    }
+    .title-char-bright { color: var(--accent); }
+    .title-char-dim { color: var(--muted); opacity: 0.5; }
+    @keyframes title-wave {
+      0%, 60%, 100% { filter: brightness(1); text-shadow: none; }
+      15%, 25%      { filter: brightness(1.55); text-shadow: 0 0 5px currentColor; }
+    }
   </style>
 </head>
 <body x-data="app()" x-init="init()">
@@ -598,7 +614,7 @@
           <div>
             <div class="meta">
               <span><b x-text="status.progress?.phase || 'запуск...'"></b></span>
-              <span x-text="status.progress ? `${status.progress.processed}/${status.progress.total}` : ''"></span>
+              <span x-text="progressCountText()"></span>
             </div>
             <div class="progress">
               <div class="progress-fill"
@@ -618,12 +634,22 @@
                   <template x-if="d.url">
                     <a :href="d.url" target="_blank" rel="noopener"
                        style="text-decoration:none; flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">
-                      <span style="color:var(--accent)" x-text="revealedTitle(d).bright"></span><span style="color:var(--muted); opacity:0.55" x-text="revealedTitle(d).dim"></span>
+                      <template x-for="(c, idx) in titleChars(d)" :key="idx">
+                        <span class="title-char"
+                              :class="c.bright ? 'title-char-bright' : 'title-char-dim'"
+                              :style="`animation-delay: ${idx * 0.05}s`"
+                              x-text="c.ch"></span>
+                      </template>
                     </a>
                   </template>
                   <template x-if="!d.url">
                     <span style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap">
-                      <span style="color:var(--accent)" x-text="revealedTitle(d).bright"></span><span style="color:var(--muted); opacity:0.55" x-text="revealedTitle(d).dim"></span>
+                      <template x-for="(c, idx) in titleChars(d)" :key="idx">
+                        <span class="title-char"
+                              :class="c.bright ? 'title-char-bright' : 'title-char-dim'"
+                              :style="`animation-delay: ${idx * 0.05}s`"
+                              x-text="c.ch"></span>
+                      </template>
                     </span>
                   </template>
                   <span style="color:var(--muted); white-space:nowrap; flex-shrink:0"
@@ -2528,28 +2554,76 @@
         },
 
         etaText() {
+          // Адаптивный ETA на основе rolling 60-секундного окна completion-событий.
+          // Skip-документы (idempotency) и реально-обработанные считаются отдельно:
+          // для ETA используется только rate реального процессинга и проекция
+          // skip-ratio из недавнего окна. Это переживает skip-blast в начале
+          // обновления (rate=0 → ETA не отображается), а потом адаптируется
+          // под фактический режим работы.
+          this._now_tick;  // зависимость от ежесекундного тика для пересчёта
           const p = this.status?.progress;
-          if (!p || !p.started_at || !p.total || !p.processed) return '';
-          const startedMs = Date.parse(p.started_at);
-          if (isNaN(startedMs)) return '';
-          const elapsed = (Date.now() - startedMs) / 1000;
-          const rate = p.processed / elapsed;
-          if (rate <= 0) return '';
-          const remaining = (p.total - p.processed) / rate;
-          if (!isFinite(remaining)) return '';
-          return `ETA ~${formatDuration(remaining)}`;
+          if (!p?.total || !p.processed) return '';
+
+          const completions = p.recent_completions || [];
+          const now = Date.now();
+          const windowMs = 60_000;
+          const windowed = completions.filter(c => {
+            const ts = Date.parse(c.ts);
+            return !isNaN(ts) && (now - ts) <= windowMs;
+          });
+          if (windowed.length < 3) {
+            // Слишком мало данных — пока никакой оценки.
+            return '';
+          }
+
+          const realInWindow = windowed.filter(c => c.kind === 'real').length;
+          const skipRatio = (windowed.length - realInWindow) / windowed.length;
+          if (realInWindow === 0) {
+            // Окно полностью skip — ETA непредсказуем (не знаем когда начнутся реальные).
+            return '';
+          }
+
+          const oldestTs = Date.parse(windowed[0].ts);
+          const newestTs = Date.parse(windowed[windowed.length - 1].ts);
+          const windowDurationSec = Math.max((newestTs - oldestTs) / 1000, 1);
+          const realRatePerSec = realInWindow / windowDurationSec;
+          if (realRatePerSec <= 0) return '';
+
+          const remaining = p.total - p.processed;
+          const remainingReal = remaining * (1 - skipRatio);
+          const etaSec = remainingReal / realRatePerSec;
+          if (!isFinite(etaSec) || etaSec < 0) return '';
+          return `ETA ~${formatDuration(etaSec)}`;
         },
 
-        revealedTitle(d) {
-          // Char-by-char title reveal по chunks_done/chunks_total — bright slice
-          // постепенно растёт от начала названия. Пока chunks_total не известно
-          // (фаза load/prepare) — всё в dim-цвете.
+        progressCountText() {
+          // Главный счётчик прогресса. При наличии skip-ов показывает breakdown
+          // (real / skipped) — иначе плоский processed/total.
+          const p = this.status?.progress;
+          if (!p) return '';
+          const real = p.processed_real ?? p.processed;
+          const skipped = (p.processed ?? 0) - real;
+          if (skipped > 0) {
+            return `${p.processed}/${p.total} (real: ${real}, skipped: ${skipped})`;
+          }
+          return `${p.processed ?? 0}/${p.total ?? 0}`;
+        },
+
+        titleChars(d) {
+          // Возвращает массив {ch, bright} по символам title — для per-char
+          // рендеринга с волновой анимацией. bright=true для первых N символов
+          // где N = title.length × chunks_done / chunks_total. Пока chunks_total
+          // неизвестно (фаза load/prepare/embed-doc-vector) — все буквы dim.
+          // Пробелы заменяются на &nbsp; чтобы inline-block спаны не сливались.
           const title = d.title || d.doc_id || '';
           const total = d.chunks_total || 0;
           const done = d.chunks_done || 0;
           const ratio = total > 0 ? Math.min(1, done / total) : 0;
           const cut = Math.floor(title.length * ratio);
-          return { bright: title.slice(0, cut), dim: title.slice(cut) };
+          return [...title].map((ch, i) => ({
+            ch: ch === ' ' ? ' ' : ch,
+            bright: i < cut,
+          }));
         },
 
         docElapsed(d) {

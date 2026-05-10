@@ -51,8 +51,43 @@ class TestFileStatusReporter:
         data = json.loads(path.read_text())
 
         assert data['processed'] == 2
-        # Skip-path (only document_done без document_start): in-flight остаётся пустым.
+        # Skip-path (only document_done без document_start): in-flight остаётся пустым,
+        # processed_real не растёт, completions помечены kind='skip'.
         assert data['current_docs'] == []
+        assert data['processed_real'] == 0
+        assert all(c['kind'] == 'skip' for c in data['recent_completions'])
+        assert len(data['recent_completions']) == 2
+
+    def test_real_path_increments_processed_real(self, tmp_path: Path):
+        """document_start → document_done считается как real-completion."""
+        path = tmp_path / 'state.json'
+        r = FileStatusReporter(path)
+        r.start_phase('p', 3)
+
+        r.document_start('a', title='A')
+        r.document_done('a')
+        data = json.loads(path.read_text())
+
+        assert data['processed'] == 1
+        assert data['processed_real'] == 1
+        assert data['recent_completions'][-1]['kind'] == 'real'
+
+    def test_mixed_skip_and_real(self, tmp_path: Path):
+        """Skip и real коректно различаются в processed_real и recent_completions."""
+        path = tmp_path / 'state.json'
+        r = FileStatusReporter(path)
+        r.start_phase('p', 5)
+
+        r.document_done('skip1')                     # skip
+        r.document_start('real1'); r.document_done('real1')  # real
+        r.document_done('skip2')                     # skip
+        r.document_start('real2'); r.document_done('real2')  # real
+
+        data = json.loads(path.read_text())
+        assert data['processed'] == 4
+        assert data['processed_real'] == 2
+        kinds = [c['kind'] for c in data['recent_completions']]
+        assert kinds == ['skip', 'real', 'skip', 'real']
 
     def test_start_phase_resets_processed_counter(self, tmp_path: Path):
         path = tmp_path / 'state.json'
