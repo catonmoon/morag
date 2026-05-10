@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 
 from morag.indexing.embedder import Embedder, SparseEmbedder
 from morag.indexing.token_counter import TokenCounter, TiktokenCounter
-from morag.llm.client import LLMClient
+from morag.llm.client import GenerationParams, LLMClient
 from morag.sources.base import Chunk, Document
 
 logger = logging.getLogger(__name__)
@@ -201,7 +201,11 @@ class DocSummaryProcessor(DocumentProcessor):
             prompt = self._prompt_no_parent.format(doc_text=doc_text)
 
         messages = [{'role': 'user', 'content': prompt}]
-        summary = await self._client.complete(messages, max_tokens=self._max_tokens)
+        # enable_thinking=False — индексация не нуждается в CoT (инцидент 2026-05).
+        summary = await self._client.complete(
+            messages, max_tokens=self._max_tokens,
+            params=GenerationParams(enable_thinking=False),
+        )
         document.payload['doc_summary'] = summary.strip()
         logger.info('DocSummaryProcessor: %s (%d chars)', document.id, len(summary))
 
@@ -391,6 +395,7 @@ class DocTitleProcessor(DocumentProcessor):
         try:
             title = await self._client.complete(
                 messages, max_tokens=self._max_tokens,
+                params=GenerationParams(enable_thinking=False),
             )
             document.title = title.strip()
             document.path = [title.strip()]

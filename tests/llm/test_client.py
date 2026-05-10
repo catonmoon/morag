@@ -67,6 +67,19 @@ class TestLLMClient:
         result = await client.complete([{'role': 'user', 'content': 'Hi'}])
         assert result == ''
 
+    async def test_complete_does_not_return_reasoning_as_content(self, client, mock_openai, caplog):
+        """Регрессия: vLLM с thinking-on отдаёт content=null + reasoning=CoT-портянка.
+        Раньше мы фоллбэчили на reasoning → CoT улетал в payload как «ответ»
+        (инцидент 2026-05: 25к чанков с «Thinking Process: 1. Analyze the Request»).
+        Теперь — пустая строка + громкий warning."""
+        cot = 'Thinking Process:\n1. Analyze the Request:\n   * Task: ...'
+        mock_openai.chat.completions.create.return_value = make_completion(None, reasoning=cot)
+        with caplog.at_level('WARNING', logger='morag.llm.client'):
+            result = await client.complete([{'role': 'user', 'content': 'Hi'}])
+        assert result == '', 'CoT must NOT leak from reasoning field into content'
+        assert any('thinking' in r.message.lower() for r in caplog.records), \
+            'must log loud warning when reasoning field is non-empty'
+
     async def test_complete_json_parses_json(self, client, mock_openai):
         schema = {'type': 'object', 'properties': {'key': {'type': 'string'}}, 'required': ['key']}
         mock_openai.chat.completions.create.return_value = make_completion('{"key": "value"}')

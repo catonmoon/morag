@@ -4,6 +4,7 @@ import logging
 from abc import ABC, abstractmethod
 
 from morag.indexing.token_counter import TokenCounter, TiktokenCounter
+from morag.llm.client import GenerationParams
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,7 @@ class LLMContextGenerator(ContextGenerator):
         try:
             result = await self._client.complete(
                 messages, max_tokens=max_tokens,
+                params=GenerationParams(enable_thinking=False),
             )
             logger.info(
                 'LLMContextGenerator: context %d tok (max %s) for chunk %d tok',

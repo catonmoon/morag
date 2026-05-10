@@ -79,15 +79,39 @@ def _strip_thinking(text: str) -> str:
 
 
 def _extract_content(message) -> str:
-    """Извлечь текст из ответа, с fallback на reasoning (OpenRouter)."""
+    """Извлечь текст из ответа.
+
+    `<think>...</think>` блоки внутри content режем (`_strip_thinking`).
+
+    Поле `reasoning` НЕ возвращается как ответ — даже если content пустой.
+    vLLM с `--reasoning-parser` при включённом thinking кладёт CoT в
+    `reasoning` и `content=null` (часто `finish_reason=length` — модель
+    съела весь max_tokens бюджет на размышления). Раньше мы фоллбэчили
+    на reasoning «для OpenRouter», но это превращало CoT в тихо
+    записываемый «ответ» (инцидент 2026-05: 25к чанков с
+    «Thinking Process: 1. Analyze the Request» в context-полях,
+    залетели в lexical-векторы Qdrant).
+
+    Текущее поведение: content пустой → возвращаем '' и громко логируем
+    предупреждение. Caller увидит проблему сразу, а не через неделю в
+    загрязнённом индексе. Чтобы получить нормальный content — выставить
+    `enable_thinking: false` в LLMInstance config (или поднять max_tokens
+    если thinking реально нужен).
+    """
     content = message.content or ''
     if content:
         return _strip_thinking(content)
-    # OpenRouter: content=null, весь текст в reasoning
     reasoning = getattr(message, 'reasoning', None)
     if reasoning:
-        logger.debug('LLM content is empty, falling back to reasoning field')
-        return _strip_thinking(reasoning)
+        logger.warning(
+            'LLM returned empty content with non-empty reasoning field (%d chars). '
+            'Likely thinking enabled and max_tokens consumed by CoT before answer phase. '
+            'Set enable_thinking=false in LLMInstance config (or bump max_tokens). '
+            'Returning empty string (NOT reasoning) to avoid silent CoT leak into payload.',
+            len(reasoning),
+        )
+    else:
+        logger.warning('LLM returned empty content and no reasoning field')
     return ''
 
 

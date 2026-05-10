@@ -167,6 +167,10 @@ def _build_openai_compatible(form: dict[str, Any]) -> dict[str, Any]:
         'capabilities': _capabilities(form),
         'context_window': int(form.get('context_window') or 32768),
         'max_concurrent': int(form.get('max_concurrent') or 4),
+        # Thinking всегда выключаем по умолчанию — vLLM/qwen-семейство по дефолту
+        # думают, без явного флага CoT улетает в reasoning-поле и засирает payload
+        # (инцидент 2026-05). Юзер может включить в конфиге вручную если нужно.
+        'enable_thinking': False,
     }
     if form.get('api_key'):
         out['api_key'] = form['api_key']

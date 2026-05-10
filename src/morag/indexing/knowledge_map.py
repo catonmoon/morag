@@ -18,6 +18,7 @@ from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
 from morag.indexing.token_counter import TokenCounter, TiktokenCounter
+from morag.llm.client import GenerationParams
 from morag.sources.base import Document
 from morag.storage.repository import DocRepository
 
@@ -379,6 +380,7 @@ class KnowledgeMapGenerator:
                 result = await self._llm_client.complete(
                     [{'role': 'user', 'content': prompt}],
                     max_tokens=max_tokens if max_tokens is not None else self._node_max_tokens,
+                    params=GenerationParams(enable_thinking=False),
                 )
                 return result.strip()
             except Exception:
@@ -652,6 +654,7 @@ class KnowledgeMapGenerator:
                 result = await self._llm_client.complete(
                     [{'role': 'user', 'content': prompt}],
                     max_tokens=budget,
+                    params=GenerationParams(enable_thinking=False),
                 )
                 return result.strip()
             except Exception:
@@ -713,6 +716,7 @@ class KnowledgeMapGenerator:
                 result = await self._llm_client.complete(
                     [{'role': 'user', 'content': prompt}],
                     max_tokens=target_tokens,
+                    params=GenerationParams(enable_thinking=False),
                 )
                 return result.strip()
             except Exception:
@@ -886,6 +890,7 @@ class KnowledgeMapGenerator:
             schema=schema,
             schema_name='topics',
             max_tokens=4096,
+            params=GenerationParams(enable_thinking=False),
         )
         topics = []
         for t in response.get('topics') or []:
@@ -951,6 +956,7 @@ class KnowledgeMapGenerator:
                         schema=schema,
                         schema_name='topic_assignments',
                         max_tokens=1024,
+                        params=GenerationParams(enable_thinking=False),
                     )
                     raw = response.get('assignments') or []
                     # Нормализуем: усечь/дополнить до размера батча

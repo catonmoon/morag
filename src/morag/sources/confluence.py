@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 from markdownify import markdownify
 
 from morag.config import ConfluenceSourceConfig
+from morag.llm.client import GenerationParams
 from morag.sources.base import Document, Source
 
 logger = logging.getLogger(__name__)
@@ -375,6 +376,7 @@ class ConfluenceSource(Source):
             description = await self._vision_client.complete_vision(
                 _IMAGE_PROMPT, image_b64, media_type,
                 max_tokens=self._vision_max_tokens,
+                params=GenerationParams(enable_thinking=False),
             )
             logger.info('Page %s: image described: %s -> %s...', page_id, src[:80], description[:80].replace('\n', '\\n'))
             return description.strip() or None

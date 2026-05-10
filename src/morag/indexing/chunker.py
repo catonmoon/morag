@@ -20,6 +20,7 @@ from morag.indexing.splitter import (
     split_sentences,
 )
 from morag.indexing.token_counter import TokenCounter
+from morag.llm.client import GenerationParams
 
 logger = logging.getLogger(__name__)
 
@@ -345,6 +346,7 @@ class LLMChunker(Chunker):
             data = await self._client.complete_json(
                 messages, schema=_CHUNKS_SCHEMA,
                 schema_name='chunks',
+                params=GenerationParams(enable_thinking=False),
             )
         except ValueError:
             logger.warning(

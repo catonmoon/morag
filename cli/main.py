@@ -152,6 +152,7 @@ def _make_pdf_converter(
             repetition_penalty=config.pdf.repetition_penalty,
             frequency_penalty=config.pdf.frequency_penalty,
             presence_penalty=config.pdf.presence_penalty,
+            enable_thinking=False,  # vision-индексация без CoT (см. инцидент 2026-05)
         )
         postprocessors = _build_postprocessors(config.pdf)
         return VisionPdfConverter(
