@@ -274,6 +274,7 @@ def _init_valves_from_env() -> dict:
         'QDRANT_KNOWLEDGE_MAP_COLLECTION': _e('QDRANT_KNOWLEDGE_MAP_COLLECTION'),
         'SPARSE_EMBED_URL': _e('SPARSE_EMBED_URL'),
         'DENSE_EMBED_URL': _e('DENSE_EMBED_URL'),
+        'DENSE_EMBED_API_KEY': _e('DENSE_EMBED_API_KEY'),
         'DENSE_EMBEDDER_MODEL': _e('DENSE_EMBEDDER_MODEL'),
         'DENSE_DIM': _ei('DENSE_DIM'),
         'QUERY_TEMPLATE': _e('QUERY_TEMPLATE'),
@@ -293,6 +294,8 @@ def _init_valves_from_env() -> dict:
         'FIND_SECTION_DOC_POOL': _ei('FIND_SECTION_DOC_POOL'),
         'FIND_SECTION_DESCENT_THRESHOLD': _ef('FIND_SECTION_DESCENT_THRESHOLD'),
         'FIND_SECTION_TOP_DOCS': _ei('FIND_SECTION_TOP_DOCS'),
+        'FIND_SECTION_CHUNK_PEEK_LIMIT': _ei('FIND_SECTION_CHUNK_PEEK_LIMIT'),
+        'FIND_SECTION_CHUNK_PEEK_DOCS': _ei('FIND_SECTION_CHUNK_PEEK_DOCS'),
         'MAX_ITERATIONS': _ei('MAX_ITERATIONS'),
         'ENABLE_THINKING': _eb('ENABLE_THINKING'),
         'RERANK_ENABLE_THINKING': _eb('RERANK_ENABLE_THINKING'),
@@ -353,6 +356,7 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
             default='http://embedder-gte:8081',
         ),
         'dense_url': _str_or(v.DENSE_EMBED_URL, dense.base_url if dense else None),
+        'dense_api_key': _str_or(v.DENSE_EMBED_API_KEY, dense.api_key if dense else None),
         'dense_model': _str_or(v.DENSE_EMBEDDER_MODEL, dense.model if dense else None),
         'dense_dim': _int_or(v.DENSE_DIM, dense.dim if dense else None),
         'query_template': _str_or(
@@ -430,6 +434,14 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
             v.FIND_SECTION_TOP_DOCS,
             find_sec.top_docs if find_sec else None, default=3,
         ),
+        'find_section_chunk_peek_limit': _int_or(
+            v.FIND_SECTION_CHUNK_PEEK_LIMIT,
+            find_sec.chunk_peek_limit if find_sec else None, default=10,
+        ),
+        'find_section_chunk_peek_docs': _int_or(
+            v.FIND_SECTION_CHUNK_PEEK_DOCS,
+            find_sec.chunk_peek_docs if find_sec else None, default=3,
+        ),
         'max_iterations': _int_or(
             v.MAX_ITERATIONS, search.max_iterations if search else None, default=9,
         ),
@@ -479,6 +491,7 @@ class Pipeline:
 
         SPARSE_EMBED_URL: str = ''
         DENSE_EMBED_URL: str = ''           # OpenAI-compat endpoint, ОБЯЗАТЕЛЬНО с /v1
+        DENSE_EMBED_API_KEY: str = ''       # api_key для dense-embedder (если требует auth)
         DENSE_EMBEDDER_MODEL: str = ''
         DENSE_DIM: int = 0
         QUERY_TEMPLATE: str = ''
@@ -504,6 +517,8 @@ class Pipeline:
         FIND_SECTION_DOC_POOL: int = 0
         FIND_SECTION_DESCENT_THRESHOLD: float = 0.0
         FIND_SECTION_TOP_DOCS: int = 0
+        FIND_SECTION_CHUNK_PEEK_LIMIT: int = 0       # chunk-level peek (ADR-0013)
+        FIND_SECTION_CHUNK_PEEK_DOCS: int = 0
         MAX_ITERATIONS: int = 0
         ENABLE_THINKING: bool | None = None       # None = config; True/False = override agent thinking
         RERANK_ENABLE_THINKING: bool | None = None
@@ -546,6 +561,7 @@ class Pipeline:
         #    query_template для dense-канала.
         self._dense_embedder = HttpEmbedder(
             base_url=s['dense_url'], model=s['dense_model'], dim=s['dense_dim'],
+            api_key=s['dense_api_key'],
             query_template=s['query_template'], timeout=s['http_timeout'],
         )
         self._sparse_embedder = HttpGteSparseEmbedder(
@@ -569,6 +585,8 @@ class Pipeline:
             doc_pool=s['find_section_doc_pool'],
             descent_threshold=s['find_section_descent_threshold'],
             top_docs=s['find_section_top_docs'],
+            chunk_peek_limit=s['find_section_chunk_peek_limit'],
+            chunk_peek_docs=s['find_section_chunk_peek_docs'],
         )
 
         # 6. Сохранить merged settings — pipe() читает их вместо self.valves

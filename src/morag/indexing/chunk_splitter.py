@@ -191,3 +191,74 @@ def split_table_chunks(chunks: list[Chunk], max_rows: int) -> list[Chunk]:
     for i, c in enumerate(result):
         renumbered.append(replace(c, order=i, total=total))
     return renumbered
+
+
+def add_table_narratives(chunks: list[Chunk], min_rows: int = 5) -> list[Chunk]:
+    """Дублирующее покрытие: per-row narrative-чанки для markdown-таблиц.
+
+    Для каждого чанка, содержащего таблицу с data_rows >= min_rows, генерим
+    дополнительные чанки (по 1 на строку) с text в виде
+    'Header1: val1\\nHeader2: val2\\n...'. Пустые/прочерк-ячейки скипаются.
+
+    Narrative-чанки добавляются В КОНЕЦ списка (после оригинальных).
+    Свойства narrative-чанка:
+      - id: новый UUID
+      - order = -1 (sentinel: не часть doc-sequence, фильтруется в get_neighbors)
+      - text: per-row narrative (newline-joined «Header: value»)
+      - context: '' (пустой — для narratives контекст не генерируем)
+      - payload:
+          * наследуется от parent (path, source_type, creator, и т.д.)
+          * УБИРАЕТСЯ: content_kind, table_part (это parent-specific)
+          * ДОБАВЛЯЕТСЯ: chunk_type='table_row_narrative', parent_chunk_id=parent.id
+      - vectors: {} (заполнятся ChunkProcessor'ом)
+
+    Парентовые чанки не меняются. Retrieval-side при попадании narrative в
+    результат свапает его на parent (см. searcher._swap_narratives_to_parents).
+    Подробнее в ADR-0013.
+    """
+    if min_rows < 1 or not chunks:
+        return chunks
+
+    narratives: list[Chunk] = []
+    for parent in chunks:
+        if not parent.text.strip():
+            continue
+        lines = parent.text.split('\n')
+        located = _find_table(lines)
+        if located is None:
+            continue
+        table_start, data_start, data_end, _ = located
+        if data_end - data_start < min_rows:
+            continue
+
+        headers = _parse_headers(lines[table_start])
+        for line in lines[data_start:data_end]:
+            cells = _parse_headers(line)  # тот же парсер: split('|') + strip
+            pairs: list[str] = []
+            for header, value in zip(headers, cells):
+                v = value.strip()
+                if not v or v == '-':
+                    continue
+                pairs.append(f'{header}: {v}')
+            if not pairs:
+                continue  # вся строка пустая — скип
+            text = '\n'.join(pairs)
+
+            payload = dict(parent.payload)
+            payload.pop('content_kind', None)
+            payload.pop('table_part', None)
+            payload['chunk_type'] = 'table_row_narrative'
+            payload['parent_chunk_id'] = parent.id
+
+            narrative = replace(
+                parent,
+                id=_new_chunk_id(),
+                text=text,
+                context='',
+                order=-1,
+                payload=payload,
+                vectors={},
+            )
+            narratives.append(narrative)
+
+    return chunks + narratives

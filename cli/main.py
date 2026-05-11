@@ -488,6 +488,8 @@ async def cmd_index(
         passthrough_threshold=config.indexing.chunker.passthrough_threshold,
         embed_batch_size=config.indexing.embed_batch_size,
         max_table_rows=config.indexing.chunker.max_table_rows,
+        narrate_tables_enabled=config.indexing.chunker.narrate_tables.enabled,
+        narrate_tables_min_rows=config.indexing.chunker.narrate_tables.min_rows,
         status_reporter=reporter,
         cancel_event=cancel_event,
         run_context=run_ctx,
@@ -612,9 +614,13 @@ async def cmd_index(
                 prompt_strategy=km_cfg.prompt_strategy,
                 prompt_budget=km_cfg.prompt_budget,
                 token_counter=llm_counter,
-                concurrency=config.indexing.concurrency,
+                # KM-override концарренси если задан в conf; иначе общий
+                # indexing.concurrency.
+                concurrency=km_cfg.concurrency if km_cfg.concurrency is not None
+                else config.indexing.concurrency,
                 exclude_source_types=km_cfg.exclude_source_types,
                 depth1_section_ids=km_cfg.depth1_section_ids,
+                auto_depth1_children_threshold=km_cfg.auto_depth1_children_threshold,
                 flat_topics_target=km_cfg.flat_topics_target,
                 flat_topics_max_input_docs=km_cfg.flat_topics_max_input_docs,
                 flat_topics_assign_batch=km_cfg.flat_topics_assign_batch,
@@ -692,12 +698,15 @@ async def cmd_rebuild_km(
         prompt_strategy=km_cfg.prompt_strategy,
         prompt_budget=km_cfg.prompt_budget,
         token_counter=llm_counter,
-        concurrency=config.indexing.concurrency,
+        # KM-override концарренси если задан в conf; иначе общий indexing.concurrency.
+        concurrency=km_cfg.concurrency if km_cfg.concurrency is not None
+        else config.indexing.concurrency,
         exclude_source_types=km_cfg.exclude_source_types,
         flat_topics_target=km_cfg.flat_topics_target,
         flat_topics_max_input_docs=km_cfg.flat_topics_max_input_docs,
         flat_topics_assign_batch=km_cfg.flat_topics_assign_batch,
         depth1_section_ids=km_cfg.depth1_section_ids,
+        auto_depth1_children_threshold=km_cfg.auto_depth1_children_threshold,
     )
     # Roots — со всех Confluence-инстансов, prefix как в ID документов
     root_ids = set()

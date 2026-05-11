@@ -88,6 +88,8 @@ class IndexingPipeline:
         passthrough_threshold: int | None = None,
         embed_batch_size: int = 64,
         max_table_rows: int = 0,
+        narrate_tables_enabled: bool = False,
+        narrate_tables_min_rows: int = 5,
         status_reporter: StatusReporter | None = None,
         cancel_event: asyncio.Event | None = None,
         run_context: RunContext | None = None,
@@ -106,6 +108,8 @@ class IndexingPipeline:
         self._passthrough_threshold = passthrough_threshold
         self._embed_batch_size = embed_batch_size
         self._max_table_rows = max_table_rows
+        self._narrate_tables_enabled = narrate_tables_enabled
+        self._narrate_tables_min_rows = narrate_tables_min_rows
         self._status_reporter: StatusReporter = status_reporter or NullStatusReporter()
         self._cancel_event = cancel_event or asyncio.Event()
         # Run versioning + embedder fingerprint (см. ADR-0012). None для CLI-режимов
@@ -442,6 +446,23 @@ class IndexingPipeline:
                     '%s  Table split: %d → %d chunks (max_table_rows=%d)',
                     w, before, total, self._max_table_rows,
                 )
+
+        # Дублирующее покрытие: для каждой таблицы (>= min_rows строк) добавляем
+        # narrative-чанки (по 1 на строку). Используются retrieval'ом как
+        # search-key + swap-to-parent. Не trogaet существующие чанки. См. ADR-0013.
+        if self._narrate_tables_enabled:
+            from morag.indexing.chunk_splitter import add_table_narratives
+            before = len(chunks)
+            chunks = add_table_narratives(chunks, self._narrate_tables_min_rows)
+            added = len(chunks) - before
+            if added > 0:
+                logger.info(
+                    '%s  Table narratives: +%d row-chunks (min_rows=%d)',
+                    w, added, self._narrate_tables_min_rows,
+                )
+            # Stamp run-versioning + fingerprint у новых narratives
+            for c in chunks[before:]:
+                self._stamp_payload(c.payload, version=doc_version)
 
         # Применяем процессоры и сохраняем батчами.
         # process_batch — async (AsyncOpenAI / httpx.AsyncClient), параллелизм

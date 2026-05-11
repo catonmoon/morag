@@ -145,6 +145,7 @@ class KnowledgeMapGenerator:
         flat_topics_max_input_docs: int = 3000,
         flat_topics_assign_batch: int = 5,
         depth1_section_ids: list[str] | None = None,
+        auto_depth1_children_threshold: int | None = None,
     ) -> None:
         self._client = client
         self._llm_client = llm_client
@@ -162,7 +163,11 @@ class KnowledgeMapGenerator:
         self._flat_topics_target = flat_topics_target
         self._flat_topics_max_input_docs = flat_topics_max_input_docs
         self._flat_topics_assign_batch = flat_topics_assign_batch
-        self._depth1_section_ids = frozenset(depth1_section_ids or [])
+        # _depth1_section_ids: явно указанные ID. Эффективный набор (с учётом
+        # auto_threshold) формируется в generate() когда children_map известен.
+        self._depth1_section_ids_explicit = frozenset(depth1_section_ids or [])
+        self._depth1_section_ids: frozenset[str] = self._depth1_section_ids_explicit
+        self._auto_depth1_threshold = auto_depth1_children_threshold
 
     async def ensure_collection(self) -> None:
         """Создать коллекцию для карт если не существует."""
@@ -222,6 +227,20 @@ class KnowledgeMapGenerator:
             for parent_id in doc.parent_doc_ids:
                 if parent_id in all_ids:
                     children_map[parent_id].append(doc)
+
+        # Эффективный depth1_section_ids: явно перечисленные + auto-detected по
+        # порогу количества детей. Auto-добавление логируется (видно в логе какие
+        # секции свернулись, по сколько детей у каждой).
+        effective = set(self._depth1_section_ids_explicit)
+        if self._auto_depth1_threshold is not None:
+            for pid, kids in children_map.items():
+                if len(kids) > self._auto_depth1_threshold and pid not in effective:
+                    effective.add(pid)
+                    logger.info(
+                        'KnowledgeMap auto-depth1: %s (%d children > threshold %d)',
+                        pid, len(kids), self._auto_depth1_threshold,
+                    )
+        self._depth1_section_ids = frozenset(effective)
 
         # Корни: из конфига (ancestor_ids) или по отсутствию parent
         if root_ids:
@@ -366,6 +385,46 @@ class KnowledgeMapGenerator:
             children = children_map.get(doc.id, [])
             if children:
                 self._build_raw_map(children, children_map, lines, heading_level + 1)
+
+    async def _iterative_summarize(
+        self,
+        title: str,
+        items: list[str],
+        input_budget: int,
+        output_budget: int,
+    ) -> str:
+        """Итеративное обобщение когда полный raw_map не влезает в context_window.
+
+        Идём по `items` (строки raw_map), наполняем батч пока влезает в
+        `input_budget - accumulated`. Когда батч полный — обобщаем
+        `accumulated + batch` через LLM (max_tokens=output_budget), результат
+        становится новым accumulated. После всех items возвращаем accumulated.
+
+        Гарантия: каждый отдельный LLM-вызов укладывается в input_budget.
+        """
+        accumulated = ''
+        batch_lines: list[str] = []
+        batch_tokens = 0
+        for item in items:
+            it_tokens = self._counter.count(item)
+            acc_tokens = self._counter.count(accumulated) if accumulated else 0
+            if batch_lines and acc_tokens + batch_tokens + it_tokens > input_budget:
+                batch_text = (accumulated + '\n\n' + '\n'.join(batch_lines)
+                              if accumulated else '\n'.join(batch_lines))
+                accumulated = await self._summarize_batch(
+                    title, batch_text, max_tokens=output_budget,
+                )
+                batch_lines = []
+                batch_tokens = 0
+            batch_lines.append(item)
+            batch_tokens += it_tokens
+        if batch_lines:
+            batch_text = (accumulated + '\n\n' + '\n'.join(batch_lines)
+                          if accumulated else '\n'.join(batch_lines))
+            accumulated = await self._summarize_batch(
+                title, batch_text, max_tokens=output_budget,
+            )
+        return accumulated
 
     async def _summarize_batch(
         self, title: str, summaries: str, max_tokens: int | None = None,
@@ -539,11 +598,27 @@ class KnowledgeMapGenerator:
         children = children_map.get(doc.id, [])
 
         if budget > 0 and children:
-            # Средний узел: собираем raw map потомков → LLM обобщает
+            # Средний узел: собираем raw map потомков → LLM обобщает.
             raw_lines: list[str] = []
             self._build_raw_map(children, children_map, raw_lines, heading_level=2)
             raw_map = '\n'.join(raw_lines)
-            description = await self._summarize_batch(title, raw_map, max_tokens=budget)
+            # Guard против 400/CUDA-OOM от модели: raw_map не должен превышать
+            # context_window минус output_budget. Если raw_map влезает — один
+            # вызов; если нет — iterative_summarize пакетами (накопитель +
+            # батч → summary → новый накопитель). См. инцидент 2026-05
+            # (cudaErrorLaunchFailure на ~60К input).
+            input_budget = self._llm_client.context_window - 500 - budget
+            raw_tokens = self._counter.count(raw_map)
+            if raw_tokens <= input_budget or input_budget <= 0:
+                description = await self._summarize_batch(title, raw_map, max_tokens=budget)
+            else:
+                logger.info(
+                    'KnowledgeMap: weighted node %s — raw map %d tok > input_budget %d, batched',
+                    doc.id, raw_tokens, input_budget,
+                )
+                description = await self._iterative_summarize(
+                    title, raw_lines, input_budget, budget,
+                )
         elif budget > 0:
             # Лист: doc_summary, при необходимости сжимаем
             description = doc.payload.get('doc_summary', '')

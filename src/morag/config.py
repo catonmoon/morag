@@ -222,6 +222,18 @@ class OversizedConfig(BaseModel):
     diagram: str = 'asis'
 
 
+class NarrateTablesConfig(BaseModel):
+    """Дублирующее покрытие markdown-таблиц через per-row narrative-чанки.
+
+    Для каждой строки таблицы (≥ min_rows строк в таблице) создаётся отдельный
+    чанк вида `Header1: val1\\nHeader2: val2\\n...`. В retrieval такой чанк
+    при попадании в результат заменяется на parent table-чанк (swap-to-parent),
+    нужен только как точечный search-key. См. ADR-0013.
+    """
+    enabled: bool = False
+    min_rows: int = 5            # таблицы с <5 data-строк не narrate'им (status/labels)
+
+
 class ChunkerConfig(BaseModel):
     mode: str = 'hybrid'
     block_limit: int = 32000
@@ -233,6 +245,7 @@ class ChunkerConfig(BaseModel):
     passthrough_threshold: int | None = None
     oversized: OversizedConfig = OversizedConfig()
     max_table_rows: int = 0
+    narrate_tables: NarrateTablesConfig = NarrateTablesConfig()
 
 
 class ContextConfig(BaseModel):
@@ -253,9 +266,20 @@ class KnowledgeMapConfig(BaseModel):
     prompt_budget: int = 8192
     exclude_source_types: list[str] = ['attached_jira', 'attached_pdf']
     depth1_section_ids: list[str] = []
+    # Автоматически добавлять в depth1 любой узел с числом прямых детей > threshold.
+    # None = выключено (только явно перечисленные depth1_section_ids).
+    # Полезно когда заранее не знаешь какие корни «крупные» — например свежий
+    # Confluence-source: после первой индексации видишь сколько у каждого корня
+    # детей и можешь поставить, скажем, 13.
+    auto_depth1_children_threshold: int | None = None
     flat_topics_target: int | None = None
     flat_topics_max_input_docs: int = 3000
     flat_topics_assign_batch: int = 5
+    # Override параллелизма для KM-генерации. None = берём indexing.concurrency
+    # (общий по индексации). Полезно когда у KM-фазы LLM-запросы тяжёлые
+    # (длинный input при iterative_summarize для крупных секций) — снижаем
+    # отдельно, не трогая doc-параллелизм.
+    concurrency: int | None = None
 
 
 class IndexingConfig(BaseModel):
@@ -363,6 +387,10 @@ class RetrievalFindSectionConfig(BaseModel):
     doc_pool: int = 20
     descent_threshold: float = 0.5
     top_docs: int = 3
+    # Chunk-level peek: подтаскивает doc_id из топовых чанков (mediator для
+    # глоссариев/таблиц, doc-level которых плохо ранжируется). См. ADR-0013.
+    chunk_peek_limit: int = 10
+    chunk_peek_docs: int = 3
 
 
 class RetrievalSearchConfig(BaseModel):

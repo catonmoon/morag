@@ -116,6 +116,12 @@ class SparseEmbeddingProcessor(ChunkProcessor):
         self._include_chunk_context = include_chunk_context
 
     def _sparse_text(self, chunk: Chunk, document: Document) -> str:
+        # Narrative-чанки (table_row_narrative) — точечные search-keys для одной
+        # строки таблицы. Включение context/doc_summary в их sparse-вектор
+        # расфокусировывает — все narratives одного документа становятся
+        # похожими по общей части. См. ADR-0013.
+        if chunk.payload.get('chunk_type') == 'table_row_narrative':
+            return chunk.text
         parts = [chunk.text]
         if self._include_chunk_context and chunk.context:
             parts.append(chunk.context)

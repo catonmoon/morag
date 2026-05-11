@@ -63,7 +63,10 @@ indexing:
     mode: section                    # иерархическая упаковка по markdown-заголовкам
     min_tokens: 128                  # без огрызков: маленькая секция приклеивается к соседу
     max_tokens: 2048                 # влезает целая H2-глава; Qwen3-Embedding выдерживает
-    max_table_rows: 20               # row-based split больших таблиц с дублированием шапки. 0 = выкл
+    max_table_rows: 10               # row-based split больших таблиц с дублированием шапки. 0 = выкл
+    narrate_tables:                  # дублирующее покрытие per-row narrative-чанками (ADR-0013)
+      enabled: true                  # выключить = индексировать только parent-чанки таблиц
+      min_rows: 5                    # пропускаем мелкие таблицы (status/labels)
     oversized:                       # стратегии для oversized блоков
       table: split                   # по строкам с дублированием шапки
       list: split                    # по элементам

@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -32,7 +33,13 @@ class FindSectionConfig:
     sections_limit: int = 5          # макс секций в выдаче
     doc_pool: int = 20               # сколько документов берём из search_docs
     descent_threshold: float = 0.5   # 0..1; 0 отключает descent
-    top_docs: int = 3                # top-K safety docs добавляемые в doc_ids
+    top_docs: int = 3                # top-K safety docs (из doc-level) добавляемые в doc_ids
+    # Chunk-level peek: параллельно ищем по чанкам и добавляем доки откуда пришли
+    # топ-чанки в doc_ids — лекарство для случаев когда doc-level embedding не
+    # видит конкретный термин (глоссарии, спецификации). Реально подтаскивает
+    # narrative-чанки из ADR-0013 на уровне секций.
+    chunk_peek_limit: int = 10       # сколько чанков fetch'им (нужен запас на dedup по doc_id)
+    chunk_peek_docs: int = 3         # макс уникальных doc_id из chunks peek добавляемых в doc_ids
 
 
 @dataclass
@@ -166,7 +173,13 @@ async def find_section(
     Возвращает `SectionResult` готовый к отображению или передаче в search.
     """
     cfg = config or FindSectionConfig()
-    docs = await searcher.search_docs(query, cfg.doc_pool)
+    # Параллельно: doc-level RRF (основной канал, для секций) и chunk-level
+    # peek (для подтаскивания доков, чьи narrative/специфичные чанки
+    # ранжируются высоко но doc-level их пропускает — напр. глоссарии).
+    docs, chunks_peek = await asyncio.gather(
+        searcher.search_docs(query, cfg.doc_pool),
+        searcher.search_chunks(query, cfg.chunk_peek_limit),
+    )
     if not docs:
         return SectionResult(section_ids=[], doc_ids=[], error='no_docs')
 
@@ -195,7 +208,7 @@ async def find_section(
             break
 
     # Top-K safety: страховка от «одинокого чемпиона» — добавляем top-N docs
-    # по прямому score, которых нет в refined.
+    # по прямому doc-level score, которых нет в refined.
     refined_ids = {sid for sid, _, _ in refined_raw}
     extra_raw: list[dict] = []
     for d in docs:
@@ -206,6 +219,25 @@ async def find_section(
             continue
         extra_raw.append(d)
         refined_ids.add(did)
+
+    # Chunk-level peek: подтаскиваем уникальные doc_id из топовых чанков.
+    # Лекарство для случаев когда doc-level пропускает (плотные таблицы,
+    # глоссарии). chunks_peek уже после _swap_narratives_to_parents → narrative
+    # подменён на parent table-чанк с тем же doc_id.
+    chunk_extra_raw: list[dict] = []
+    for c in chunks_peek:
+        if len(chunk_extra_raw) >= cfg.chunk_peek_docs:
+            break
+        did = c.get('doc_id')
+        if not did or did in refined_ids:
+            continue
+        chunk_extra_raw.append({
+            'doc_id': did,
+            'title': '',
+            'score': c.get('score', 0.0),
+        })
+        refined_ids.add(did)
+    extra_raw.extend(chunk_extra_raw)
 
     # Обогащение: title + doc_summary
     all_ids = [sid for sid, _, _ in refined_raw] + [d['doc_id'] for d in extra_raw]

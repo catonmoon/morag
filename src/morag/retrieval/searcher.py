@@ -57,6 +57,10 @@ def _point_to_chunk(p: Any) -> dict[str, Any]:
         'url': payload.get('url'),
         'source_type': payload.get('source_type', ''),
         'score': score,
+        # Метки для table-row-narrative swap (ADR-0013). Если chunk_type
+        # отсутствует в payload (старые чанки) — None, swap-логика их пропускает.
+        'chunk_type': payload.get('chunk_type'),
+        'parent_chunk_id': payload.get('parent_chunk_id'),
     }
 
 
@@ -159,7 +163,11 @@ class HybridSearcher:
         return prefetch
 
     async def search_chunks(self, text: str, limit: int) -> list[dict]:
-        """RRF-поиск по chunks collection. Возвращает до `limit` chunk-dict'ов."""
+        """RRF-поиск по chunks collection. Возвращает до `limit` chunk-dict'ов.
+
+        Постобработка: narrative-чанки (chunk_type='table_row_narrative')
+        свапаются на родительские table-чанки (см. ADR-0013).
+        """
         prefetch = await self._build_rrf_prefetch(self._chunks_collection, text, limit)
         result = await self._qdrant.query_points(
             collection_name=self._chunks_collection,
@@ -168,7 +176,8 @@ class HybridSearcher:
             limit=limit,
             with_payload=True,
         )
-        return [_point_to_chunk(p) for p in result.points]
+        chunks = [_point_to_chunk(p) for p in result.points]
+        return await self._swap_narratives_to_parents(chunks)
 
     async def search_docs(self, text: str, limit: int) -> list[dict]:
         """RRF-поиск по docs collection (doc-level эмбеддинги полного текста).
@@ -202,13 +211,25 @@ class HybridSearcher:
     # ── Fetch helpers ─────────────────────────────────────────────────────────
 
     async def fetch_chunk_by_order(self, doc_id: str, order: int) -> dict | None:
-        """Конкретный чанк по doc_id + order. Для get_neighbors tool."""
+        """Конкретный чанк по doc_id + order. Для get_neighbors tool.
+
+        Narrative-чанки (chunk_type='table_row_narrative') исключаются —
+        они не часть doc-sequence (order=-1) и не должны возвращаться как соседи.
+        """
         records, _ = await self._qdrant.scroll(
             collection_name=self._chunks_collection,
-            scroll_filter=Filter(must=[
-                FieldCondition(key='doc_id', match=MatchValue(value=doc_id)),
-                FieldCondition(key='order', match=MatchValue(value=order)),
-            ]),
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(key='doc_id', match=MatchValue(value=doc_id)),
+                    FieldCondition(key='order', match=MatchValue(value=order)),
+                ],
+                must_not=[
+                    FieldCondition(
+                        key='chunk_type',
+                        match=MatchValue(value='table_row_narrative'),
+                    ),
+                ],
+            ),
             limit=1,
             with_payload=True,
         )
@@ -217,6 +238,72 @@ class HybridSearcher:
         chunk = _point_to_chunk(records[0])
         chunk['score'] = 0.0
         return chunk
+
+    async def fetch_chunks_by_ids(self, chunk_ids: list[str]) -> dict[str, dict]:
+        """Batch-fetch чанков по их UUID point-id'ам.
+
+        Используется в _swap_narratives_to_parents для подгрузки parent-чанков.
+        Возвращает dict {chunk_id: chunk_dict}.
+        """
+        if not chunk_ids:
+            return {}
+        records = await self._qdrant.retrieve(
+            collection_name=self._chunks_collection,
+            ids=list(chunk_ids),
+            with_payload=True,
+        )
+        return {str(r.id): _point_to_chunk(r) for r in records}
+
+    async def _swap_narratives_to_parents(self, chunks: list[dict]) -> list[dict]:
+        """Заменить narrative-чанки на их parent table-чанки в выдаче поиска.
+
+        Логика (ADR-0013):
+          - chunks приходят отсортированные по score (RRF output).
+          - Идём по списку в порядке скорa.
+          - Для narrative (chunk_type='table_row_narrative'): если parent ещё не
+            был добавлен в result — fetch'им parent, добавляем со score=narrative.score
+            (строгое наследование). Если parent уже добавлен — drop narrative.
+          - Для обычного chunk: если он уже добавлен через swap другого narrative
+            — drop. Иначе — добавляем со своим score.
+
+        Дедупликация: каждый chunk_id появляется в result ровно один раз.
+        """
+        # Pre-scan: какие parent_id нужно подтянуть (не входящие в текущий result)
+        regular_ids = {
+            c['chunk_id'] for c in chunks
+            if c.get('chunk_type') != 'table_row_narrative'
+        }
+        parent_ids_to_fetch = {
+            c['parent_chunk_id'] for c in chunks
+            if c.get('chunk_type') == 'table_row_narrative' and c.get('parent_chunk_id')
+        }
+        # Parent, который уже среди обычных результатов — не fetch'им.
+        parent_ids_to_fetch -= regular_ids
+        parents = await self.fetch_chunks_by_ids(list(parent_ids_to_fetch))
+
+        seen_ids: set[str] = set()
+        result: list[dict] = []
+        for c in chunks:
+            if c.get('chunk_type') == 'table_row_narrative':
+                pid = c.get('parent_chunk_id')
+                if not pid or pid in seen_ids:
+                    continue  # malformed или parent уже в result
+                parent = parents.get(pid)
+                if parent is None:
+                    # parent был среди regular_ids — он появится сам ниже по итерации.
+                    # Drop narrative, не дублируем (parent отыграет со своим score).
+                    continue
+                parent_copy = dict(parent)
+                parent_copy['score'] = c['score']  # строго наследуем narrative.score
+                result.append(parent_copy)
+                seen_ids.add(pid)
+            else:
+                cid = c['chunk_id']
+                if cid in seen_ids:
+                    continue  # уже свапнут narrative'ом с более высокого ранга
+                result.append(c)
+                seen_ids.add(cid)
+        return result
 
     async def fetch_doc_summaries(self, doc_ids: list[str]) -> dict[str, str]:
         """Batch-fetch doc_summary по списку doc_id."""
