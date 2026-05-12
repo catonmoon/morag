@@ -724,6 +724,26 @@
                 <div x-show="status.progress.error"
                      style="margin-top:0.5rem; padding:0.4rem 0.55rem; background:var(--warn-banner-bg); color:var(--danger); border-radius:4px; font-size:0.82rem"
                      x-text="status.progress.error"></div>
+                <!-- Ошибки документов: счётчик с раскрытием списка -->
+                <div x-show="(status.progress.errors_count || 0) > 0" style="margin-top:0.55rem">
+                  <button class="btn secondary"
+                          style="background:var(--warn-banner-bg); color:var(--danger); border-color:var(--danger); padding:0.3rem 0.6rem; font-size:0.85rem"
+                          @click="showErrors = !showErrors">
+                    <span x-text="`⚠ Ошибок индексации: ${status.progress.errors_count}`"></span>
+                    <span x-text="showErrors ? '▾' : '▸'" style="margin-left:0.3rem"></span>
+                  </button>
+                  <div x-show="showErrors" style="margin-top:0.5rem; padding:0.5rem 0.75rem; background:var(--code-bg); border-radius:5px; font-family:'SF Mono','Menlo','Consolas',monospace; font-size:0.78rem; max-height:280px; overflow-y:auto">
+                    <template x-for="e in (status.progress.recent_errors || []).slice().reverse()" :key="e.ts + e.doc_id">
+                      <div style="padding:0.35rem 0; border-bottom:1px solid var(--border)">
+                        <div style="color:var(--danger); font-weight:500" x-text="`${e.error_type}: ${e.title || e.doc_id}`"></div>
+                        <div style="color:var(--muted); font-size:0.74rem; margin-top:0.15rem" x-text="`${e.doc_id} • ${e.ts}`"></div>
+                        <div style="color:var(--text); margin-top:0.2rem; white-space:pre-wrap; word-break:break-word" x-text="e.error_msg"></div>
+                      </div>
+                    </template>
+                    <div x-show="(status.progress.recent_errors || []).length === 0"
+                         style="color:var(--muted)">детали ошибок недоступны</div>
+                  </div>
+                </div>
               </div>
             </template>
 
@@ -1633,6 +1653,7 @@
         runStartError: '',           // ошибка из startIndex — в карточке Indexing
         runStartSuccess: '',         // success-сообщение запуска — в той же карточке
         stopResultKind: '',
+        showErrors: false,           // раскрыт ли список последних ошибок в карточке Indexing
 
         // Knowledge Map viewer (read-only, expandable)
         km: null,               // {nodes, full_text, error, qdrant_reachable}

@@ -18,12 +18,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from morag.retrieval.searcher import HybridSearcher
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -176,10 +179,26 @@ async def find_section(
     # Параллельно: doc-level RRF (основной канал, для секций) и chunk-level
     # peek (для подтаскивания доков, чьи narrative/специфичные чанки
     # ранжируются высоко но doc-level их пропускает — напр. глоссарии).
+    # Оба канала с default-фильтрацией ролей (см. HybridSearcher): supplementary
+    # источники (Jira) не голосуют за секции независимо; они подтянутся через
+    # descendants(section_id) в основном search'е если scope угадан правильно.
     docs, chunks_peek = await asyncio.gather(
         searcher.search_docs(query, cfg.doc_pool),
         searcher.search_chunks(query, cfg.chunk_peek_limit),
     )
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug('[find_section] docs candidates (%d):', len(docs))
+        for d in docs[:10]:
+            logger.debug(
+                '[find_section]   doc score=%.3f id=%s title=%r',
+                d.get('score', 0.0), d.get('doc_id'), (d.get('title') or '')[:60],
+            )
+        logger.debug('[find_section] chunk peek candidates (%d):', len(chunks_peek))
+        for c in chunks_peek[:10]:
+            logger.debug(
+                '[find_section]   chunk score=%.3f doc_id=%s order=%d',
+                c.get('score', 0.0), c.get('doc_id'), c.get('order'),
+            )
     if not docs:
         return SectionResult(section_ids=[], doc_ids=[], error='no_docs')
 

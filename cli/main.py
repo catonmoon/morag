@@ -107,6 +107,7 @@ def _make_sparse_embedder(cfg: SparseEmbedderConfig) -> SparseEmbedder:
         cfg.base_url, cfg.timeout,
         retry_policy=RetryPolicy(max_retries=cfg.max_retries),
         max_rpm=cfg.max_rpm,
+        max_concurrent=cfg.max_concurrent,
     )
 
 

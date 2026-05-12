@@ -1,3 +1,5 @@
 numpy
 nltk
 qdrant-client~=1.17
+tiktoken>=0.9.0
+

@@ -248,14 +248,25 @@ class ChunkRepository:
 
         Используется для idempotency-проверки: если count == total,
         документ проиндексирован полностью.
+
+        Narrative-чанки (chunk_type='table_row_narrative', см. ADR-0013) НЕ
+        участвуют в подсчёте — они вспомогательные search-keys, не часть
+        doc-sequence. Stored `total` в payload равен числу non-narrative
+        chunks, поэтому count должен считаться так же.
         """
         doc_filter = Filter(
             must=[FieldCondition(key='doc_id', match=MatchValue(value=doc_id))]
         )
+        non_narrative_filter = Filter(
+            must=[FieldCondition(key='doc_id', match=MatchValue(value=doc_id))],
+            must_not=[FieldCondition(
+                key='chunk_type', match=MatchValue(value='table_row_narrative'),
+            )],
+        )
 
         count_result = await self._client.count(
             collection_name=self._collection,
-            count_filter=doc_filter,
+            count_filter=non_narrative_filter,
             exact=True,
         )
         count = count_result.count

@@ -52,6 +52,14 @@ class StatusReporter(Protocol):
         """Завершить обработку: убрать из in-flight (если был) + processed += 1."""
         ...
 
+    def document_failed(self, doc_id: str, title: str | None, exc: BaseException) -> None:
+        """Зафиксировать ошибку обработки документа — для UI-видимости.
+
+        Вызывается из exception-handler'а в pipeline.py после rollback.
+        Накапливает счётчик errors_count и список последних N в recent_errors.
+        """
+        ...
+
     def finish(self, state: State, error: str | None = None) -> None:
         """Завершить отчёт. state: completed | cancelled | failed."""
         ...
@@ -73,6 +81,9 @@ class NullStatusReporter:
         pass
 
     def document_done(self, doc_id: str) -> None:
+        pass
+
+    def document_failed(self, doc_id: str, title: str | None, exc: BaseException) -> None:
         pass
 
     def finish(self, state: State, error: str | None = None) -> None:
@@ -110,6 +121,10 @@ class FileStatusReporter:
         # полный цикл (document_start был), 'skip' если только document_done
         # (idempotency пропуск). 300 хватает на ~5 минут плотного потока.
         self._recent_completions: deque[dict] = deque(maxlen=300)
+        # Учёт ошибок обработки документов в текущем ране — нарастающий счётчик
+        # + последние 20 для UI (показ списка по клику).
+        self._errors_count: int = 0
+        self._recent_errors: deque[dict] = deque(maxlen=20)
         self._error: str | None = None
         self._write()
 
@@ -122,6 +137,10 @@ class FileStatusReporter:
             self._total = total
             self._in_flight.clear()
             self._recent_completions.clear()
+            # errors_count и recent_errors НЕ сбрасываются — они per-RUN, не per-phase.
+            # Один run = один FileStatusReporter instance (создан в cmd_index),
+            # пробегает phases [stubs, indexing_*, bm25, knowledge_map] и собирает
+            # ошибки за весь прогон.
             self._write()
 
     def document_start(self, doc_id: str, title: str | None = None, url: str | None = None) -> None:
@@ -162,6 +181,23 @@ class FileStatusReporter:
             })
             self._write()
 
+    def document_failed(
+        self, doc_id: str, title: str | None, exc: BaseException,
+    ) -> None:
+        """Зафиксировать ошибку обработки документа. Вызывается из exception-handler'а
+        в `IndexingPipeline.run()` после rollback частично сохранённых чанков.
+        """
+        with self._lock:
+            self._errors_count += 1
+            self._recent_errors.append({
+                'doc_id': doc_id,
+                'title': title or '',
+                'error_type': type(exc).__name__,
+                'error_msg': str(exc)[:500],
+                'ts': _now_iso(),
+            })
+            self._write()
+
     def finish(self, state: State, error: str | None = None) -> None:
         with self._lock:
             self._state = state
@@ -177,6 +213,8 @@ class FileStatusReporter:
             'total': self._total,
             'current_docs': list(self._in_flight.values()),
             'recent_completions': list(self._recent_completions),
+            'errors_count': self._errors_count,
+            'recent_errors': list(self._recent_errors),
             'started_at': self._started_at,
             'updated_at': _now_iso(),
             'error': self._error,

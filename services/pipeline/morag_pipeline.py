@@ -172,6 +172,41 @@ _TOOLS = [
             },
         },
     },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'get_doc',
+            'description': (
+                'Глубокое чтение одного документа: тянет все его чанки, реранкер '
+                'выбирает релевантные query. Альтернатива get_neighbors когда нужен '
+                'не локальный контекст (±N чанков), а покрытие всего документа против '
+                'запроса. Используй когда: (а) после search ты понимаешь что нужный '
+                'документ найден, но один-два чанка из выдачи не дают полной картины; '
+                '(б) нужно проверить все части большого документа на релевантность query '
+                '(search мог пропустить релевантный фрагмент в хвосте документа).'
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'doc_id': {
+                        'type': 'string',
+                        'description': (
+                            'ID документа из результатов find_section/search '
+                            '(полный prefixed id вида `<kind>:<name>:<external_id>`).'
+                        ),
+                    },
+                    'query': {
+                        'type': 'string',
+                        'description': (
+                            'Какую информацию ищешь в этом документе (на русском, '
+                            'словами пользователя из последнего вопроса).'
+                        ),
+                    },
+                },
+                'required': ['doc_id', 'query'],
+            },
+        },
+    },
 ]
 
 _SYSTEM_PROMPT = (
@@ -204,12 +239,30 @@ _SYSTEM_PROMPT = (
     'Документация на русском — поиск на английском не сработает. '
     'Если в вопросе «доверие к сервису распознавания» — так и пиши в search, не переводи на «trust recognition service». '
     'Синонимы/переформулировки допустимы, но на русском.\n'
+    '- 🎯 СЛОВАРЬ ЗАПРОСА: формулируй query словами пользователя из ПОСЛЕДНЕГО вопроса. '
+    'Не добавляй термины «общей эрудиции» (npm, Python, Kafka и т.п.) пока корпус сам не показал что они применимы. '
+    'Корпус — внутренняя документация, термины могут иметь специфичное значение. '
+    'Пример: «Как установить Express?» → search: «установка Express». '
+    'Расширять/менять формулировку — только если буквальный поиск ничего релевантного не нашёл. '
+    'При расширении используй близкие синонимы и переформулировки тех же терминов '
+    '(«установка» → «инструкция», «как настроить», «гайд»), не подменяй имена '
+    'технологий/инструментов (npm, Node.js, Python и т.п.) — если их не было в '
+    'исходном вопросе, их нет и в корпусе.\n'
+    '- 🔄 МНОГОХОДОВЫЙ ДИАЛОГ: помни предыдущие вопросы, но в search идут слова из ПОСЛЕДНЕГО. '
+    'Подставляй контекст из прошлого хода только если последний вопрос ссылается на него '
+    '(местоимения, эллипсис: «а как его установить?» → подставь предмет из прошлого вопроса).\n'
     '- `section_ids` — рекурсивный поиск (раздел + все его подстраницы). Для широких тем.\n'
     '- `doc_ids` — точечный поиск (только указанные страницы, БЕЗ потомков). Для случаев когда ответ '
     'прямо на странице-разделе (например, страница «Люди» сама перечисляет отделы — её подстраницы не нужны).\n'
     '- find_section подскажет что использовать: «раздел рекурсивно» → section_ids; «страница точечно» → doc_ids.\n'
     '- Если для разных аспектов релевантны разные секции — дополнительно вызови find_section под аспект.\n'
-    '- Используй get_neighbors() чтобы увидеть контекст вокруг найденного чанка.\n'
+    '- Используй get_neighbors(doc_id, order) чтобы увидеть ЛОКАЛЬНЫЙ контекст '
+    'вокруг найденного чанка (±N чанков по позиции).\n'
+    '- Используй get_doc(doc_id, query) для ГЛУБОКОГО ЧТЕНИЯ одного документа '
+    'относительно вопроса — реранкер пройдётся по ВСЕМ его чанкам и вернёт '
+    'тематически релевантные. Это альтернатива get_neighbors когда нужен не '
+    'локальный «соседский» контекст, а покрытие всего документа против query '
+    '(полезно если документ большой и search мог пропустить нужный фрагмент в его хвосте).\n'
     '- ⚠️ ШУМ ПРИ ШИРОКОМ ПОИСКЕ: если search вернул результаты из 10+ разных документов — '
     'это сигнал что запрос слишком общий, выдача шумная. Сузь следующий шаг: '
     'переформулируй запрос точнее (более специфичные термины) ИЛИ ограничь section_ids '
@@ -371,6 +424,7 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
         'agent_url': _str_or(v.LLM_URL, agent_llm.base_url if agent_llm else None),
         'agent_model': _str_or(v.LLM_MODEL, agent_llm.model if agent_llm else None),
         'agent_api_key': _str_or(v.LLM_API_KEY, agent_llm.api_key if agent_llm else None),
+        'agent_context_window': agent_llm.context_window if agent_llm else 0,
         'agent_temperature': _float_or(
             v.LLM_TEMPERATURE,
             agent_role.temperature if agent_role else None,
@@ -403,6 +457,10 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
             v.RERANK_LLM_API_KEY,
             rerank_llm.api_key if rerank_llm else None,
         ) or _str_or(v.LLM_API_KEY, agent_llm.api_key if agent_llm else None),
+        'rerank_context_window': (
+            (rerank_llm.context_window if rerank_llm else 0)
+            or (agent_llm.context_window if agent_llm else 0)
+        ),
         'rerank_max_tokens': _int_or(
             v.RERANK_MAX_TOKENS,
             rerank_role.max_tokens if rerank_role else None,
@@ -415,7 +473,16 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
             else (rerank_role.enable_thinking if rerank_role else False)
         ),
 
-        'search_limit': _int_or(v.SEARCH_LIMIT, search.limit if search else None, default=50),
+        'search_limit': _int_or(v.SEARCH_LIMIT, search.limit if search else None, default=100),
+        'hnsw_ef': _int_or(v.HNSW_EF, search.hnsw_ef if search else None, default=0),
+        'search_rerank_max_tokens': search.rerank_max_tokens if search else 0,
+        'get_doc_rerank_batch_max_tokens': (
+            search.get_doc.rerank_batch_max_tokens if (search and search.get_doc) else 0
+        ),
+        # source_name → role и source_name → kind snapshot для role-aware фильтрации
+        # в HybridSearcher (см. RetrievalSearchConfig + _SourceBase.role).
+        'source_roles': cfg.source_roles_map() if cfg else {},
+        'source_kinds': cfg.source_kinds_map() if cfg else {},
         'unique_docs_cap': _int_or(
             v.UNIQUE_DOCS_CAP, search.unique_docs_cap if search else None, default=10,
         ),
@@ -512,6 +579,7 @@ class Pipeline:
 
         # Search params
         SEARCH_LIMIT: int = 0
+        HNSW_EF: int = 0                    # HNSW search-time ef (0 = Qdrant default)
         UNIQUE_DOCS_CAP: int = 0            # hard cap на уникальные документы (0 = config / без лимита)
         SECTIONS_LIMIT: int = 0
         FIND_SECTION_DOC_POOL: int = 0
@@ -528,6 +596,13 @@ class Pipeline:
         ADMIN_INSTRUCTIONS: str = ''
 
     def __init__(self):
+        # 0. Опц. DEBUG-логирование — для диагностики retrieval/find_section
+        # через `docker compose logs pipelines`. Включается env MORAG_LOG_LEVEL=DEBUG.
+        log_level = (os.getenv('MORAG_LOG_LEVEL') or '').upper()
+        if log_level in ('DEBUG', 'INFO', 'WARNING', 'ERROR'):
+            for name in ('morag_pipeline', 'morag.retrieval'):
+                logging.getLogger(name).setLevel(log_level)
+
         # 1. Прочитать config (fail-soft) и инициализировать Valves из env (back-compat)
         self._config: Config | None = _try_load_config()
         self.valves = self.Valves(**_init_valves_from_env())
@@ -536,7 +611,15 @@ class Pipeline:
         s = _resolve_settings(self.valves, self._config)
 
         # 3. Persistent event loop — pipe() синхронный, async-вызовы через self._run().
+        # OWUI Pipelines может обрабатывать запросы параллельно (worker thread per request).
+        # Persistent self._loop ОДИН на инстанс Pipeline, и run_until_complete не выносит
+        # повторный заход пока loop ещё работает (бывший баг «this event loop is already
+        # running»). Lock сериализует доступ — N запросов выстраиваются в очередь.
+        # Цена: при двух параллельных вопросах второй ждёт первого. Допустимо: пайплайн
+        # тяжёлый (LLM-вызовы), параллель в пределах одного инстанса не выигрывает.
+        import threading
         self._loop = asyncio.new_event_loop()
+        self._loop_lock = threading.Lock()
 
         # 4. Два LLMClient: agent (tool calls + final stream) и reranker.
         #    enable_thinking=None — НЕ слать reasoning-флаги в extra_body
@@ -549,12 +632,14 @@ class Pipeline:
             api_key=s['agent_api_key'] or 'invalid',
             timeout=s['http_timeout'], max_retries=3,
             enable_thinking=s['agent_enable_thinking'],
+            context_window=s.get('agent_context_window') or 32768,
         )
         self._llm_rerank = LLMClient(
             base_url=s['rerank_url'] or 'http://invalid', model=s['rerank_model'] or 'invalid',
             api_key=s['rerank_api_key'] or 'invalid',
             timeout=s['http_timeout'], max_retries=3,
             enable_thinking=s['rerank_enable_thinking'],
+            context_window=s.get('rerank_context_window') or 32768,
         )
 
         # 5. Embedders: те же async-классы что в indexing — гарантия совпадения
@@ -574,12 +659,31 @@ class Pipeline:
             chunks_collection=s['chunks_collection'],
             docs_collection=s['docs_collection'],
             knowledge_map_collection=s['knowledge_map_collection'],
+            hnsw_ef=s['hnsw_ef'],
+            source_roles=s['source_roles'],
+            source_kinds=s['source_kinds'],
         )
+        # Реранкеры (search и get_doc) — оба используют rerank-LLM + TiktokenCounter
+        # для подсчёта токенов. Бюджет input'а считается по `llm.context_window`.
+        from morag.indexing.token_counter import TiktokenCounter
+        from morag.retrieval import DocReranker
         self._reranker = LLMReranker(
             self._llm_rerank,
+            token_counter=TiktokenCounter(),
             max_tokens=s['rerank_max_tokens'] or 100,
             enable_thinking=s['rerank_enable_thinking'],
+            max_input_tokens=s.get('search_rerank_max_tokens', 0),
         )
+        self._doc_reranker = DocReranker(
+            self._llm_rerank,
+            token_counter=TiktokenCounter(),
+            max_tokens=s['rerank_max_tokens'] or 200,
+            enable_thinking=s['rerank_enable_thinking'],
+            max_input_tokens=s.get('get_doc_rerank_batch_max_tokens', 0),
+        )
+        # DocRepository — для get_doc tool (читает full doc metadata).
+        from morag.storage.repository import DocRepository
+        self._doc_repo = DocRepository(self._qdrant, s['docs_collection'])
         self._find_section_config = FindSectionConfig(
             sections_limit=s['sections_limit'],
             doc_pool=s['find_section_doc_pool'],
@@ -600,8 +704,14 @@ class Pipeline:
         )
 
     def _run(self, coro: Coroutine[Any, Any, _T]) -> _T:
-        """Выполнить async-корутину в нашем persistent event loop. Sync-обёртка для pipe()."""
-        return self._loop.run_until_complete(coro)
+        """Выполнить async-корутину в нашем persistent event loop. Sync-обёртка для pipe().
+
+        Lock сериализует параллельные вызовы (OWUI worker threads): пока loop
+        работает над одной корутиной — следующая ждёт. Без него вторая получит
+        `RuntimeError: this event loop is already running`.
+        """
+        with self._loop_lock:
+            return self._loop.run_until_complete(coro)
 
     def pipe(
         self,
@@ -656,11 +766,20 @@ class Pipeline:
         searched_section_ids: set[str] = set()
         diversity_nudge_sent = False
 
+        logger.info('=' * 70)
+        logger.info('[agent] query: %r', last_content[:200])
+
         for iteration in range(self._s['max_iterations']):
             # Вызов LLM с tools
             response = self._llm_call_with_tools(agent_messages)
             message = response['choices'][0]['message']
             finish_reason = response['choices'][0].get('finish_reason', '')
+
+            tool_calls = message.get('tool_calls') or []
+            logger.info(
+                '[agent] iter=%d finish_reason=%s tool_calls=%d',
+                iteration + 1, finish_reason, len(tool_calls),
+            )
 
             # Если LLM решил ответить (не вызвал tool)
             if finish_reason != 'tool_calls' or not message.get('tool_calls'):
@@ -691,6 +810,11 @@ class Pipeline:
                 yield self._emit_status(
                     '✅', f'Найдено {_plural(doc_count, "документ", "документа", "документов")} за {_plural(tool_call_count, "шаг", "шага", "шагов")}', True,
                 )
+                logger.info(
+                    '[agent] DONE: %d unique docs, %d tool calls, %d iters; by source_type=%s',
+                    doc_count, tool_call_count, iteration + 1,
+                    _count_by(list(all_chunks.values()), 'source_type'),
+                )
                 # Stream финального ответа (всегда через _stream_final для thinking)
                 agent_messages.append(message)
                 yield from self._stream_final(agent_messages)
@@ -705,6 +829,12 @@ class Pipeline:
                 fn_args = json.loads(tool_call['function']['arguments'])
                 call_id = tool_call['id']
 
+                logger.info(
+                    '[agent] tool_call #%d: %s args=%s',
+                    tool_call_count, fn_name,
+                    json.dumps(fn_args, ensure_ascii=False)[:200],
+                )
+
                 if fn_name == 'search':
                     search_count += 1
                     for sid in (fn_args.get('section_ids') or []):
@@ -712,7 +842,7 @@ class Pipeline:
 
                 # Выполнение + статус
                 status_text = _format_tool_status(fn_name, fn_args, resolve_title=self._get_doc_title)
-                icon = {'search': '🔍', 'find_section': '🗺️', 'get_neighbors': '📖'}.get(fn_name, '🛠️')
+                icon = {'search': '🔍', 'find_section': '🗺️', 'get_neighbors': '📖', 'get_doc': '📄'}.get(fn_name, '🛠️')
                 yield self._emit_status(icon, status_text, False)
 
                 result, chunks = self._execute_tool(fn_name, fn_args)
@@ -806,6 +936,8 @@ class Pipeline:
             return self._tool_get_neighbors(
                 args['doc_id'], args['order'], args.get('window', 2),
             )
+        elif name == 'get_doc':
+            return self._tool_get_doc(args['doc_id'], args['query'])
         return f'Неизвестный инструмент: {name}', []
 
     def _tool_search(
@@ -816,7 +948,19 @@ class Pipeline:
         doc_ids: list[str] | None = None,
     ) -> tuple[str, list[dict]]:
         limit = min(limit or self._s['search_limit'], self._s['search_limit'])
-        chunks = self._search(query, limit)
+        # scope_active = есть какие-то фильтры от агента → не отрезаем supplementary
+        # (descendants раздела естественно тянут привязанные тикеты).
+        scope_active = bool(section_ids or doc_ids)
+        logger.info(
+            '[search] q=%r scope=%s section_ids=%d doc_ids=%d limit=%d',
+            query[:100], scope_active,
+            len(section_ids or []), len(doc_ids or []), limit,
+        )
+        chunks = self._search(query, limit, scope_active=scope_active)
+        logger.info(
+            '[search] retrieved %d chunks; by source_type=%s',
+            len(chunks), _count_by(chunks, 'source_type'),
+        )
         if not chunks:
             return 'Поиск не дал результатов. Попробуй другую формулировку.', []
         raw_chunks = chunks  # полный нефильтрованный набор — понадобится для auto-fallback
@@ -830,16 +974,27 @@ class Pipeline:
             allowed_doc_ids |= set(doc_ids)
         if allowed_doc_ids:
             filtered = [c for c in chunks if c['doc_id'] in allowed_doc_ids]
+            logger.info(
+                '[search] descendants filter: %d chunks → %d (allowed_doc_ids=%d)',
+                len(chunks), len(filtered), len(allowed_doc_ids),
+            )
             if filtered:
                 chunks = filtered
                 filtered_applied = True
 
         # LLM reranker — отфильтровать нерелевантные чанки
+        rerank_in = len(chunks)
         reranked = self._rerank(query, chunks)
+        logger.info(
+            '[search] rerank: %d → %d (dropped %d, filter_applied=%s)',
+            rerank_in, len(reranked), rerank_in - len(reranked), filtered_applied,
+        )
         if not reranked and filtered_applied:
             # Фильтр оставил чанки, но rerank их все выбросил — возможно классификация
             # документа по теме расходится с тем, где агент искал. Повторяем без фильтра.
+            logger.info('[search] rerank auto-fallback on raw chunks (%d)', len(raw_chunks))
             reranked = self._rerank(query, raw_chunks)
+            logger.info('[search] rerank fallback result: %d chunks', len(reranked))
         if not reranked:
             return 'Поиск дал результаты, но ни один не оказался релевантным. Попробуй другую формулировку.', []
         chunks = reranked
@@ -851,10 +1006,22 @@ class Pipeline:
         for c in chunks:
             by_doc.setdefault(c['doc_id'], []).append(c)
         cap = self._s['unique_docs_cap']
+        unique_pre_cap = len(by_doc)
         if cap > 0 and len(by_doc) > cap:
             kept_doc_ids = list(by_doc.keys())[:cap]
             by_doc = {did: by_doc[did] for did in kept_doc_ids}
             chunks = [c for c in chunks if c['doc_id'] in by_doc]
+        logger.info(
+            '[search] final: %d chunks, %d unique docs (cap=%d, pre=%d); by source_type=%s',
+            len(chunks), len(by_doc), cap, unique_pre_cap,
+            _count_by(chunks, 'source_type'),
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            for i, (did, dcs) in enumerate(by_doc.items(), 1):
+                logger.debug(
+                    '[search]   [%d] %s (chunks=%d, source_type=%s, top_score=%.3f)',
+                    i, did, len(dcs), dcs[0].get('source_type'), max(c['score'] for c in dcs),
+                )
 
         parts = []
         for i, (doc_id, doc_chunks) in enumerate(by_doc.items(), 1):
@@ -881,6 +1048,9 @@ class Pipeline:
     def _tool_get_neighbors(
         self, doc_id: str, order: int, window: int = 2,
     ) -> tuple[str, list[dict]]:
+        logger.info(
+            '[get_neighbors] doc_id=%s order=%d window=%d', doc_id, order, window,
+        )
         chunks: list[dict] = []
         for delta in range(-window, window + 1):
             target_order = order + delta
@@ -891,7 +1061,9 @@ class Pipeline:
                 chunks.append(chunk)
 
         if not chunks:
+            logger.info('[get_neighbors] empty result')
             return f'Чанки не найдены для doc_id={doc_id} рядом с order={order}.', []
+        logger.info('[get_neighbors] → %d chunks', len(chunks))
 
         chunks.sort(key=lambda x: x['order'])
         parts = []
@@ -911,14 +1083,33 @@ class Pipeline:
         top-K safety + enrichment) живёт в `morag.retrieval.find_section`.
         Pipeline только форматирует SectionResult как markdown для LLM-агента.
         """
+        logger.info('[find_section] q=%r', query[:100])
         result = self._run(find_section(query, self._searcher, self._find_section_config))
         if result.error == 'no_docs':
+            logger.info('[find_section] no_docs')
             return 'Не удалось найти релевантные документы для определения разделов.', []
         if result.error == 'no_sections' or not (result.refined or result.extra_docs):
+            logger.info('[find_section] no_sections')
             return (
                 'Не удалось определить разделы для запроса. '
                 'Используй обычный search() без section_ids.'
             ), []
+        logger.info(
+            '[find_section] sections=%d extras=%d → section_ids=%s doc_ids=%s',
+            len(result.section_ids), len(result.extra_docs),
+            result.section_ids[:5], result.doc_ids[:5],
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            for e in result.refined:
+                logger.debug(
+                    '[find_section]   refined: kind=%s id=%s votes=%d title=%r',
+                    e.kind, e.section_id, e.votes, e.title[:60],
+                )
+            for d in result.extra_docs:
+                logger.debug(
+                    '[find_section]   extra:   id=%s score=%.3f title=%r',
+                    d.doc_id, d.score, d.title[:60],
+                )
 
         lines = [f'Релевантные разделы (топ-{len(result.refined)}):']
         for i, e in enumerate(result.refined, 1):
@@ -945,6 +1136,66 @@ class Pipeline:
             call_parts.append(f'doc_ids={json.dumps(result.doc_ids, ensure_ascii=False)}')
         lines.append('Готово к использованию: ' + ', '.join(call_parts) + ')')
         return '\n'.join(lines), []
+
+    # ── Get-doc (один документ с rerank по чанкам) ────────────────────────────
+
+    def _tool_get_doc(self, doc_id: str, query: str) -> tuple[str, list[dict]]:
+        """Получить релевантные фрагменты одного документа.
+
+        Алгоритм:
+        1. Подтянуть метаданные документа (title, path, url).
+        2. Lite-чанки документа: только {order, text}, без context/path.
+        3. DocReranker батчами выбирает релевантные order'ы.
+        4. Полные чанки этих order'ов из БД.
+        5. Форматирование как обычный search-результат для агента.
+        """
+        logger.info('[get_doc] doc_id=%s q=%r', doc_id, query[:80])
+        # 1. Метаданные документа
+        doc = self._run(self._doc_repo.get_by_id(doc_id))
+        if doc is None:
+            return f'Документ {doc_id} не найден.', []
+
+        # 2. Lite-чанки (без context, в порядке order)
+        lite = self._run(self._searcher.fetch_doc_chunks_lite(doc_id))
+        if not lite:
+            return f'У документа {doc_id} нет проиндексированных чанков.', []
+        logger.info('[get_doc] lite chunks=%d', len(lite))
+
+        # 3. DocReranker
+        useful_orders = self._run(
+            self._doc_reranker.rerank(query, doc.path, lite),
+        )
+        if not useful_orders:
+            return (
+                f'Документ найден ({doc.title or doc_id}), '
+                f'но ни один из {len(lite)} фрагментов не релевантен запросу. '
+                'Попробуй другой документ или search() без doc_ids.'
+            ), []
+        logger.info('[get_doc] reranker kept orders=%d/%d', len(useful_orders), len(lite))
+
+        # 4. Полные чанки для выбранных order'ов
+        full_chunks = self._run(
+            self._searcher.fetch_chunks_by_orders(doc_id, useful_orders),
+        )
+
+        # 5. Формат как search-результат
+        path_display = ' | '.join(doc.path) if doc.path else doc_id
+        lines = [f'Документ: {doc.title or doc_id}', f'Путь: {path_display}']
+        if doc.updated_at:
+            lines.append(f'Обновлён: {doc.updated_at.isoformat()}')
+        if doc.url:
+            lines.append(f'URL: {doc.url}')
+        lines.append(f'Релевантных фрагментов: {len(full_chunks)} из {len(lite)}')
+        lines.append('')
+        for c in full_chunks:
+            order = c.get('order', 0)
+            context = c.get('context', '')
+            lines.append(f'[order={order}]')
+            if context:
+                lines.append(f'Контекст: {context}')
+            lines.append(c.get('text', ''))
+            lines.append('')
+        return '\n'.join(lines), full_chunks
 
     # ── Reranker ──────────────────────────────────────────────────────────────
 
@@ -1003,7 +1254,8 @@ class Pipeline:
         try:
             while True:
                 try:
-                    chunk = self._loop.run_until_complete(agen.__anext__())
+                    with self._loop_lock:
+                        chunk = self._loop.run_until_complete(agen.__anext__())
                 except StopAsyncIteration:
                     break
                 kind = chunk['kind']
@@ -1030,8 +1282,8 @@ class Pipeline:
 
     # ── Qdrant + retrieval — тонкие sync-обёртки над HybridSearcher ──────────
 
-    def _search(self, text: str, limit: int) -> list[dict]:
-        return self._run(self._searcher.search_chunks(text, limit))
+    def _search(self, text: str, limit: int, scope_active: bool = False) -> list[dict]:
+        return self._run(self._searcher.search_chunks(text, limit, scope_active=scope_active))
 
     def _fetch_chunk_by_order(self, doc_id: str, order: int) -> dict | None:
         return self._run(self._searcher.fetch_chunk_by_order(doc_id, order))
@@ -1114,6 +1366,15 @@ class Pipeline:
         }
 
 
+def _count_by(items: list[dict], key: str) -> dict[str, int]:
+    """Группировка списка dict'ов по значению поля. Для logging-сводок."""
+    counts: dict[str, int] = {}
+    for it in items:
+        k = it.get(key) or '?'
+        counts[k] = counts.get(k, 0) + 1
+    return counts
+
+
 def _plural(n: int, one: str, few: str, many: str) -> str:
     """Склонение существительного по числу (русский язык)."""
     if 11 <= n % 100 <= 19:
@@ -1148,6 +1409,11 @@ def _format_tool_status(fn_name: str, fn_args: dict, resolve_title=None) -> str:
         window = fn_args.get('window', 2)
         title = _title(doc_id)
         return f'[{title}] блок #{order} (±{window}) — расширение контекста'
+    if fn_name == 'get_doc':
+        doc_id = fn_args.get('doc_id', '')
+        query = fn_args.get('query', '')
+        title = _title(doc_id)
+        return f'[{query}] глубокое чтение документа: {title}'
     return f'{fn_name}({json.dumps(fn_args, ensure_ascii=False)})'
 
 

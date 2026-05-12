@@ -23,6 +23,7 @@ from qdrant_client.models import (
     MatchAny,
     MatchValue,
     Prefetch,
+    SearchParams,
     SparseVector,
 )
 
@@ -90,6 +91,9 @@ class HybridSearcher:
         chunks_collection: str,
         docs_collection: str,
         knowledge_map_collection: str = 'knowledge_map',
+        hnsw_ef: int = 0,
+        source_roles: dict[str, str] | None = None,
+        source_kinds: dict[str, str] | None = None,
     ) -> None:
         self._qdrant = qdrant
         self._dense = dense_embedder
@@ -97,6 +101,16 @@ class HybridSearcher:
         self._chunks_collection = chunks_collection
         self._docs_collection = docs_collection
         self._km_collection = knowledge_map_collection
+        # search-time HNSW ef для dense Prefetch. 0 = Qdrant default.
+        self._hnsw_ef = hnsw_ef
+        # Snapshot ролей источников из config: source_name → 'primary'|'supplementary'|'hidden'.
+        # Используется для построения фильтра по source_name на каждый search:
+        # - hidden: всегда исключаем
+        # - supplementary: исключаем если scope пустой И kinds не запросил этот kind
+        # - primary: всегда включаем
+        # Если snapshot пуст ({}) — фильтрация отключена (legacy/empty-config fallback).
+        self._source_roles: dict[str, str] = dict(source_roles or {})
+        self._source_kinds: dict[str, str] = dict(source_kinds or {})
         self._sparse_vector_names_cache: dict[str, set[str]] = {}
         self._doc_tree: dict[str, list[str]] | None = None
         self._indexed_doc_ids: set[str] | None = None
@@ -122,15 +136,64 @@ class HybridSearcher:
 
     # ── Search (RRF) ──────────────────────────────────────────────────────────
 
-    async def _build_rrf_prefetch(self, collection: str, text: str, limit: int) -> list[Prefetch]:
+    def _excluded_source_names(
+        self,
+        kinds: list[str] | None,
+        scope_active: bool,
+    ) -> list[str]:
+        """Какие source_name исключить из выдачи в данном вызове.
+
+        - hidden: всегда (admin kill-switch).
+        - При scope_active=True (search со section_ids/doc_ids): больше ничего —
+          descendants раздела сами решают что включать (тикеты Jira привязанные
+          к Confluence-разделу естественно попадают через parent_doc_ids).
+        - При scope_active=False:
+            - kinds=None → исключаем все supplementary
+            - kinds=['jira'] → исключаем только supplementary НЕ запрошенного kind
+        """
+        if not self._source_roles:
+            return []
+        excluded = {n for n, r in self._source_roles.items() if r == 'hidden'}
+        if scope_active:
+            result = sorted(excluded)
+        else:
+            requested_kinds = set(kinds or [])
+            for name, role in self._source_roles.items():
+                if role != 'supplementary':
+                    continue
+                if self._source_kinds.get(name) not in requested_kinds:
+                    excluded.add(name)
+            result = sorted(excluded)
+        logger.debug(
+            '[searcher] exclude: kinds=%s scope_active=%s → excluded=%s',
+            kinds, scope_active, result,
+        )
+        return result
+
+    async def _build_rrf_prefetch(
+        self,
+        collection: str,
+        text: str,
+        limit: int,
+        exclude_source_names: list[str] | None = None,
+    ) -> list[Prefetch]:
         """Двухуровневый RRF: dense `full` (1 голос) vs nested-RRF по sparse (1 голос).
 
         Sparse-каналы: `keywords` (GTE), `bm25` (Snowball stem), `bm25_trigram`
         (символьные триграммы). Используются только существующие в схеме коллекции.
+
+        `exclude_source_names` фильтрует payload.source_name на КАЖДОМ sub-Prefetch
+        (до RRF-мерджа): исключённые источники не отбирают слотов у остальных
+        в top-N каналов. Применяется к dense Prefetch и к каждому lexical
+        sub-Prefetch внутри nested-RRF.
         """
         dense = await self._dense.embed_query(text)
         indices, values = await self._sparse.embed_query(text)
         available_sparse = await self.get_sparse_vector_names(collection)
+
+        kind_filter = Filter(must_not=[
+            FieldCondition(key='source_name', match=MatchAny(any=exclude_source_names)),
+        ]) if exclude_source_names else None
 
         lexical: list[Prefetch] = []
         if 'keywords' in available_sparse:
@@ -138,6 +201,7 @@ class HybridSearcher:
                 query=SparseVector(indices=indices, values=values),
                 using='keywords',
                 limit=limit * 2,
+                filter=kind_filter,
             ))
         for vec_fn, vec_name in [
             (_bm25_query_vector, 'bm25'),
@@ -151,9 +215,16 @@ class HybridSearcher:
                     query=SparseVector(indices=idx, values=val),
                     using=vec_name,
                     limit=limit * 2,
+                    filter=kind_filter,
                 ))
 
-        prefetch: list[Prefetch] = [Prefetch(query=dense, using='full', limit=limit * 2)]
+        dense_params = SearchParams(hnsw_ef=self._hnsw_ef) if self._hnsw_ef else None
+        prefetch: list[Prefetch] = [
+            Prefetch(
+                query=dense, using='full', limit=limit * 2,
+                params=dense_params, filter=kind_filter,
+            ),
+        ]
         if lexical:
             prefetch.append(Prefetch(
                 prefetch=lexical,
@@ -162,13 +233,28 @@ class HybridSearcher:
             ))
         return prefetch
 
-    async def search_chunks(self, text: str, limit: int) -> list[dict]:
+    async def search_chunks(
+        self,
+        text: str,
+        limit: int,
+        kinds: list[str] | None = None,
+        scope_active: bool = False,
+    ) -> list[dict]:
         """RRF-поиск по chunks collection. Возвращает до `limit` chunk-dict'ов.
 
         Постобработка: narrative-чанки (chunk_type='table_row_narrative')
         свапаются на родительские table-чанки (см. ADR-0013).
+
+        Фильтрация по ролям источников (см. `_excluded_source_names`):
+          - `kinds`: дополнительные kind'ы supplementary-источников которые
+            агент явно хочет видеть (например ['jira']).
+          - `scope_active`: True если есть section_ids/doc_ids — тогда
+            supplementary не фильтруется (descendants естественно тянут).
         """
-        prefetch = await self._build_rrf_prefetch(self._chunks_collection, text, limit)
+        prefetch = await self._build_rrf_prefetch(
+            self._chunks_collection, text, limit,
+            exclude_source_names=self._excluded_source_names(kinds, scope_active),
+        )
         result = await self._qdrant.query_points(
             collection_name=self._chunks_collection,
             prefetch=prefetch,
@@ -179,13 +265,26 @@ class HybridSearcher:
         chunks = [_point_to_chunk(p) for p in result.points]
         return await self._swap_narratives_to_parents(chunks)
 
-    async def search_docs(self, text: str, limit: int) -> list[dict]:
+    async def search_docs(
+        self,
+        text: str,
+        limit: int,
+        kinds: list[str] | None = None,
+        scope_active: bool = False,
+    ) -> list[dict]:
         """RRF-поиск по docs collection (doc-level эмбеддинги полного текста).
 
         Возвращает dict'ы с полями: doc_id, title, path, parent_doc_ids,
         doc_summary, score. Используется в section-level retrieval.
+
+        Фильтрация — та же что и в search_chunks (см. `_excluded_source_names`).
+        В find_section вызывается с kinds=None и scope_active=False → supplementary
+        источники не голосуют за секции.
         """
-        prefetch = await self._build_rrf_prefetch(self._docs_collection, text, limit)
+        prefetch = await self._build_rrf_prefetch(
+            self._docs_collection, text, limit,
+            exclude_source_names=self._excluded_source_names(kinds, scope_active),
+        )
         result = await self._qdrant.query_points(
             collection_name=self._docs_collection,
             prefetch=prefetch,
@@ -238,6 +337,70 @@ class HybridSearcher:
         chunk = _point_to_chunk(records[0])
         chunk['score'] = 0.0
         return chunk
+
+    async def fetch_doc_chunks_lite(self, doc_id: str) -> list[dict]:
+        """Все чанки документа в LITE-формате `[{order, text}]`, отсортированы по order.
+
+        Для DocReranker (get_doc tool): он рассуждает только по тексту и order,
+        полная payload-обвязка избыточна. Narrative-чанки (order=-1) исключаются.
+        """
+        chunks: list[dict] = []
+        offset = None
+        while True:
+            points, offset = await self._qdrant.scroll(
+                collection_name=self._chunks_collection,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key='doc_id', match=MatchValue(value=doc_id))],
+                    must_not=[FieldCondition(
+                        key='chunk_type',
+                        match=MatchValue(value='table_row_narrative'),
+                    )],
+                ),
+                limit=200,
+                offset=offset,
+                with_payload=['order', 'text'],
+                with_vectors=False,
+            )
+            for p in points:
+                pl = p.payload or {}
+                order = pl.get('order')
+                text = pl.get('text', '')
+                if order is None or order < 0:
+                    continue
+                chunks.append({'order': order, 'text': text})
+            if offset is None:
+                break
+        chunks.sort(key=lambda c: c['order'])
+        return chunks
+
+    async def fetch_chunks_by_orders(
+        self, doc_id: str, orders: list[int],
+    ) -> list[dict]:
+        """Полные чанки одного документа по списку order'ов (после DocReranker).
+
+        Возвращает chunk-dict'ы со всеми полями (text, context, path, ...) — те же
+        что отдаёт search_chunks. Сортируются по order asc.
+        """
+        if not orders:
+            return []
+        records, _ = await self._qdrant.scroll(
+            collection_name=self._chunks_collection,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(key='doc_id', match=MatchValue(value=doc_id)),
+                    FieldCondition(key='order', match=MatchAny(any=list(orders))),
+                ],
+                must_not=[FieldCondition(
+                    key='chunk_type',
+                    match=MatchValue(value='table_row_narrative'),
+                )],
+            ),
+            limit=len(orders) + 10,
+            with_payload=True,
+        )
+        chunks = [_point_to_chunk(r) for r in records]
+        chunks.sort(key=lambda c: c.get('order', 0))
+        return chunks
 
     async def fetch_chunks_by_ids(self, chunk_ids: list[str]) -> dict[str, dict]:
         """Batch-fetch чанков по их UUID point-id'ам.

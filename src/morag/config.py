@@ -20,11 +20,25 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 # SOURCES — discriminated union по полю `kind`
 # ============================================================================
 
+SourceRole = Literal['primary', 'supplementary', 'hidden']
+
+
 class _SourceBase(BaseModel):
-    """Общие поля всех источников. Не используется напрямую (нет kind)."""
+    """Общие поля всех источников. Не используется напрямую (нет kind).
+
+    `role` управляет тем, как retrieval включает источник в выдачу:
+    - `primary` — основной поиск, всегда включён в дефолтную выдачу.
+    - `supplementary` — opt-in: попадает только если агент явно запросил
+      через `kinds=[...]` в search-tool ИЛИ через scope (section_ids/doc_ids:
+      descendants раздела естественно тянут привязанные тикеты Jira).
+    - `hidden` — admin kill-switch, никогда не ищется. Агент не может перебить.
+
+    Дефолт `primary` — добавление нового источника не требует явного role.
+    """
     name: str = Field(min_length=1, pattern=r'^[a-z0-9][a-z0-9_-]*$',
                       description='Уникальный id инстанса (lowercase, без пробелов)')
     enabled: bool = True
+    role: SourceRole = 'primary'
 
 
 class LocalSourceConfig(_SourceBase):
@@ -212,6 +226,10 @@ class SparseEmbedderConfig(BaseModel):
     timeout: int = 30
     max_retries: int = 3
     max_rpm: int | None = None
+    # In-flight cap для shared semaphore: GTE CPU-bound и сериализует
+    # запросы — burst > N → healthcheck timeout → autoheal restart →
+    # in-flight rвутся. None = без cap'a, ограничение только через indexing.concurrency.
+    max_concurrent: int | None = None
 
 
 class OversizedConfig(BaseModel):
@@ -393,14 +411,35 @@ class RetrievalFindSectionConfig(BaseModel):
     chunk_peek_docs: int = 3
 
 
+class RetrievalGetDocConfig(BaseModel):
+    """Параметры get_doc tool (см. DocReranker)."""
+    # Override бюджета токенов на input одного rerank-батча.
+    # 0 = auto: context_window − точные накладные (skeleton + chat-overhead + output_reserve).
+    # >0 = принудительный потолок (для «иголка в стоге сена» — форсируем мелкие батчи).
+    rerank_batch_max_tokens: int = 0
+
+
 class RetrievalSearchConfig(BaseModel):
-    limit: int = 50
+    # Максимум кандидатов из Qdrant RRF до rerank'а. Не «сколько отдать агенту» —
+    # реранкер дальше обрежет по токен-бюджету и оставит сколько влезает в окно.
+    # Большое значение увеличивает шанс что нужный чанк попадёт в кандидаты;
+    # стоимость — больше работы Qdrant + больше токенов на rerank.
+    limit: int = 100
     unique_docs_cap: int = 10
     sections_limit: int = 5
     max_iterations: int = 9
     citation_max_chars: int = 5000
     answer_max_tokens: int = 0
+    # HNSW search-time `ef` для dense-канала. 0 = не переопределять (Qdrant default).
+    # Поднимать при росте корпуса если ANN recall просел (релевантный чанк есть,
+    # но dense top-N его не возвращает). См. CLAUDE.md TODO.
+    hnsw_ef: int = 0
+    # Override бюджета токенов на rerank-input. 0 = auto от
+    # `llm.context_window - точные накладные`. >0 = ручной потолок (для
+    # needle-mode — форсировать узкое окно чтобы LLM не пропускал редкие чанки).
+    rerank_max_tokens: int = 0
     find_section: RetrievalFindSectionConfig = RetrievalFindSectionConfig()
+    get_doc: RetrievalGetDocConfig = RetrievalGetDocConfig()
 
 
 class RetrievalFeaturesConfig(BaseModel):
@@ -570,6 +609,18 @@ class Config(BaseModel):
     def sources_by_kind(self, kind: str) -> list[Source]:
         """Все включённые источники указанного kind."""
         return [s for s in self.sources if s.kind == kind and s.enabled]
+
+    def source_names_by_role(self, role: SourceRole) -> set[str]:
+        """Set имён enabled-источников указанной роли."""
+        return {s.name for s in self.sources if s.role == role and s.enabled}
+
+    def source_roles_map(self) -> dict[str, SourceRole]:
+        """source_name → role для всех enabled источников. Snapshot для retrieval."""
+        return {s.name: s.role for s in self.sources if s.enabled}
+
+    def source_kinds_map(self) -> dict[str, str]:
+        """source_name → kind для всех enabled источников. Snapshot для retrieval."""
+        return {s.name: s.kind for s in self.sources if s.enabled}
 
 
 # ============================================================================

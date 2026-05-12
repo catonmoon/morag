@@ -204,12 +204,22 @@ class HttpGteSparseEmbedder(SparseEmbedder):
         timeout: int = 30,
         retry_policy: RetryPolicy | None = None,
         max_rpm: int | None = None,
+        max_concurrent: int | None = None,
     ) -> None:
         import httpx
         self._client = httpx.AsyncClient(base_url=base_url, timeout=timeout)
         self._retry = retry_policy or RetryPolicy(max_retries=0)
         self._rate_limiter = AsyncRateLimiter(max_rpm) if max_rpm else None
-        logger.info('HttpGteSparseEmbedder → %s (max_rpm=%s)', base_url, max_rpm)
+        # Shared in-flight cap по (base_url, '__gte_sparse__'). GTE-сервис
+        # CPU-bound и сериализует запросы — без cap'а burst'ит хост, autoheal
+        # рестартит контейнер на healthcheck timeout, in-flight запросы рвутся.
+        self._semaphore = _get_or_create_semaphore(
+            base_url, '__gte_sparse__', max_concurrent,
+        )
+        logger.info(
+            'HttpGteSparseEmbedder → %s (max_rpm=%s, max_concurrent=%s)',
+            base_url, max_rpm, max_concurrent,
+        )
 
     @staticmethod
     def _to_sparse(token_weights: dict[str, float]) -> tuple[list[int], list[float]]:
@@ -222,10 +232,20 @@ class HttpGteSparseEmbedder(SparseEmbedder):
                 index_weight[i] = weight
         return list(index_weight.keys()), list(index_weight.values())
 
+    async def _acquire(self):
+        """Acquire shared in-flight semaphore (no-op if max_concurrent=None)."""
+        if self._semaphore:
+            return self._semaphore
+        return None
+
     async def _do_call(self, text: str) -> tuple[list[int], list[float]]:
         if self._rate_limiter:
             await self._rate_limiter.acquire()
-        resp = await self._client.post('/encode', json={'text': text})
+        if self._semaphore:
+            async with self._semaphore:
+                resp = await self._client.post('/encode', json={'text': text})
+        else:
+            resp = await self._client.post('/encode', json={'text': text})
         resp.raise_for_status()
         token_weights: dict[str, float] = resp.json()['token_weights'][0]
         return self._to_sparse(token_weights)
@@ -233,7 +253,11 @@ class HttpGteSparseEmbedder(SparseEmbedder):
     async def _do_call_batch(self, texts: list[str]) -> list[tuple[list[int], list[float]]]:
         if self._rate_limiter:
             await self._rate_limiter.acquire()
-        resp = await self._client.post('/encode_batch', json={'texts': texts})
+        if self._semaphore:
+            async with self._semaphore:
+                resp = await self._client.post('/encode_batch', json={'texts': texts})
+        else:
+            resp = await self._client.post('/encode_batch', json={'texts': texts})
         resp.raise_for_status()
         all_weights: list[dict[str, float]] = resp.json()['token_weights']
         return [self._to_sparse(tw) for tw in all_weights]

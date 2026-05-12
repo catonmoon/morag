@@ -279,8 +279,21 @@ class IndexingPipeline:
                         return True
                     finally:
                         self._status_reporter.document_done(stub.id)
-                except Exception:
-                    logger.exception('%sDocument failed, skipping: %s', w, stub.id)
+                except Exception as exc:
+                    # Атомарность: если _chunk_document/upsert упал в середине —
+                    # в Qdrant могут остаться частично сохранённые чанки.
+                    # Сносим всё чтобы _is_up_to_date вернул False на следующем ране
+                    # и документ переиндексировался полностью с нуля.
+                    logger.exception('%sDocument failed, rolling back partial chunks: %s', w, stub.id)
+                    try:
+                        await self._chunk_repo.delete_by_doc_id(stub.id)
+                    except Exception as cleanup_exc:
+                        logger.warning(
+                            '%s  rollback failed for %s: %s', w, stub.id, cleanup_exc,
+                        )
+                    self._status_reporter.document_failed(
+                        stub.id, stub.title, exc,
+                    )
                     return False
 
         levels = _topological_levels(stubs)
@@ -428,6 +441,13 @@ class IndexingPipeline:
             chunk.payload['char_offset'] = cr.char_offset
             if cr.pages:
                 chunk.payload['pages'] = cr.pages
+            # Пропагандируем source_kind/source_name из документа в payload чанка —
+            # нужно для retrieval-фильтров по kind на коллекции chunks. Без этого
+            # фильтр `must_not source_kind=X` молча матчит ноль точек (см.
+            # memory/chunks-payload-source-kind.md).
+            for k in ('source_kind', 'source_name'):
+                if k in document.payload:
+                    chunk.payload[k] = document.payload[k]
             # Stamp run-versioning + fingerprint (наследуем version от документа)
             self._stamp_payload(chunk.payload, version=doc_version)
             chunks.append(chunk)

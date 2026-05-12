@@ -16,6 +16,14 @@ RUN pip install --no-cache-dir -r /tmp/pipeline-requirements.txt
 # Скачать nltk stopwords (русские + английские) для BM25-fallback в pipeline
 RUN python -c "import nltk; nltk.download('stopwords', download_dir='/usr/local/nltk_data')"
 
+# Pre-cache tiktoken cl100k_base BPE — иначе при первом вызове tiktoken.get_encoding()
+# в runtime он попытается скачать его с openaipublic.blob.core.windows.net. В air-gapped
+# окружении это упадёт; на этапе build'а сеть доступна (через прокси), поэтому
+# скачиваем сейчас и кладём в кеш контейнера.
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken_cache
+RUN mkdir -p /opt/tiktoken_cache && \
+    python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
+
 # Установить morag (core deps: openai + httpx + numpy + transitive). НЕ ставим [indexing]
 # extras — pipeline им не пользуется (нет чанкеров, sources, tokenizer'ов).
 # Это даёт ~120MB site-packages вместо 3GB+.
