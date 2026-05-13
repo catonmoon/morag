@@ -30,14 +30,9 @@ async def set_schedule(req: ScheduleRequest, request: Request) -> dict[str, Any]
     """Обновить indexing.schedule в config.local.yml + hot-reload в indexer'е."""
     cfg_path = request.app.state.config_path
 
-    # Validate (валидаторы CronTrigger.from_crontab делают это позже в indexer'е,
-    # но мы проверяем здесь чтобы вернуть 400 а не 5xx)
-    if req.cron is not None and req.cron.strip():
-        try:
-            from apscheduler.triggers.cron import CronTrigger
-            CronTrigger.from_crontab(req.cron)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f'Invalid cron expression: {e}') from e
+    # Валидация cron-выражения происходит в indexer'е (там есть apscheduler;
+    # console-образ намеренно без [indexing] extras). Если выражение невалидное —
+    # indexer вернёт ошибку через reload_schedule ниже, мы её прокидываем юзеру.
     cron = req.cron.strip() if req.cron else None
 
     # patch local + полная Pydantic-валидация merged

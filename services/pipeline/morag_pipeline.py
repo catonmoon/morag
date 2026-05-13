@@ -223,15 +223,19 @@ _SYSTEM_PROMPT = (
     'выдача шумная, из 10+ разных документов. С ним search прицельный и релевантный.\n\n'
     '## Алгоритм работы: Find → Execute → Verify\n\n'
     '### 1. FIND SECTION (обязательный шаг)\n'
-    'Вызови `find_section(query)` **минимум два раза** с разными формулировками:\n'
-    '  1) первый — по оригинальному вопросу (как задал пользователь);\n'
-    '  2) второй — по альтернативным формулировкам / ключевым терминам / смежным понятиям.\n'
-    'Например для «Каким термином называется способ X?» — первый find_section по самому вопросу, '
-    'второй по «глоссарий термин X», «определение X» или другим формулировкам.\n'
-    '⚠️ **ОБЪЕДИНЯЙ** результаты всех find_section — не замещай. '
-    'В search передавай union section_ids и doc_ids от всех вызовов.\n'
-    'Это нужно потому, что один find_section может пропустить релевантный раздел из-за формулировки. '
-    'Второй-третий вызов расширяет охват.\n\n'
+    'Первый ход — ВСЕГДА `find_section(query)` со словами пользователя из вопроса. '
+    'СОХРАНЯЙ имена, фамилии, названия, ID, специфические термины — это самые сильные '
+    'различающие сигналы и их нельзя обобщать.\n'
+    'Второй find_section вызывай ТОЛЬКО если первый не дал релевантных секций '
+    '(пустой результат, либо найденные разделы явно мимо темы). При втором — '
+    'варьируй УГОЛ вопроса (другой аспект, переставленные слова, синонимы тех же '
+    'терминов), НО не подменяй конкретные сущности на категории-абстракции.\n'
+    'ЗАПРЕЩЕНО:\n'
+    '  - «Евгений Чуканов» → «сотрудник Евгений» (выбросил фамилию, добавил категорию)\n'
+    '  - «MODP-12345» → «задача разработки» (выбросил конкретный ID)\n'
+    '  - «Express» → «JavaScript-фреймворк» (добавил категорию из общей эрудиции)\n'
+    '⚠️ Если делал несколько find_section — **ОБЪЕДИНЯЙ** результаты, не замещай. '
+    'В search передавай union section_ids и doc_ids от всех вызовов.\n\n'
     '### 2. ВЫПОЛНЕНИЕ\n'
     '- Ищи тщательно. Старайся покрыть вопрос с разных сторон — делай несколько search\'ей '
     'под РАЗНЫЕ грани (процесс vs инструменты vs ответственные), не повторяя один запрос в переформулировках.\n'
@@ -765,6 +769,11 @@ class Pipeline:
         search_count = 0
         searched_section_ids: set[str] = set()
         diversity_nudge_sent = False
+        # Сквозная нумерация документов per-pipe-call. Каждый tool-выдача форматирует
+        # `[N] Документ:` используя глобальный N — повторный документ из второго
+        # search получит тот же номер что в первом. Решает проблему конфликтующих
+        # цитат при многошаговом ретривале (ранее каждый tool_result начинал с [1]).
+        self._doc_numbering: dict[str, int] = {}
 
         logger.info('=' * 70)
         logger.info('[agent] query: %r', last_content[:200])
@@ -921,6 +930,21 @@ class Pipeline:
         )
         return msg
 
+    def _global_doc_id(self, doc_id: str) -> int:
+        """Сквозной номер документа для текущего pipe()-вызова.
+
+        Назначает 1, 2, 3, ... по порядку первого появления doc_id в любом
+        tool-результате. Повторный doc_id получает тот же номер.
+        Используется для стабильного цитирования `[N] Документ:` через все
+        search/get_doc/get_neighbors в рамках одного агентского цикла.
+        """
+        n = self._doc_numbering.get(doc_id)
+        if n is not None:
+            return n
+        n = len(self._doc_numbering) + 1
+        self._doc_numbering[doc_id] = n
+        return n
+
     # ── Tool execution ────────────────────────────────────────────────────────
 
     def _execute_tool(self, name: str, args: dict) -> tuple[str, list[dict]]:
@@ -1024,11 +1048,12 @@ class Pipeline:
                 )
 
         parts = []
-        for i, (doc_id, doc_chunks) in enumerate(by_doc.items(), 1):
+        for doc_id, doc_chunks in by_doc.items():
+            n = self._global_doc_id(doc_id)
             doc_chunks.sort(key=lambda x: x['order'])
             path_display = ' | '.join(doc_chunks[0]['path']) if doc_chunks[0]['path'] else doc_id
             doc_name = self._get_doc_title(doc_id)
-            lines = [f'[{i}] Документ: {doc_name}', f'Путь: {path_display}']
+            lines = [f'[{n}] Документ: {doc_name}', f'Путь: {path_display}']
             updated_at = doc_chunks[0].get('updated_at', '')
             if updated_at:
                 lines.append(f'Обновлён: {updated_at}')
@@ -1066,13 +1091,16 @@ class Pipeline:
         logger.info('[get_neighbors] → %d chunks', len(chunks))
 
         chunks.sort(key=lambda x: x['order'])
-        parts = []
+        n = self._global_doc_id(doc_id)
+        doc_name = self._get_doc_title(doc_id)
+        lines = [f'[{n}] Документ: {doc_name}',
+                 f'Соседние чанки вокруг order={order}:', '']
         for c in chunks:
             marker = ' ← запрошенный' if c['order'] == order else ''
-            parts.append(
-                f'[order={c["order"]}{marker}]\n{c["text"]}'
-            )
-        return '\n\n---\n\n'.join(parts), chunks
+            lines.append(f'[order={c["order"]}{marker}]')
+            lines.append(c['text'])
+            lines.append('')
+        return '\n'.join(lines), chunks
 
     # ── Section-level retrieval (find_section) ────────────────────────────────
 
@@ -1178,9 +1206,10 @@ class Pipeline:
             self._searcher.fetch_chunks_by_orders(doc_id, useful_orders),
         )
 
-        # 5. Формат как search-результат
+        # 5. Формат как search-результат (с глобальной нумерацией документов)
+        n = self._global_doc_id(doc_id)
         path_display = ' | '.join(doc.path) if doc.path else doc_id
-        lines = [f'Документ: {doc.title or doc_id}', f'Путь: {path_display}']
+        lines = [f'[{n}] Документ: {doc.title or doc_id}', f'Путь: {path_display}']
         if doc.updated_at:
             lines.append(f'Обновлён: {doc.updated_at.isoformat()}')
         if doc.url:
@@ -1235,9 +1264,14 @@ class Pipeline:
                 'Теперь дай финальный ответ на основе всей собранной информации. '
                 'Не вызывай инструменты, отвечай текстом. '
                 'ВАЖНО: ответ должен быть коротким — не более 3-5 абзацев. '
-                'Не пересказывай всё найденное, выдели только главное.'
+                'Не пересказывай всё найденное, выдели только главное.\n'
                 '- При использовании информации вставляй номер документа-источника '
-                'в формате [N], где N — номер документа из результатов search. '
+                'в формате [N], где N — это число из заголовка `[N] Документ: ...` '
+                'в результатах tool-вызовов на ЭТОМ ходу. '
+                'Нумерация СКВОЗНАЯ — один и тот же документ во всех search/get_doc/'
+                'get_neighbors имеет ОДНО И ТО ЖЕ N. Если в выдаче встречается `[5] Документ: X` — '
+                'для цитирования X всегда используй [5]. '
+                'ЗАПРЕЩЕНО ссылаться на номера из прошлых ходов диалога — они уже не действительны. '
                 'Например: "Для настройки Docker нужно установить Docker Desktop [1]." '
                 'Если информация из нескольких документов — перечисляй: [1][3].\n'
                 '- Структурируй ответ максимально: заголовки, подзаголовки, нумерованные и маркированные списки, '
