@@ -1365,7 +1365,11 @@ class Pipeline:
         docs.sort(key=lambda d: d[0])
 
         for path, doc_name, url, combined, doc_id in docs:
-            yield self._emit_source(doc_name, combined, url, source_id=doc_id)
+            yield self._emit_source(
+                doc_name, combined, url,
+                source_id=doc_id,
+                number=self._doc_numbering.get(doc_id),
+            )
 
     # ── Open WebUI events ─────────────────────────────────────────────────────
 
@@ -1381,6 +1385,7 @@ class Pipeline:
     @staticmethod
     def _emit_source(
         name: str, content: str, url: str | None = None, source_id: str | None = None,
+        number: int | None = None,
     ) -> dict[str, Any]:
         html_content = _md.render(content)
         metadata: dict[str, Any] = {'source': source_id or name, 'name': name, 'html': True}
@@ -1388,6 +1393,11 @@ class Pipeline:
         if url:
             metadata['url'] = url
             source['url'] = url
+        # Сквозной N из агентской нумерации (`_doc_numbering`) — нужен клиенту
+        # (Mattermost-плагин), чтобы превратить «[N]» в тексте ответа в ссылку
+        # на соответствующий источник. OWUI это поле игнорирует.
+        if number is not None:
+            metadata['citation_number'] = number
         return {
             'event': {
                 'type': 'citation',
