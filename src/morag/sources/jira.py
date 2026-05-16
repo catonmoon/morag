@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 
 from atlassian import Jira
@@ -66,25 +67,64 @@ class JiraSource(Source):
         self._parent_ids_map = parent_ids_map or {}  # значения уже prefixed (parent docs)
         self._timeout = config.timeout
         self._custom_fields = config.custom_fields  # ['customfield_10100', ...]
-        self._field_names: dict[str, str] = {}  # кеш: field_id → display_name
+        self._auto = config.auto_custom_fields      # авто-режим: поля экрана задачи
+        self._field_names: dict[str, str] = {}      # кеш: field_id → display_name
+        self._field_classes: dict[str, str] = {}    # кеш: field_id → schema.custom (класс)
+        # Кеш набора полей экрана по (project_key, issuetype_id): задачи одного
+        # проекта+типа делят один screen scheme — editmeta дёргаем раз на пару.
+        self._screen_cache: dict[tuple[str, str], set[str]] = {}
 
     async def _ensure_field_names(self) -> None:
-        """Загрузить маппинг field_id → display_name (один раз)."""
-        if self._field_names or not self._custom_fields:
+        """Загрузить маппинг field_id → display_name + класс поля (один раз)."""
+        if self._field_names or (not self._custom_fields and not self._auto):
             return
         try:
             all_fields = await asyncio.to_thread(self._client.get_all_fields)
             self._field_names = {f['id']: f['name'] for f in all_fields}
-            logger.info(
-                'Loaded %d field name(s) from Jira, custom fields: %s',
-                len(self._field_names),
-                ', '.join(
-                    f'{fid} -> {self._field_names.get(fid, "?")}'
-                    for fid in self._custom_fields
-                ),
-            )
+            self._field_classes = {
+                f['id']: (f.get('schema') or {}).get('custom', '') for f in all_fields
+            }
+            if self._auto:
+                logger.info(
+                    'Loaded %d field name(s) from Jira (auto custom fields mode)',
+                    len(self._field_names),
+                )
+            else:
+                logger.info(
+                    'Loaded %d field name(s) from Jira, custom fields: %s',
+                    len(self._field_names),
+                    ', '.join(
+                        f'{fid} -> {self._field_names.get(fid, "?")}'
+                        for fid in self._custom_fields
+                    ),
+                )
         except Exception:
             logger.exception('Failed to load Jira field names')
+
+    async def _screen_fields(
+        self, issue_key: str, project_key: str, issuetype_id: str,
+    ) -> set[str]:
+        """Набор field_id экрана задачи через editmeta, кешированный по (project, issuetype).
+
+        editmeta — это поля edit-экрана конкретной задачи. Задачи одного
+        project+issuetype делят screen scheme, поэтому editmeta дёргаем один раз
+        на пару и переиспользуем. При сбое — пустой набор (кастомные поля не
+        попадут в markdown, но индексация задачи не падает).
+        """
+        cache_key = (project_key, issuetype_id)
+        if cache_key in self._screen_cache:
+            return self._screen_cache[cache_key]
+        try:
+            editmeta = await asyncio.to_thread(self._client.issue_editmeta, issue_key)
+            ids = set((editmeta.get('fields') or {}).keys())
+        except Exception:
+            logger.warning(
+                'Failed to fetch editmeta for %s (%s/%s), skipping custom fields',
+                issue_key, project_key, issuetype_id, exc_info=True,
+            )
+            ids = set()
+        self._screen_cache[cache_key] = ids
+        return ids
 
     async def get_metadata(self) -> list[Document]:
         """Вернуть стабы задач: только key, summary, updated_at, без описания и комментариев."""
@@ -141,9 +181,12 @@ class JiraSource(Source):
 
     async def _fetch_full(self, issue_key: str, doc_paths: list[str]) -> Document | None:
         """Получить полную задачу и сконвертировать в Document."""
-        fields_to_request = _FULL_FIELDS
-        if self._custom_fields:
+        if self._auto:
+            fields_to_request = '*all'
+        elif self._custom_fields:
             fields_to_request = _FULL_FIELDS + ',' + ','.join(self._custom_fields)
+        else:
+            fields_to_request = _FULL_FIELDS
         issue = await asyncio.to_thread(
             self._client.issue, issue_key, fields=fields_to_request,
         )
@@ -161,11 +204,23 @@ class JiraSource(Source):
         if fields.get('issuetype', {}).get('name', '').lower() == 'epic':
             epic_issues = await self._fetch_epic_issues(issue_key)
 
-        custom_field_names = {fid: self._field_names.get(fid, fid) for fid in self._custom_fields}
+        if self._auto:
+            screen = await self._screen_fields(
+                issue_key,
+                fields.get('project', {}).get('key', ''),
+                fields.get('issuetype', {}).get('id', ''),
+            )
+            # sorted — детерминированный порядок разделов в markdown между
+            # прогонами (иначе version бампается на каждом reindex).
+            custom_ids = sorted(f for f in screen if f.startswith('customfield_'))
+        else:
+            custom_ids = self._custom_fields
+        custom_field_names = {fid: self._field_names.get(fid, fid) for fid in custom_ids}
         text = _build_markdown(
             issue_key, fields,
             epic_issues=epic_issues,
             custom_field_names=custom_field_names,
+            field_classes=self._field_classes,
         )
         path = [f'{dp}/{issue_key}' for dp in doc_paths]
 
@@ -212,6 +267,7 @@ def _build_markdown(
     fields: dict,
     epic_issues: list[dict] | None = None,
     custom_field_names: dict[str, str] | None = None,
+    field_classes: dict[str, str] | None = None,
 ) -> str:
     """Сформировать markdown-представление задачи Jira."""
     lines: list[str] = []
@@ -263,7 +319,8 @@ def _build_markdown(
             value = fields.get(field_id)
             if not value:
                 continue
-            text = _extract_custom_field_text(value)
+            field_class = (field_classes or {}).get(field_id, '')
+            text = _extract_custom_field_text(value, field_class)
             if text:
                 lines.append('')
                 lines.append(f'## {display_name}')
@@ -352,30 +409,76 @@ def _build_markdown(
     return '\n'.join(lines)
 
 
-def _extract_custom_field_text(value) -> str:
+_SPRINT_NAME_RE = re.compile(r'name=([^,\]]+)')
+
+
+def _extract_sprint(value) -> str:
+    """gh-sprint: имя(имена) спринта.
+
+    Значение поля Sprint приходит либо как список Java-toString представлений
+    (`...Sprint@hash[id=..,name=Код 418 09.02-23.02,..]`), либо как список
+    dict'ов (новые версии Jira). Берём только `name` — в Jira имена спринтов
+    обычно уже включают даты, как их и показывает веб-интерфейс.
+    """
+    items = value if isinstance(value, list) else [value]
+    parts: list[str] = []
+    for it in items:
+        if isinstance(it, dict):
+            name = (it.get('name') or '').strip()
+        elif isinstance(it, str):
+            m = _SPRINT_NAME_RE.search(it)
+            name = m.group(1).strip() if m else ''
+        else:
+            continue
+        if name:
+            parts.append(name)
+    return ', '.join(parts)
+
+
+def _extract_custom_field_text(value, field_class: str = '') -> str:
     """Извлечь текст из значения кастомного поля Jira.
 
-    Кастомные поля могут быть: строкой, числом, словарём (select/ADF),
-    списком (multi-select), None.
+    Кастомные поля могут быть: строкой, числом, словарём (select/ADF/user/
+    issue-picker), списком (multi-select), None. `field_class` — значение
+    schema.custom поля; по его суффиксу диспатчим нестандартные типы
+    (gh-sprint, userpicker).
     """
     if value is None:
         return ''
+
+    cls = field_class.rsplit(':', 1)[-1] if field_class else ''
+    if cls == 'gh-sprint':
+        return _extract_sprint(value)
+
     if isinstance(value, str):
         return value
+    if isinstance(value, bool):
+        return str(value)
     if isinstance(value, (int, float)):
+        # Целочисленный float (Story Points, приоритеты) → без .0, как на вебе.
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
         return str(value)
     if isinstance(value, dict):
-        # Select-поле: {'value': 'Option A'} или {'name': 'Name'}
+        # User-поля: отображаемое имя, не логин.
+        if cls in ('userpicker', 'multiuserpicker') or 'displayName' in value:
+            dn = value.get('displayName')
+            if dn:
+                return dn
+        # Select / radio / cascading: {'value': 'Option A'}
         if 'value' in value:
             return value['value']
         if 'name' in value:
             return value['name']
+        # Issue-picker: ссылка на другую задачу — её ключ.
+        if 'key' in value:
+            return value['key']
         # ADF (Atlassian Document Format)
         if 'type' in value and 'content' in value:
             return _extract_adf_text(value)
         return ''
     if isinstance(value, list):
-        parts = [_extract_custom_field_text(item) for item in value]
+        parts = [_extract_custom_field_text(item, field_class) for item in value]
         return ', '.join(p for p in parts if p)
     return ''
 

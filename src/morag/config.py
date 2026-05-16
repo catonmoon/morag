@@ -92,7 +92,8 @@ class JiraSourceConfig(_SourceBase):
     password: str = Field(min_length=1)  # on-prem only
     timeout: int = 180
     max_retries: int = 3
-    custom_fields: list[str] = []        # опциональные кастомные поля для индексации
+    custom_fields: list[str] = []        # ручной список кастомных полей для индексации
+    auto_custom_fields: bool = False     # авто-режим: тащить все поля экрана задачи (editmeta)
 
 
 # Discriminated union: при загрузке Pydantic смотрит на поле `kind` и
