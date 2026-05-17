@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import signal
 import sys
+from pathlib import Path
 
 from pydantic import BaseModel
 from qdrant_client import AsyncQdrantClient
@@ -195,6 +197,10 @@ class _StopReq(BaseModel):
     grace_seconds: int = 180  # = control_plane.DEFAULT_STOP_GRACE_SECONDS, дублируем чтобы не цикл импортов
 
 
+class _ReindexReq(BaseModel):
+    scope: str = 'all'  # 'all' или имя источника (config.sources[].name)
+
+
 def _make_status_reporter() -> StatusReporter:
     """FileStatusReporter если выставлена env MORAG_STATUS_FILE, иначе Null."""
     path = os.environ.get('MORAG_STATUS_FILE')
@@ -202,6 +208,44 @@ def _make_status_reporter() -> StatusReporter:
         logger.info('Status reporter: file=%s', path)
         return FileStatusReporter(path)
     return NullStatusReporter()
+
+
+def _reindex_effort_path() -> Path:
+    """Путь к маркеру реиндекс-эффорта (ADR-0014).
+
+    Присутствие файла ⟺ незавершённый эффорт; повторный запуск его резюмит.
+    """
+    env = os.environ.get('MORAG_REINDEX_EFFORT_FILE')
+    if env:
+        return Path(env)
+    status = os.environ.get('MORAG_STATUS_FILE')
+    base = Path(status).parent if status else Path('/app/conf/state')
+    return base / 'reindex_effort.json'
+
+
+def _read_reindex_effort() -> dict | None:
+    """Прочитать маркер эффорта; None если файла нет / повреждён."""
+    path = _reindex_effort_path()
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _write_reindex_effort(floor: int, scope: str) -> None:
+    """Записать маркер эффорта (atomic tmp+rename)."""
+    path = _reindex_effort_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + '.tmp')
+    tmp.write_text(json.dumps({'floor': floor, 'scope': scope}, indent=2))
+    os.replace(tmp, path)
+
+
+def _clear_reindex_effort() -> None:
+    """Снять маркер — эффорт завершён."""
+    _reindex_effort_path().unlink(missing_ok=True)
 
 
 def _install_signal_handlers(cancel_event: asyncio.Event) -> None:
@@ -228,6 +272,7 @@ def _install_signal_handlers(cancel_event: asyncio.Event) -> None:
 async def cmd_index(
     config_path: str,
     reset: bool = False,
+    reindex_scope: str | None = None,
     cancel_event: asyncio.Event | None = None,
     status_reporter: StatusReporter | None = None,
 ) -> None:
@@ -270,6 +315,28 @@ async def cmd_index(
     # См. ADR-0012, секция 5.
     run_ctx = RunContext.begin()
     logger.info('Run context: number=%d, indexed_at=%s', run_ctx.run_number, run_ctx.indexed_at)
+
+    # Реиндекс-эффорт (ADR-0014): reindex_scope != None → плавно пересобрать
+    # scope. effort_floor — run_number, ниже которого документы считаются
+    # необработанными эффортом. Маркер на диске → следующий запуск резюмит
+    # незавершённый эффорт (краш/cancel), пропуская уже сделанное.
+    effort_floor: int | None = None
+    if reindex_scope is not None:
+        marker = _read_reindex_effort()
+        if marker is not None:
+            effort_floor = int(marker['floor'])
+            reindex_scope = marker['scope']
+            logger.info('Resuming reindex effort: floor=%d scope=%s',
+                        effort_floor, reindex_scope)
+        else:
+            effort_floor = run_ctx.run_number
+            _write_reindex_effort(floor=effort_floor, scope=reindex_scope)
+            logger.info('Reindex effort started: floor=%d scope=%s',
+                        effort_floor, reindex_scope)
+
+    def _in_scope(name: str) -> bool:
+        """Реиндекс-эффорт ограничен одним источником (или 'all' = весь корпус)."""
+        return reindex_scope in (None, 'all') or name == reindex_scope
 
     # Fingerprint dense embedder'а — детект stale-векторов при смене модели.
     embedder_fingerprint = compute_embedder_fingerprint(
@@ -495,6 +562,7 @@ async def cmd_index(
         cancel_event=cancel_event,
         run_context=run_ctx,
         embedder_fingerprint=embedder_fingerprint,
+        reindex_floor=effort_floor,
     )
 
     logger.info(
@@ -510,6 +578,8 @@ async def cmd_index(
             if cancel_event.is_set():
                 break
             if src_cfg.kind == 'jira':
+                continue
+            if not _in_scope(src_cfg.name):
                 continue
 
             if src_cfg.kind == 'local':
@@ -540,6 +610,8 @@ async def cmd_index(
         for src_cfg in config.sources_by_kind('confluence'):
             if cancel_event.is_set():
                 break
+            if not _in_scope(src_cfg.name):
+                continue
             if not src_cfg.attachments.enabled:
                 continue
             if pdf_converter is None:
@@ -568,6 +640,8 @@ async def cmd_index(
             for jira_cfg in jira_configs:
                 if cancel_event.is_set():
                     break
+                if not _in_scope(jira_cfg.name):
+                    continue
                 logger.info('Jira[%s]: scanning for links @ %s', jira_cfg.name, jira_cfg.url)
                 extractor = JiraLinkExtractor(jira_cfg.url)
                 issue_map = extractor.extract_from_docs(all_docs)
@@ -643,6 +717,11 @@ async def cmd_index(
             reporter.finish('cancelled')
         else:
             reporter.finish('completed')
+            if effort_floor is not None:
+                # Эффорт дошёл до конца — снимаем маркер. Краш/cancel оставит
+                # маркер на диске, следующий запуск его резюмит (ADR-0014).
+                _clear_reindex_effort()
+                logger.info('Reindex effort completed, marker cleared')
     except Exception as e:
         logger.exception('Indexing failed')
         reporter.finish('failed', error=str(e))
@@ -834,6 +913,21 @@ async def cmd_serve(config_path: str) -> None:
         try:
             info = await control_plane.start_index(reset=req.reset)
             return {'started_at': info.started_at, 'kind': info.kind, 'reset': info.reset}
+        except AlreadyRunning as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        except SetupIncomplete as e:
+            raise HTTPException(status_code=412, detail={'blockers': e.blockers}) from e
+
+    @app.post('/control/reindex')
+    async def _reindex(req: _ReindexReq):
+        """Плавный реиндекс scope (ADR-0014): источник по имени или 'all'.
+
+        Повторный вызов при незавершённом эффорте резюмит его, пропуская
+        уже обработанные документы.
+        """
+        try:
+            info = await control_plane.start_index(reindex_scope=req.scope)
+            return {'started_at': info.started_at, 'kind': info.kind, 'scope': info.scope}
         except AlreadyRunning as e:
             raise HTTPException(status_code=409, detail=str(e)) from e
         except SetupIncomplete as e:

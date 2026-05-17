@@ -85,6 +85,19 @@ def stamped_pipeline(doc_repo, chunk_repo, run_ctx) -> IndexingPipeline:
     )
 
 
+@pytest.fixture
+def reindex_pipeline(doc_repo, chunk_repo) -> IndexingPipeline:
+    """Pipeline в режиме реиндекс-эффорта (ADR-0014): floor=50, прогон #51 (резюм)."""
+    from morag.run_context import RunContext
+    return IndexingPipeline(
+        doc_repo, chunk_repo,
+        chunker=PassthroughChunker(),
+        context_generator=NoopContextGenerator(),
+        run_context=RunContext(run_number=51, indexed_at='2026-05-18T10:00:00+00:00'),
+        reindex_floor=50,
+    )
+
+
 # ---------------------------------------------------------------------------
 # IndexingPipeline.run() — полный цикл
 # ---------------------------------------------------------------------------
@@ -130,7 +143,6 @@ class TestIndexingPipelineRun:
         await pipeline.run(source)
 
         chunk_repo.delete_by_doc_id.assert_called_once_with('test.md')
-        doc_repo.delete.assert_called_once_with('test.md')
         doc_repo.upsert.assert_called_once()
 
     async def test_skips_when_size_changed_but_updated_at_same(self, pipeline, doc_repo, chunk_repo):
@@ -266,8 +278,12 @@ class TestIndexingPipelineRun:
         assert doc_repo.upsert.call_count == 3
         assert chunk_repo.upsert_batch.call_count == 3
 
-    async def test_document_saved_before_chunks(self, pipeline, doc_repo, chunk_repo):
-        """Документ сохраняется в Qdrant до сохранения чанков."""
+    async def test_document_committed_after_chunks(self, pipeline, doc_repo, chunk_repo):
+        """Точка документа коммитится ПОСЛЕ чанков (replace-not-delete, ADR-0014).
+
+        doc point — точка коммита: пока чанки не записаны, документ для резюма
+        считается недоделанным.
+        """
         doc_repo.get_by_id.return_value = None
         call_order = []
 
@@ -285,7 +301,7 @@ class TestIndexingPipelineRun:
 
         await pipeline.run(source)
 
-        assert call_order == ['doc_upsert', 'chunk_upsert']
+        assert call_order == ['chunk_upsert', 'doc_upsert']
 
     async def test_load_one_not_called_for_up_to_date(self, pipeline, doc_repo, chunk_repo):
         """load_one не вызывается для актуальных документов."""
@@ -464,6 +480,29 @@ class TestPayloadStamping:
         upserted = doc_repo.upsert.call_args[0][0]
         assert upserted.payload['version'] == 6
 
+    async def test_doc_version_unchanged_on_pure_reindex(
+        self, stamped_pipeline, doc_repo, chunk_repo,
+    ):
+        """Чистый реиндекс того же контента (ADR-0014): version не бампается.
+
+        version — ось контента: реиндекс по причине, не связанной с правкой
+        документа (здесь — смена embedder'а), version не двигает.
+        """
+        ts = datetime(2024, 1, 1, tzinfo=timezone.utc)
+        existing = make_document(updated_at=ts)
+        # Тот же updated_at, но старый fingerprint → reindex без смены контента
+        existing.payload = {'version': 5, 'embedder_fingerprint': 'fp-v0-old'}
+        doc_repo.get_by_id.return_value = existing
+
+        source = MagicMock(spec=Source)
+        setup_source(source, [make_document(updated_at=ts)])
+
+        await stamped_pipeline.run(source)
+
+        source.load_one.assert_called_once()  # реиндекс действительно произошёл
+        upserted = doc_repo.upsert.call_args[0][0]
+        assert upserted.payload['version'] == 5  # не 6 — контент не менялся
+
     async def test_chunk_payload_inherits_version_and_run(
         self, stamped_pipeline, doc_repo, chunk_repo,
     ):
@@ -533,3 +572,110 @@ class TestEmbedderFingerprint:
         # mismatch → reindex (load_one вызывается, doc upsert'ится)
         source.load_one.assert_called_once()
         doc_repo.upsert.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# replace-not-delete (ADR-0014)
+# ---------------------------------------------------------------------------
+
+class TestReplaceNotDelete:
+    """Swap-delete вместо delete-upfront: корпус остаётся запрашиваемым."""
+
+    async def test_swap_delete_called_with_run_number(
+        self, stamped_pipeline, doc_repo, chunk_repo,
+    ):
+        """С RunContext старые чанки сметаются swap-delete'ом по run_number,
+        delete-upfront не вызывается."""
+        doc_repo.get_by_id.return_value = None
+        source = MagicMock(spec=Source)
+        setup_source(source, [make_document(text='# hi\n\nbody.')])
+
+        await stamped_pipeline.run(source)
+
+        chunk_repo.delete_stale_chunks.assert_called_once_with('test.md', 42)
+        chunk_repo.delete_by_doc_id.assert_not_called()
+
+    async def test_swap_delete_after_chunk_upsert(
+        self, stamped_pipeline, doc_repo, chunk_repo,
+    ):
+        """Порядок: вставка новых чанков → swap-delete старых → коммит документа."""
+        doc_repo.get_by_id.return_value = None
+        call_order: list[str] = []
+        chunk_repo.upsert_batch.side_effect = lambda c: call_order.append('chunk_upsert')
+        chunk_repo.delete_stale_chunks.side_effect = (
+            lambda d, r: call_order.append('swap_delete')
+        )
+        doc_repo.upsert.side_effect = lambda d: call_order.append('doc_commit')
+
+        source = MagicMock(spec=Source)
+        setup_source(source, [make_document(text='# hi\n\nbody.')])
+
+        await stamped_pipeline.run(source)
+
+        assert call_order == ['chunk_upsert', 'swap_delete', 'doc_commit']
+
+    async def test_legacy_delete_upfront_without_run_context(
+        self, pipeline, doc_repo, chunk_repo,
+    ):
+        """Без RunContext — fallback на delete-upfront (swap невозможен)."""
+        doc_repo.get_by_id.return_value = None
+        source = MagicMock(spec=Source)
+        setup_source(source, [make_document()])
+
+        await pipeline.run(source)
+
+        chunk_repo.delete_by_doc_id.assert_called_once_with('test.md')
+        chunk_repo.delete_stale_chunks.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Реиндекс-эффорт и резюм (ADR-0014)
+# ---------------------------------------------------------------------------
+
+class TestReindexEffort:
+    """При reindex_floor актуальность определяется run_number — резюм по floor."""
+
+    async def test_skips_doc_already_at_floor(
+        self, reindex_pipeline, doc_repo, chunk_repo,
+    ):
+        """Документ с run_number >= floor уже обработан эффортом → пропуск."""
+        existing = make_document()
+        existing.payload = {'run_number': 50}  # == floor → готов
+        doc_repo.get_by_id.return_value = existing
+
+        source = MagicMock(spec=Source)
+        source.get_metadata.return_value = [make_stub()]
+
+        await reindex_pipeline.run(source)
+
+        source.load_one.assert_not_called()
+
+    async def test_processes_doc_below_floor(
+        self, reindex_pipeline, doc_repo, chunk_repo,
+    ):
+        """Документ с run_number < floor эффортом ещё не тронут → реиндекс."""
+        existing = make_document()
+        existing.payload = {'run_number': 49}  # < floor → не готов
+        doc_repo.get_by_id.return_value = existing
+
+        source = MagicMock(spec=Source)
+        setup_source(source, [make_document()])
+
+        await reindex_pipeline.run(source)
+
+        source.load_one.assert_called_once()
+
+    async def test_processes_doc_without_run_number(
+        self, reindex_pipeline, doc_repo, chunk_repo,
+    ):
+        """Документ старого индекса без run_number → реиндекс (floor не определить)."""
+        existing = make_document()
+        existing.payload = {}
+        doc_repo.get_by_id.return_value = existing
+
+        source = MagicMock(spec=Source)
+        setup_source(source, [make_document()])
+
+        await reindex_pipeline.run(source)
+
+        source.load_one.assert_called_once()

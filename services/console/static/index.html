@@ -950,6 +950,10 @@
             <b>Локальная папка</b>
             <span class="empty" style="margin-left:0.5rem">/app/data (host: ./data/)</span>
           </div>
+          <button class="btn secondary" style="padding:0.15rem 0.5rem; font-size:0.78rem"
+                  x-show="hasLocalSource()"
+                  :disabled="(status && status.is_running) || (gate && !gate.ok)"
+                  @click="reindex(localSourceName())">Пересчитать</button>
           <label style="display:flex; align-items:center; gap:0.4rem; margin:0; cursor:pointer">
             <input type="checkbox"
                    :checked="hasLocalSource()"
@@ -969,17 +973,26 @@
               <span class="empty" x-text="srcBrief(src)" style="margin-left:0.5rem"></span>
             </div>
             <button class="btn secondary" style="padding:0.15rem 0.5rem; font-size:0.78rem"
+                    :disabled="(status && status.is_running) || (gate && !gate.ok)"
+                    @click="reindex(src.name)">Пересчитать</button>
+            <button class="btn secondary" style="padding:0.15rem 0.5rem; font-size:0.78rem"
                     @click="editItem('source', src)">Изменить</button>
             <button class="btn danger" style="padding:0.15rem 0.5rem; font-size:0.78rem"
                     @click="deleteItem('source', src)">×</button>
           </div>
         </template>
 
-        <div style="margin-top:1rem">
+        <div style="margin-top:1rem; display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center">
           <button class="btn secondary"
                   x-show="!setup.source.adding && !setup.source.editingName"
                   @click="setup.source.adding = true">+ Добавить источник</button>
+          <button class="btn secondary"
+                  x-show="!setup.source.adding && !setup.source.editingName && (config?.sources||[]).length"
+                  :disabled="(status && status.is_running) || (gate && !gate.ok)"
+                  @click="reindex('all')">Пересчитать всё</button>
         </div>
+        <div x-show="reindexMsg" class="empty"
+             style="margin-top:0.5rem; font-size:0.85rem" x-text="reindexMsg"></div>
 
         <div x-show="setup.source.adding || setup.source.editingName"
              style="margin-top:1rem; padding-top:0.85rem; border-top:1px solid var(--border)">
@@ -1652,6 +1665,7 @@
         stopMessage: '',
         runStartError: '',           // ошибка из startIndex — в карточке Indexing
         runStartSuccess: '',         // success-сообщение запуска — в той же карточке
+        reindexMsg: '',              // результат запуска переиндексации — в секции «Источники»
         stopResultKind: '',
         showErrors: false,           // раскрыт ли список последних ошибок в карточке Indexing
 
@@ -1984,6 +1998,26 @@
             await this.refreshStatus();
           } catch (e) {
             this.runStartError = 'Пересборка: ' + e.message;
+          }
+        },
+
+        async reindex(scope) {
+          // Плавная переиндексация (ADR-0014): scope = 'all' или имя источника.
+          if (!scope) return;
+          const label = scope === 'all' ? 'весь корпус' : `источник «${scope}»`;
+          if (!confirm(`Запустить плавную переиндексацию: ${label}?\n`
+              + 'Корпус остаётся доступным во время пересчёта.')) return;
+          this.reindexMsg = '';
+          try {
+            await this.fetchJson('/api/index/reindex', {
+              method: 'POST',
+              headers: {'content-type': 'application/json'},
+              body: JSON.stringify({ scope }),
+            });
+            this.reindexMsg = `✓ Переиндексация запущена: ${label}. Прогресс — на вкладке Dashboard.`;
+            await this.refreshStatus();
+          } catch (e) {
+            this.reindexMsg = '⚠ Переиндексация: ' + e.message;
           }
         },
 
@@ -2568,6 +2602,10 @@
 
         hasLocalSource() {
           return (this.config?.sources || []).some(s => s.kind === 'local');
+        },
+
+        localSourceName() {
+          return ((this.config?.sources || []).find(s => s.kind === 'local') || {}).name;
         },
 
         async toggleLocalSource(enable) {

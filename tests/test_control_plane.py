@@ -21,6 +21,7 @@ async def _fake_index(
     cancel_event: asyncio.Event | None = None,
     status_reporter=None,
     reset: bool = False,
+    reindex_scope: str | None = None,
 ):
     """Имитирует cmd_index: пишет в reporter, спит, проверяет cancel_event."""
     if status_reporter is not None:

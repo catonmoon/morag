@@ -39,6 +39,7 @@ class RunInfo:
     started_at: str
     kind: Literal['index', 'rebuild_km']
     reset: bool = False
+    scope: str | None = None  # реиндекс-эффорт: 'all' / имя источника; None = обычный прогон
 
 
 class AlreadyRunning(RuntimeError):
@@ -76,7 +77,11 @@ class IndexerControlPlane:
 
     # -------- Public API --------
 
-    async def start_index(self, reset: bool = False) -> RunInfo:
+    async def start_index(
+        self, reset: bool = False, reindex_scope: str | None = None,
+    ) -> RunInfo:
+        """Запустить индексацию. `reindex_scope` != None → плавный реиндекс-эффорт
+        по scope ('all' или имя источника), см. ADR-0014."""
         async with self._lock:
             self._raise_if_running()
             self._raise_if_setup_incomplete()
@@ -87,6 +92,7 @@ class IndexerControlPlane:
                 try:
                     await self._run_index(
                         reset=reset,
+                        reindex_scope=reindex_scope,
                         cancel_event=cancel_event,
                         status_reporter=reporter,
                     )
@@ -101,11 +107,15 @@ class IndexerControlPlane:
                 started_at=_now_iso(),
                 kind='index',
                 reset=reset,
+                scope=reindex_scope,
             )
             self._cancel_event = cancel_event
             self._task = asyncio.create_task(_runner(), name='indexer-index')
             self._current_run = info
-            logger.info('Indexer task started: kind=index reset=%s', reset)
+            logger.info(
+                'Indexer task started: kind=index reset=%s reindex_scope=%s',
+                reset, reindex_scope,
+            )
             return info
 
     async def start_rebuild_km(self) -> RunInfo:
@@ -167,6 +177,7 @@ class IndexerControlPlane:
                 'started_at': self._current_run.started_at,
                 'kind': self._current_run.kind,
                 'reset': self._current_run.reset,
+                'scope': self._current_run.scope,
             } if self._current_run else None,
             'progress': self._read_status_file(),
         }

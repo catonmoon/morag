@@ -94,6 +94,7 @@ class IndexingPipeline:
         cancel_event: asyncio.Event | None = None,
         run_context: RunContext | None = None,
         embedder_fingerprint: str | None = None,
+        reindex_floor: int | None = None,
     ) -> None:
         self._doc_repo = doc_repo
         self._chunk_repo = chunk_repo
@@ -117,6 +118,10 @@ class IndexingPipeline:
         # пишутся, fingerprint-mismatch не проверяется.
         self._run_context = run_context
         self._embedder_fingerprint = embedder_fingerprint
+        # Реиндекс-эффорт (ADR-0014): если задан — актуальность документа
+        # определяется по run_number (>= floor = уже обработан эффортом),
+        # обычные updated_at/fingerprint/count проверки не применяются.
+        self._reindex_floor = reindex_floor
         if not skip_presplit or passthrough_threshold:
             self._splitter = RecursiveSplitter(
                 self._token_counter,
@@ -133,6 +138,15 @@ class IndexingPipeline:
         existing = await self._doc_repo.get_by_id(stub.id)
         if existing is None:
             return False
+
+        # Реиндекс-эффорт (ADR-0014): актуальность определяется ТОЛЬКО прогоном.
+        # Документ актуален ⇔ уже обработан эффортом — его точка коммита несёт
+        # run_number >= floor. Резюм после краха так пропускает уже сделанное и
+        # доделывает остальное. updated_at/fingerprint/чанки при эффорте не
+        # смотрим: задача эффорта — пересобрать всё в scope.
+        if self._reindex_floor is not None:
+            run_number = existing.payload.get('run_number')
+            return isinstance(run_number, int) and run_number >= self._reindex_floor
 
         if existing.updated_at != stub.updated_at:
             return False
@@ -159,16 +173,19 @@ class IndexingPipeline:
         return count == total
 
     async def _prepare_document(self, document: Document, w: str = '') -> Document | None:
-        """Проверить idempotency, удалить устаревшее, сохранить документ.
+        """Проверить idempotency, прогнать процессоры, проштамповать payload.
 
         Возвращает обработанный документ или None если документ актуален.
-        Stamps payload с run_number/indexed_at/version/embedder_fingerprint
-        перед upsert (если RunContext/fingerprint передан в конструктор).
+        Документ здесь НЕ упсертится: точка документа сохраняется последней,
+        после чанков — это точка коммита replace-not-delete (ADR-0014). Для
+        не-структурных документов upsert делает _chunk_document, для
+        структурных — run().
         """
         logger.info('%sPreparing document: %s (size=%d)', w, document.id, document.size)
         existing = await self._doc_repo.get_by_id(document.id)
 
         prev_version = 0
+        content_changed = True
         if existing is not None:
             # Embedder fingerprint mismatch проверяется в _is_up_to_date;
             # здесь — fallback path для уже-загруженного документа.
@@ -176,8 +193,12 @@ class IndexingPipeline:
                 self._embedder_fingerprint is None
                 or existing.payload.get('embedder_fingerprint') == self._embedder_fingerprint
             )
+            content_changed = existing.updated_at != document.updated_at
 
-            if existing.updated_at == document.updated_at and fingerprint_ok:
+            # При реиндекс-эффорте skip-проверка отключена — документ всегда
+            # переобрабатывается (актуальность уже отфильтрована _is_up_to_date
+            # по run_number).
+            if self._reindex_floor is None and not content_changed and fingerprint_ok:
                 status = await self._chunk_repo.get_index_status(document.id)
                 if status is not None:
                     count, total = status
@@ -185,25 +206,26 @@ class IndexingPipeline:
                         logger.info('%sDocument up to date, skipping: %s', w, document.id)
                         return None
 
-            # Документ изменился / индексация прервана / сменился embedder —
-            # удаляем attached-детей и сам документ. Сохраняем prev_version для
-            # инкрементации.
             prev_version = int(existing.payload.get('version', 0))
-            logger.info('%sRe-indexing document: %s (prev_version=%d)', w, document.id, prev_version)
-            await self._doc_repo.delete_attached(document.id, self._chunk_repo)
-            await self._chunk_repo.delete_by_doc_id(document.id)
-            await self._doc_repo.delete(document.id)
+            logger.info(
+                '%sRe-indexing document: %s (prev_version=%d, content_changed=%s)',
+                w, document.id, prev_version, content_changed,
+            )
+            # Контент изменился → attached-дети могли измениться, сносим их
+            # (пере-деривируются в фазе вложений). При чистом реиндексе того же
+            # контента дети не трогаются. Чанки и точку документа НЕ удаляем —
+            # старое остаётся запрашиваемым до swap-delete (replace-not-delete).
+            if content_changed:
+                await self._doc_repo.delete_attached(document.id, self._chunk_repo)
 
         # Прогоняем через цепочку процессоров (LLM-операции живут здесь)
         for processor in self._doc_processors:
             document = await processor.process(document)
 
-        # Stamp run-versioning + fingerprint в payload
-        self._stamp_payload(document.payload, version=prev_version + 1)
-
-        # Сохраняем документ до начала чанкования
-        await self._doc_repo.upsert(document)
-        logger.info('%sDocument saved: %s (version=%d)', w, document.id, prev_version + 1)
+        # version — ось контента (ADR-0014): бампается только при изменении
+        # самого документа; чистый реиндекс того же контента version не меняет.
+        version = prev_version + 1 if content_changed else prev_version
+        self._stamp_payload(document.payload, version=version)
 
         return document
 
@@ -273,27 +295,24 @@ class IndexingPipeline:
                             return False
 
                         if prepared.structural:
+                            # Структурные документы без чанков — точку документа
+                            # упсертим здесь (для не-структурных это делает
+                            # _chunk_document последним шагом).
                             logger.info('%sStructural document, skipping chunking: %s', w, prepared.id)
+                            await self._doc_repo.upsert(prepared)
                         else:
                             await self._chunk_document(prepared, w=w)
                         return True
                     finally:
                         self._status_reporter.document_done(stub.id)
                 except Exception as exc:
-                    # Атомарность: если _chunk_document/upsert упал в середине —
-                    # в Qdrant могут остаться частично сохранённые чанки.
-                    # Сносим всё чтобы _is_up_to_date вернул False на следующем ране
-                    # и документ переиндексировался полностью с нуля.
-                    logger.exception('%sDocument failed, rolling back partial chunks: %s', w, stub.id)
-                    try:
-                        await self._chunk_repo.delete_by_doc_id(stub.id)
-                    except Exception as cleanup_exc:
-                        logger.warning(
-                            '%s  rollback failed for %s: %s', w, stub.id, cleanup_exc,
-                        )
-                    self._status_reporter.document_failed(
-                        stub.id, stub.title, exc,
-                    )
+                    # replace-not-delete (ADR-0014): точку документа упсертим
+                    # последним шагом, поэтому при падении она НЕ закоммичена —
+                    # документ остаётся на прежней версии со старыми чанками,
+                    # запрашиваемым. Недоделанные новые чанки (текущий run_number)
+                    # сметёт swap-delete следующего реиндекса. Чистить не нужно.
+                    logger.exception('%sDocument failed: %s', w, stub.id)
+                    self._status_reporter.document_failed(stub.id, stub.title, exc)
                     return False
 
         levels = _topological_levels(stubs)
@@ -375,8 +394,21 @@ class IndexingPipeline:
         return merged
 
     async def _chunk_document(self, document: Document, w: str = '') -> None:
-        """Разбить документ на чанки и сохранить в Qdrant."""
+        """Разбить документ на чанки и сохранить в Qdrant.
+
+        replace-not-delete (ADR-0014): новые чанки вставляются поверх старых,
+        затем swap-delete сметает чанки прежних прогонов, и последним шагом
+        упсертится точка документа (точка коммита). Корпус остаётся
+        запрашиваемым всё время реиндекса.
+        """
         logger.info('%sChunking: %s', w, document.id)
+
+        # replace-not-delete опирается на run_number чанков для swap-delete.
+        # Без RunContext run_number не штампуется — нечем строить swap-предикат,
+        # fallback на delete-upfront (краткое окно неполного документа; путь
+        # для тестов / голого CLI, где плавность не важна).
+        if self._run_context is None:
+            await self._chunk_repo.delete_by_doc_id(document.id)
 
         # Чанкинг: chunk_with_metadata (hybrid) или обычный chunk
         chunk_results: list | None = None  # list[ChunkResult] если hybrid
@@ -505,3 +537,19 @@ class IndexingPipeline:
             )
 
         logger.info('%sChunks saved: %s (%d)', w, document.id, total)
+
+        # Swap-delete: новые чанки уже в Qdrant с текущим run_number — сметаем
+        # чанки прежних прогонов этого документа (replace-not-delete, ADR-0014).
+        if self._run_context is not None:
+            await self._chunk_repo.delete_stale_chunks(
+                document.id, self._run_context.run_number,
+            )
+
+        # Точка коммита: точку документа упсертим последней, после чанков.
+        # До этого момента doc point несёт прежний run_number — при крахе
+        # документ для резюма считается недоделанным.
+        await self._doc_repo.upsert(document)
+        logger.info(
+            '%sDocument committed: %s (version=%s)',
+            w, document.id, document.payload.get('version'),
+        )
