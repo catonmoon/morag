@@ -31,7 +31,9 @@ from morag.setup_gate import SetupIncomplete, is_setup_complete
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_STOP_GRACE_SECONDS = 180
+# grace_seconds=None в stop() означает «ждать без таймаута» (graceful stop без
+# принудительного прерывания). Эскалация на kill — только при явно заданном
+# config.indexing.stop_grace_seconds или per-request grace_seconds.
 
 
 @dataclass(frozen=True)
@@ -64,11 +66,13 @@ class IndexerControlPlane:
         status_file_path: str | Path,
         run_index: Callable[..., Awaitable[None]],
         run_rebuild_km: Callable[..., Awaitable[None]],
+        stop_grace_seconds: int | None = None,
     ) -> None:
         self._config_path = str(config_path)
         self._status_file_path = Path(status_file_path)
         self._run_index = run_index
         self._run_rebuild_km = run_rebuild_km
+        self._stop_grace_seconds = stop_grace_seconds
 
         self._lock = asyncio.Lock()
         self._task: asyncio.Task | None = None
@@ -145,14 +149,21 @@ class IndexerControlPlane:
             logger.info('Indexer task started: kind=rebuild_km')
             return info
 
-    async def stop(self, grace_seconds: int = DEFAULT_STOP_GRACE_SECONDS) -> Literal['graceful', 'killed', 'not_running']:
+    async def stop(self, grace_seconds: int | None = None) -> Literal['graceful', 'killed', 'not_running']:
         if not self.is_running():
             return 'not_running'
         assert self._task is not None and self._cancel_event is not None
-        logger.info('Stopping indexer task (grace=%ds)', grace_seconds)
+        effective_grace = grace_seconds if grace_seconds is not None else self._stop_grace_seconds
         self._cancel_event.set()
+        if effective_grace is None:
+            # Ждём без таймаута — не прерываем принудительно. Для kill есть
+            # отдельный endpoint /control/kill.
+            logger.info('Stopping indexer task (no grace timeout, waiting until done)')
+            await asyncio.shield(self._task)
+            return 'graceful'
+        logger.info('Stopping indexer task (grace=%ds)', effective_grace)
         try:
-            await asyncio.wait_for(asyncio.shield(self._task), timeout=grace_seconds)
+            await asyncio.wait_for(asyncio.shield(self._task), timeout=effective_grace)
             return 'graceful'
         except asyncio.TimeoutError:
             logger.warning('Grace timeout exceeded, cancelling task')

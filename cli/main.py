@@ -194,7 +194,8 @@ class _StartReq(BaseModel):
 
 
 class _StopReq(BaseModel):
-    grace_seconds: int = 180  # = control_plane.DEFAULT_STOP_GRACE_SECONDS, дублируем чтобы не цикл импортов
+    # None → берётся config.indexing.stop_grace_seconds (передан control_plane'у при инициализации).
+    grace_seconds: int | None = None
 
 
 class _ReindexReq(BaseModel):
@@ -845,6 +846,7 @@ async def cmd_serve(config_path: str) -> None:
         status_file_path=status_path,
         run_index=lambda **kw: cmd_index(config_path, **kw),
         run_rebuild_km=lambda **kw: cmd_rebuild_km(config_path, **kw),
+        stop_grace_seconds=config.indexing.stop_grace_seconds,
     )
 
     # ---- Cron scheduler ----

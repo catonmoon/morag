@@ -15,8 +15,6 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_STOP_GRACE_SECONDS = 180
-
 
 class IndexerError(RuntimeError):
     """Ошибка связи с indexer-control-plane'ом."""
@@ -70,8 +68,12 @@ class IndexerClient:
         """Плавный реиндекс scope ('all' или имя источника), ADR-0014."""
         return await self._post('/control/reindex', {'scope': scope})
 
-    async def stop(self, grace_seconds: int = DEFAULT_STOP_GRACE_SECONDS) -> dict[str, Any]:
-        return await self._post('/control/stop', {'grace_seconds': grace_seconds})
+    async def stop(self, grace_seconds: int | None = None) -> dict[str, Any]:
+        """grace_seconds=None → indexer применит config.indexing.stop_grace_seconds."""
+        body: dict[str, Any] = {}
+        if grace_seconds is not None:
+            body['grace_seconds'] = grace_seconds
+        return await self._post('/control/stop', body)
 
     async def kill(self) -> dict[str, Any]:
         return await self._post('/control/kill', {})

@@ -11,7 +11,6 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from services.console.indexer_client import (
-    DEFAULT_STOP_GRACE_SECONDS,
     AlreadyRunning,
     IndexerError,
     SetupIncomplete,
@@ -29,7 +28,8 @@ class ReindexRequest(BaseModel):
 
 
 class StopRequest(BaseModel):
-    grace_seconds: int = DEFAULT_STOP_GRACE_SECONDS
+    # None → indexer-control-plane возьмёт config.indexing.stop_grace_seconds.
+    grace_seconds: int | None = None
 
 
 class IndexStatusResponse(BaseModel):

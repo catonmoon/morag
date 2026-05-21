@@ -325,6 +325,10 @@ class IndexingConfig(BaseModel):
     vision_max_tokens: int = 1024
     concurrency: int = 1
     schedule: str | None = None
+    # Таймаут мягкой остановки индексации через control-plane. По истечении —
+    # эскалация на kill. None (default) — ждать бесконечно, не прерывать
+    # принудительно. Для жёсткой остановки используется отдельный /control/kill.
+    stop_grace_seconds: int | None = None
     doc_title: DocTitleConfig = DocTitleConfig()
     doc_summary: DocSummaryConfig = DocSummaryConfig()
     doc_vector: DocVectorConfig = DocVectorConfig()

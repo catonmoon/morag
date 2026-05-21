@@ -23,7 +23,7 @@ class _StartReq(BaseModel):
 
 
 class _StopReq(BaseModel):
-    grace_seconds: int = 180
+    grace_seconds: int | None = None
 
 
 def make_fake_app(state: dict) -> FastAPI:
@@ -121,11 +121,13 @@ class TestStop:
         await c.stop(grace_seconds=42)
         assert state['last_stop_grace'] == 42
 
-    async def test_default_grace_seconds(self):
+    async def test_default_grace_seconds_omitted(self):
+        """По умолчанию grace_seconds в body не отправляется — indexer применит
+        config.indexing.stop_grace_seconds (или None — ждать без таймаута)."""
         state = {}
         c = make_client(state)
         await c.stop()
-        assert state['last_stop_grace'] == 180
+        assert state['last_stop_grace'] is None
 
 
 class TestKill:

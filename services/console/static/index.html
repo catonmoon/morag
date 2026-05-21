@@ -1957,7 +1957,8 @@
 
         async stopIndex(force) {
           const url = force ? '/api/index/kill' : '/api/index/stop';
-          const body = force ? null : JSON.stringify({grace_seconds: 180});
+          // grace_seconds опускаем — backend применит config.indexing.stop_grace_seconds.
+          const body = force ? null : JSON.stringify({});
           this.stopState = force ? 'killing' : 'graceful';
           this.stopResultKind = 'info';
           this.stopMessage = force
