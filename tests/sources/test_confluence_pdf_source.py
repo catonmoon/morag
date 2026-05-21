@@ -71,7 +71,7 @@ def mock_converter():
 def mock_doc_repo():
     """Мок DocRepository."""
     repo = AsyncMock()
-    repo.get_ids_by_source_type.return_value = set()
+    repo.get_ids_by_source_instance.return_value = set()
     repo.get_by_id.return_value = _make_parent_doc()
     return repo
 
@@ -85,7 +85,7 @@ def _make_source(
 ) -> ConfluencePdfSource:
     """Создать ConfluencePdfSource с замоканным Confluence клиентом."""
     if page_ids is not None:
-        mock_doc_repo.get_ids_by_source_type.return_value = page_ids
+        mock_doc_repo.get_ids_by_source_instance.return_value = page_ids
 
     with patch('morag.sources.confluence_pdf.Confluence') as mock_cls:
         mock_client = MagicMock()
@@ -134,7 +134,7 @@ class TestConfluencePdfSourceInit:
 class TestConfluencePdfSourceGetMetadata:
     async def test_returns_empty_when_no_pages(self, mock_converter, mock_doc_repo):
         """Если нет страниц Confluence — пустой список."""
-        mock_doc_repo.get_ids_by_source_type.return_value = set()
+        mock_doc_repo.get_ids_by_source_instance.return_value = set()
         src = _make_source(mock_converter, mock_doc_repo)
         stubs = await src.get_metadata()
         assert stubs == []
@@ -224,7 +224,7 @@ class TestConfluencePdfSourceGetMetadata:
         """Обход нескольких страниц."""
         att1 = _make_attachment(att_id='1', title='a.pdf')
         att2 = _make_attachment(att_id='2', title='b.pdf')
-        mock_doc_repo.get_ids_by_source_type.return_value = {'10', '20'}
+        mock_doc_repo.get_ids_by_source_instance.return_value = {'10', '20'}
         mock_doc_repo.get_by_id.side_effect = lambda pid: _make_parent_doc(
             page_id=pid, path=[f'Page {pid}'],
         )
@@ -390,7 +390,7 @@ class TestSkipAncestorIds:
         """Страница из skip_ancestor_ids пропускается."""
         att = _make_attachment(att_id='1', title='book.pdf')
         # repo возвращает prefixed IDs (как в реальности)
-        mock_doc_repo.get_ids_by_source_type.return_value = {'confluence:test:50'}
+        mock_doc_repo.get_ids_by_source_instance.return_value = {'confluence:test:50'}
         mock_doc_repo.find_children.return_value = []
 
         src = _make_source(
@@ -407,7 +407,7 @@ class TestSkipAncestorIds:
     async def test_skips_descendants_of_skip_ancestor(self, mock_converter, mock_doc_repo):
         """Потомки skip_ancestor_ids тоже пропускаются (BFS)."""
         # Иерархия: 50 → 60 → 70 (все IDs prefixed в repo)
-        mock_doc_repo.get_ids_by_source_type.return_value = {
+        mock_doc_repo.get_ids_by_source_instance.return_value = {
             'confluence:test:50', 'confluence:test:60', 'confluence:test:70', 'confluence:test:10',
         }
 

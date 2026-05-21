@@ -245,6 +245,27 @@ class KnowledgeMapGenerator:
         # Корни: из конфига (ancestor_ids) или по отсутствию parent
         if root_ids:
             roots = [doc for doc in all_docs if doc.id in root_ids]
+            seen = {d.id for d in roots}
+            # Корень из конфига может быть не проиндексирован (структурная
+            # страница, провал индексации). Важно не наличие самой страницы,
+            # а её роль родителя — берём её детей как корни.
+            for missing in root_ids - seen:
+                children = [
+                    d for d in all_docs
+                    if missing in d.parent_doc_ids and d.id not in seen
+                ]
+                if children:
+                    roots.extend(children)
+                    seen.update(d.id for d in children)
+                    logger.info(
+                        'KnowledgeMap: root %s not indexed — using %d child doc(s) as roots',
+                        missing, len(children),
+                    )
+                else:
+                    logger.warning(
+                        'KnowledgeMap: root %s not indexed and has no children — skipped',
+                        missing,
+                    )
         else:
             roots = [
                 doc for doc in all_docs
@@ -446,6 +467,44 @@ class KnowledgeMapGenerator:
                 logger.exception('KnowledgeMap: LLM failed for batch of %s', title)
                 return summaries
 
+    @staticmethod
+    def _group_roots_by_source(
+        roots: list[Document],
+    ) -> list[tuple[tuple[str, str], list[Document]]]:
+        """Сгруппировать корни по (source_kind, source_name) в порядке первого появления.
+
+        Возвращает список (key, group). Если все корни из одного источника —
+        список из одной группы; вызывающий смотрит на len, чтобы решить, рендерить
+        заголовок группы или нет.
+
+        У документов без source_kind/source_name (старые индексы до ADR-0012)
+        key=('', '') — попадают в общую безымянную группу.
+        """
+        groups: dict[tuple[str, str], list[Document]] = {}
+        order: list[tuple[str, str]] = []
+        for doc in roots:
+            key = (
+                doc.payload.get('source_kind', '') or '',
+                doc.payload.get('source_name', '') or '',
+            )
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(doc)
+        return [(k, groups[k]) for k in order]
+
+    @staticmethod
+    def _format_source_header(key: tuple[str, str]) -> str:
+        """Заголовок группы корней. Не h-заголовок — чтобы не сдвигать уровни
+        существующих корней внутри группы."""
+        kind, name = key
+        kind_display = {'confluence': 'Confluence', 'jira': 'Jira', 'local': 'Локальные'}.get(
+            kind, kind.capitalize() or 'Без источника',
+        )
+        if name:
+            return f'**Источник: {kind_display} «{name}»**'
+        return f'**Источник: {kind_display}**'
+
     async def _build_system_prompt_tree(
         self,
         roots: list[Document],
@@ -462,14 +521,23 @@ class KnowledgeMapGenerator:
 
         # fixed strategy
         lines: list[str] = ['# Карта документации\n']
-        for root in roots:
-            await self._append_node_to_prompt(
-                root, children_map, maps, lines, heading_level=1, parent=None,
-            )
+        groups = self._group_roots_by_source(roots)
+        multi_source = len(groups) > 1
+        for key, group_roots in groups:
+            if multi_source:
+                lines.append(self._format_source_header(key))
+                lines.append('')
+            for root in group_roots:
+                await self._append_node_to_prompt(
+                    root, children_map, maps, lines, heading_level=1, parent=None,
+                )
 
         result = '\n'.join(lines)
         result_tokens = self._counter.count(result)
-        logger.info('KnowledgeMap: system prompt %d tok (fixed)', result_tokens)
+        logger.info(
+            'KnowledgeMap: system prompt %d tok (fixed, %d source group(s))',
+            result_tokens, len(groups),
+        )
         return result
 
     async def _build_weighted_prompt(
@@ -531,15 +599,24 @@ class KnowledgeMapGenerator:
 
         # 4. Собираем промпт с бюджетами
         lines: list[str] = ['# Карта документации\n']
-        for root in roots:
-            await self._append_node_weighted(
-                root, children_map, maps, lines,
-                heading_level=1, budgets=budgets, parent=None,
-            )
+        groups = self._group_roots_by_source(roots)
+        multi_source = len(groups) > 1
+        for key, group_roots in groups:
+            if multi_source:
+                lines.append(self._format_source_header(key))
+                lines.append('')
+            for root in group_roots:
+                await self._append_node_weighted(
+                    root, children_map, maps, lines,
+                    heading_level=1, budgets=budgets, parent=None,
+                )
 
         result = '\n'.join(lines)
         result_tokens = self._counter.count(result)
-        logger.info('KnowledgeMap: system prompt %d tok (weighted)', result_tokens)
+        logger.info(
+            'KnowledgeMap: system prompt %d tok (weighted, %d source group(s))',
+            result_tokens, len(groups),
+        )
         return result
 
     def _collect_prompt_nodes(
@@ -1124,7 +1201,7 @@ class KnowledgeMapGenerator:
                     structural=payload.get('structural', False),
                     payload={
                         k: v for k, v in payload.items()
-                        if k in ('doc_summary',)
+                        if k in ('doc_summary', 'source_kind', 'source_name')
                     },
                 ))
             if offset is None:

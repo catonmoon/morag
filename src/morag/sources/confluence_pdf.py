@@ -72,10 +72,14 @@ class ConfluencePdfSource(Source):
         self._attachment_meta: dict[str, tuple[str, str, str]] = {}
 
     async def get_metadata(self) -> list[Document]:
-        """Вернуть стабы PDF-вложений: обход всех проиндексированных страниц Confluence."""
-        # Получаем все page_id из doc_repo (source_type='confluence').
+        """Вернуть стабы PDF-вложений: обход проиндексированных страниц Confluence этого инстанса."""
+        # Получаем page_id только своего Confluence-инстанса. Без фильтра по
+        # (kind, name) при нескольких инстансах мы бы пошли скачивать чужие
+        # аттачменты через свой Confluence-клиент.
         # IDs приходят prefixed: 'confluence:<name>:<page_id>'
-        page_ids = await self._doc_repo.get_ids_by_source_type('confluence')
+        page_ids = await self._doc_repo.get_ids_by_source_instance(
+            'confluence', self._kind, self._name,
+        )
         if not page_ids:
             logger.info('No Confluence pages found, skipping PDF attachments')
             return []
@@ -179,7 +183,7 @@ class ConfluencePdfSource(Source):
                 title=filename,
                 size=len(pdf_bytes),
                 url=url,
-                parent_doc_ids=[page_id],  # page_id уже prefixed (из get_ids_by_source_type)
+                parent_doc_ids=[page_id],  # page_id уже prefixed (из get_ids_by_source_instance)
                 paged=True,
                 payload={'source_name': self._name, 'source_kind': self._kind},
             )
@@ -211,7 +215,7 @@ class ConfluencePdfSource(Source):
     async def _fetch_page_attachments(self, page_id: str) -> list[Document]:
         """Получить PDF-вложения страницы через Confluence API.
 
-        page_id приходит prefixed (из get_ids_by_source_type). Confluence API
+        page_id приходит prefixed (из get_ids_by_source_instance). Confluence API
         ничего не знает про префиксы — нужен raw external_id.
         """
         external_page_id = self._strip_prefix(page_id)

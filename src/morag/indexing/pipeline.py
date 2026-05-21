@@ -256,12 +256,20 @@ class IndexingPipeline:
         logger.info('Loaded metadata for %d document(s) from source (concurrency=%d)', total, self._concurrency)
         self._status_reporter.start_phase(f'indexing_{source.source_type}', total)
 
-        # Full sync: удалить документы, которых больше нет в источнике
+        # Full sync: удалить документы, которых больше нет в источнике.
+        # Скоуп — конкретный инстанс (kind, name, source_type), иначе при
+        # нескольких инстансах одного source_type (multi-Confluence) второй
+        # снесёт документы первого как orphans.
         current_ids = {stub.id for stub in stubs}
-        stored_ids = await self._doc_repo.get_ids_by_source_type(source.source_type)
+        stored_ids = await self._doc_repo.get_ids_by_source_instance(
+            source.source_type, source.kind, source.name
+        )
         orphaned = stored_ids - current_ids
         if orphaned:
-            logger.info('Deleting %d orphaned document(s) for source_type=%s', len(orphaned), source.source_type)
+            logger.info(
+                'Deleting %d orphaned document(s) for source %s:%s (source_type=%s)',
+                len(orphaned), source.kind, source.name, source.source_type,
+            )
             for doc_id in orphaned:
                 await self._doc_repo.cascade_delete(doc_id, self._chunk_repo)
 

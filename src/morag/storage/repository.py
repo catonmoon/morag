@@ -184,10 +184,22 @@ class DocRepository:
         await self.delete(doc_id)
         logger.info('Cascade deleted: %s', doc_id)
 
-    async def get_ids_by_source_type(self, source_type: str) -> set[str]:
-        """Вернуть множество doc_id всех документов с указанным source_type."""
+    async def get_ids_by_source_instance(
+        self, source_type: str, source_kind: str, source_name: str
+    ) -> set[str]:
+        """Вернуть множество doc_id документов конкретного source-инстанса.
+
+        Фильтр по тройке (source_type, source_kind, source_name) — нужен для
+        full-sync orphan-detection при нескольких инстансах одного source_type
+        (multi-Confluence, multi-Jira, несколько local-источников). Без
+        source_name второй Confluence снёс бы документы первого как orphans.
+        """
         scroll_filter = Filter(
-            must=[FieldCondition(key='source_type', match=MatchValue(value=source_type))]
+            must=[
+                FieldCondition(key='source_type', match=MatchValue(value=source_type)),
+                FieldCondition(key='source_kind', match=MatchValue(value=source_kind)),
+                FieldCondition(key='source_name', match=MatchValue(value=source_name)),
+            ]
         )
         ids: set[str] = set()
         offset = None

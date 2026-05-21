@@ -49,7 +49,7 @@ def setup_source(source: MagicMock, docs: list[Document]) -> None:
 @pytest.fixture
 def doc_repo() -> AsyncMock:
     mock = AsyncMock(spec=DocRepository)
-    mock.get_ids_by_source_type.return_value = set()
+    mock.get_ids_by_source_instance.return_value = set()
     return mock
 
 
@@ -679,3 +679,47 @@ class TestReindexEffort:
         await reindex_pipeline.run(source)
 
         source.load_one.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Full-sync orphan scope — должен скоупиться per-instance
+# ---------------------------------------------------------------------------
+
+class TestFullSyncScope:
+    """При нескольких инстансах одного source_type (multi-Confluence) full-sync
+    второго не должен сметать документы первого как orphans."""
+
+    async def test_orphan_filter_uses_kind_and_name(self, pipeline, doc_repo, chunk_repo):
+        """get_ids_by_source_instance вызывается с (source_type, kind, name)."""
+        source = MagicMock(spec=Source)
+        source.source_type = 'confluence'
+        source.kind = 'confluence'
+        source.name = 'corp'
+        source.get_metadata.return_value = []
+
+        await pipeline.run(source)
+
+        doc_repo.get_ids_by_source_instance.assert_called_once_with(
+            'confluence', 'confluence', 'corp',
+        )
+
+    async def test_second_instance_does_not_delete_first(self, pipeline, doc_repo, chunk_repo):
+        """Прогон Confluence B не должен трогать документы Confluence A."""
+        source_b = MagicMock(spec=Source)
+        source_b.source_type = 'confluence'
+        source_b.kind = 'confluence'
+        source_b.name = 'B'
+        source_b.get_metadata.return_value = [make_stub('confluence:B:1', source_type='confluence')]
+
+        # Репо возвращает только ids своего инстанса (новая семантика метода) —
+        # ids инстанса A в выборку не попадают, orphan-delete их не коснётся.
+        doc_repo.get_ids_by_source_instance.return_value = {'confluence:B:1'}
+        doc_repo.get_by_id.return_value = None
+
+        await pipeline.run(source_b)
+
+        for call in doc_repo.cascade_delete.call_args_list:
+            doc_id = call.args[0]
+            assert not doc_id.startswith('confluence:A:'), (
+                f'orphan-delete захватил документ соседнего инстанса: {doc_id}'
+            )

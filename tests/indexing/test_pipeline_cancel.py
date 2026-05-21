@@ -45,7 +45,7 @@ def make_doc(doc_id: str, parent_doc_ids: list[str] | None = None) -> Document:
 @pytest.fixture
 def doc_repo() -> AsyncMock:
     mock = AsyncMock(spec=DocRepository)
-    mock.get_ids_by_source_type.return_value = set()
+    mock.get_ids_by_source_instance.return_value = set()
     mock.get_by_id.return_value = None
     return mock
 
