@@ -166,6 +166,19 @@ class TestIndexRoutes:
         r = await client.post('/api/index/start', json={'reset': False})
         assert r.status_code == 502
 
+    async def test_reindex_proxies_scope(self, client):
+        client._transport.app.state.indexer.reindex.return_value = {
+            'started_at': 'T', 'kind': 'index', 'scope': 'jira-internal',
+        }
+        r = await client.post('/api/index/reindex', json={'scope': 'jira-internal'})
+        assert r.status_code == 200
+        client._transport.app.state.indexer.reindex.assert_awaited_once_with(scope='jira-internal')
+
+    async def test_reindex_409_when_already_running(self, client):
+        client._transport.app.state.indexer.reindex.side_effect = AlreadyRunning('running')
+        r = await client.post('/api/index/reindex', json={'scope': 'all'})
+        assert r.status_code == 409
+
     async def test_stop_proxies_grace(self, client):
         client._transport.app.state.indexer.stop.return_value = {'result': 'graceful'}
         r = await client.post('/api/index/stop', json={'grace_seconds': 60})

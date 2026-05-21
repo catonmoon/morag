@@ -24,6 +24,10 @@ class StartRequest(BaseModel):
     reset: bool = False
 
 
+class ReindexRequest(BaseModel):
+    scope: str = 'all'  # 'all' или имя источника
+
+
 class StopRequest(BaseModel):
     grace_seconds: int = DEFAULT_STOP_GRACE_SECONDS
 
@@ -57,6 +61,20 @@ async def get_status(request: Request) -> IndexStatusResponse:
 async def start_index(req: StartRequest, request: Request) -> dict[str, Any]:
     try:
         return await request.app.state.indexer.start_index(reset=req.reset)
+    except AlreadyRunning as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except SetupIncomplete as e:
+        raise HTTPException(status_code=412, detail={'blockers': e.blockers}) from e
+    except IndexerError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from e
+
+
+@router.post('/reindex')
+async def reindex(req: ReindexRequest, request: Request) -> dict[str, Any]:
+    """Плавная переиндексация scope (ADR-0014). Повторный вызов резюмит
+    незавершённый эффорт."""
+    try:
+        return await request.app.state.indexer.reindex(scope=req.scope)
     except AlreadyRunning as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except SetupIncomplete as e:

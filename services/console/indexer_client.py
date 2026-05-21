@@ -66,6 +66,10 @@ class IndexerClient:
     async def start_rebuild_km(self) -> dict[str, Any]:
         return await self._post('/control/rebuild-km', {})
 
+    async def reindex(self, scope: str = 'all') -> dict[str, Any]:
+        """Плавный реиндекс scope ('all' или имя источника), ADR-0014."""
+        return await self._post('/control/reindex', {'scope': scope})
+
     async def stop(self, grace_seconds: int = DEFAULT_STOP_GRACE_SECONDS) -> dict[str, Any]:
         return await self._post('/control/stop', {'grace_seconds': grace_seconds})
 

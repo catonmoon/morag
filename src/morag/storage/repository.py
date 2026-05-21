@@ -301,6 +301,28 @@ class ChunkRepository:
             ),
         )
 
+    async def delete_stale_chunks(self, doc_id: str, run_number: int) -> None:
+        """Удалить чанки документа, не принадлежащие текущему прогону.
+
+        Swap-шаг replace-not-delete (ADR-0014): новые чанки уже вставлены с
+        текущим `run_number`, эта операция сметает всё остальное для документа —
+        осиротевшие старые чанки, недоделанные от упавших попыток, а также чанки
+        старых индексов вообще без поля `run_number`. Прогоны нумеруются
+        монотонно и не переиспользуются, поэтому «не текущий прогон» эквивалентно
+        «прежний прогон».
+        """
+        await self._client.delete(
+            collection_name=self._collection,
+            points_selector=FilterSelector(
+                filter=Filter(
+                    must=[FieldCondition(key='doc_id', match=MatchValue(value=doc_id))],
+                    must_not=[FieldCondition(
+                        key='run_number', match=MatchValue(value=run_number),
+                    )],
+                )
+            ),
+        )
+
     async def upsert_batch(self, chunks: list[Chunk]) -> None:
         """Сохранить пачку чанков."""
         if not chunks:
