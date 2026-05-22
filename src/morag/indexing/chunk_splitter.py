@@ -203,7 +203,7 @@ def add_table_narratives(chunks: list[Chunk], min_rows: int = 5) -> list[Chunk]:
     Narrative-чанки добавляются В КОНЕЦ списка (после оригинальных).
     Свойства narrative-чанка:
       - id: новый UUID
-      - order = -1 (sentinel: не часть doc-sequence, фильтруется в get_neighbors)
+      - order = -1 (sentinel: не часть doc-sequence; retrieval-side фильтруется в HybridSearcher)
       - text: per-row narrative (newline-joined «Header: value»)
       - context: '' (пустой — для narratives контекст не генерируем)
       - payload:

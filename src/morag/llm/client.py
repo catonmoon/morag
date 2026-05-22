@@ -378,7 +378,7 @@ class LLMClient:
         Возвращаем агрегированный финал — потребитель не видит разницы со streamingом.
 
         Использование: retrieval-pipeline (`services/pipeline/morag_pipeline.py`) —
-        агент выбирает между `search()` / `get_neighbors()` / финальным ответом.
+        агент выбирает между `find_section()` / `search()` / `get_doc()` / финальным ответом.
         """
         params = self._resolve_params(params)
         kwargs: dict = dict(

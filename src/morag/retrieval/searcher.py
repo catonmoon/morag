@@ -309,35 +309,6 @@ class HybridSearcher:
 
     # ── Fetch helpers ─────────────────────────────────────────────────────────
 
-    async def fetch_chunk_by_order(self, doc_id: str, order: int) -> dict | None:
-        """Конкретный чанк по doc_id + order. Для get_neighbors tool.
-
-        Narrative-чанки (chunk_type='table_row_narrative') исключаются —
-        они не часть doc-sequence (order=-1) и не должны возвращаться как соседи.
-        """
-        records, _ = await self._qdrant.scroll(
-            collection_name=self._chunks_collection,
-            scroll_filter=Filter(
-                must=[
-                    FieldCondition(key='doc_id', match=MatchValue(value=doc_id)),
-                    FieldCondition(key='order', match=MatchValue(value=order)),
-                ],
-                must_not=[
-                    FieldCondition(
-                        key='chunk_type',
-                        match=MatchValue(value='table_row_narrative'),
-                    ),
-                ],
-            ),
-            limit=1,
-            with_payload=True,
-        )
-        if not records:
-            return None
-        chunk = _point_to_chunk(records[0])
-        chunk['score'] = 0.0
-        return chunk
-
     async def fetch_doc_chunks_lite(self, doc_id: str) -> list[dict]:
         """Все чанки документа в LITE-формате `[{order, text}]`, отсортированы по order.
 

@@ -147,43 +147,14 @@ _TOOLS = [
     {
         'type': 'function',
         'function': {
-            'name': 'get_neighbors',
-            'description': (
-                'Получить соседние чанки документа для расширения контекста. '
-                'Используй когда нашёл релевантный чанк и хочешь увидеть что рядом.'
-            ),
-            'parameters': {
-                'type': 'object',
-                'properties': {
-                    'doc_id': {
-                        'type': 'string',
-                        'description': 'ID документа (из результатов search)',
-                    },
-                    'order': {
-                        'type': 'integer',
-                        'description': 'Порядковый номер чанка в документе (из результатов search)',
-                    },
-                    'window': {
-                        'type': 'integer',
-                        'description': 'Количество соседних чанков в каждую сторону (по умолчанию 2)',
-                    },
-                },
-                'required': ['doc_id', 'order'],
-            },
-        },
-    },
-    {
-        'type': 'function',
-        'function': {
             'name': 'get_doc',
             'description': (
                 'Глубокое чтение одного документа: тянет все его чанки, реранкер '
-                'выбирает релевантные query. Альтернатива get_neighbors когда нужен '
-                'не локальный контекст (±N чанков), а покрытие всего документа против '
-                'запроса. Используй когда: (а) после search ты понимаешь что нужный '
-                'документ найден, но один-два чанка из выдачи не дают полной картины; '
-                '(б) нужно проверить все части большого документа на релевантность query '
-                '(search мог пропустить релевантный фрагмент в хвосте документа).'
+                'выбирает релевантные query. Используй когда: (а) после search ты '
+                'понимаешь что нужный документ найден, но один-два чанка из выдачи '
+                'не дают полной картины; (б) нужно проверить все части большого '
+                'документа на релевантность query (search мог пропустить '
+                'релевантный фрагмент в хвосте документа).'
             ),
             'parameters': {
                 'type': 'object',
@@ -260,18 +231,16 @@ _SYSTEM_PROMPT = (
     'прямо на странице-разделе (например, страница «Люди» сама перечисляет отделы — её подстраницы не нужны).\n'
     '- find_section подскажет что использовать: «раздел рекурсивно» → section_ids; «страница точечно» → doc_ids.\n'
     '- Если для разных аспектов релевантны разные секции — дополнительно вызови find_section под аспект.\n'
-    '- Используй get_neighbors(doc_id, order) чтобы увидеть ЛОКАЛЬНЫЙ контекст '
-    'вокруг найденного чанка (±N чанков по позиции).\n'
     '- Используй get_doc(doc_id, query) для ГЛУБОКОГО ЧТЕНИЯ одного документа '
     'относительно вопроса — реранкер пройдётся по ВСЕМ его чанкам и вернёт '
-    'тематически релевантные. Это альтернатива get_neighbors когда нужен не '
-    'локальный «соседский» контекст, а покрытие всего документа против query '
-    '(полезно если документ большой и search мог пропустить нужный фрагмент в его хвосте).\n'
+    'тематически релевантные. Полезно когда search нашёл нужный документ, '
+    'но один-два чанка не дают полной картины, или если документ большой '
+    'и search мог пропустить релевантный фрагмент в его хвосте.\n'
     '- ⚠️ ШУМ ПРИ ШИРОКОМ ПОИСКЕ: если search вернул результаты из 10+ разных документов — '
     'это сигнал что запрос слишком общий, выдача шумная. Сузь следующий шаг: '
     'переформулируй запрос точнее (более специфичные термины) ИЛИ ограничь section_ids '
     'двумя-тремя самыми релевантными разделами из карты. '
-    'Не пытайся «прочитать все 10» — выбери top-2-3 документа и углубляйся через get_neighbors().\n\n'
+    'Не пытайся «прочитать все 10» — выбери top-2-3 документа и углубляйся через get_doc().\n\n'
     '### 3. ПРОВЕРКА ПОЛНОТЫ\n'
     'После поисков проверь:\n'
     '- Найдена ли информация из РАЗНЫХ разделов/документов?\n'
@@ -600,6 +569,14 @@ class Pipeline:
         ADMIN_INSTRUCTIONS: str = ''
 
     def __init__(self):
+        # OWUI идентифицирует pipeline по self.id (а имя модели берёт из self.name).
+        # Если их нет — fallback на имя файла. Чтобы локализовать различия между
+        # деплоями в одну env-переменную (вместо переименования файла билд-таймом),
+        # читаем PIPELINE_NAME из env. Каждый деплой ставит свой `PIPELINE_NAME`
+        # в `docker-compose.yml` — Dockerfile/код остаются общими.
+        self.id = os.getenv('PIPELINE_NAME', 'morag')
+        self.name = self.id
+
         # 0. Опц. DEBUG-логирование — для диагностики retrieval/find_section
         # через `docker compose logs pipelines`. Включается env MORAG_LOG_LEVEL=DEBUG.
         log_level = (os.getenv('MORAG_LOG_LEVEL') or '').upper()
@@ -851,7 +828,7 @@ class Pipeline:
 
                 # Выполнение + статус
                 status_text = _format_tool_status(fn_name, fn_args, resolve_title=self._get_doc_title)
-                icon = {'search': '🔍', 'find_section': '🗺️', 'get_neighbors': '📖', 'get_doc': '📄'}.get(fn_name, '🛠️')
+                icon = {'search': '🔍', 'find_section': '🗺️', 'get_doc': '📄'}.get(fn_name, '🛠️')
                 yield self._emit_status(icon, status_text, False)
 
                 result, chunks = self._execute_tool(fn_name, fn_args)
@@ -936,7 +913,7 @@ class Pipeline:
         Назначает 1, 2, 3, ... по порядку первого появления doc_id в любом
         tool-результате. Повторный doc_id получает тот же номер.
         Используется для стабильного цитирования `[N] Документ:` через все
-        search/get_doc/get_neighbors в рамках одного агентского цикла.
+        search/get_doc в рамках одного агентского цикла.
         """
         n = self._doc_numbering.get(doc_id)
         if n is not None:
@@ -956,10 +933,6 @@ class Pipeline:
             )
         elif name == 'find_section':
             return self._tool_find_section(args['query'])
-        elif name == 'get_neighbors':
-            return self._tool_get_neighbors(
-                args['doc_id'], args['order'], args.get('window', 2),
-            )
         elif name == 'get_doc':
             return self._tool_get_doc(args['doc_id'], args['query'])
         return f'Неизвестный инструмент: {name}', []
@@ -1069,38 +1042,6 @@ class Pipeline:
             parts.append('\n'.join(lines))
 
         return f'Найдено {_plural(len(by_doc), "документ", "документа", "документов")}:\n\n' + '\n\n---\n\n'.join(parts), chunks
-
-    def _tool_get_neighbors(
-        self, doc_id: str, order: int, window: int = 2,
-    ) -> tuple[str, list[dict]]:
-        logger.info(
-            '[get_neighbors] doc_id=%s order=%d window=%d', doc_id, order, window,
-        )
-        chunks: list[dict] = []
-        for delta in range(-window, window + 1):
-            target_order = order + delta
-            if target_order < 0:
-                continue
-            chunk = self._fetch_chunk_by_order(doc_id, target_order)
-            if chunk:
-                chunks.append(chunk)
-
-        if not chunks:
-            logger.info('[get_neighbors] empty result')
-            return f'Чанки не найдены для doc_id={doc_id} рядом с order={order}.', []
-        logger.info('[get_neighbors] → %d chunks', len(chunks))
-
-        chunks.sort(key=lambda x: x['order'])
-        n = self._global_doc_id(doc_id)
-        doc_name = self._get_doc_title(doc_id)
-        lines = [f'[{n}] Документ: {doc_name}',
-                 f'Соседние чанки вокруг order={order}:', '']
-        for c in chunks:
-            marker = ' ← запрошенный' if c['order'] == order else ''
-            lines.append(f'[order={c["order"]}{marker}]')
-            lines.append(c['text'])
-            lines.append('')
-        return '\n'.join(lines), chunks
 
     # ── Section-level retrieval (find_section) ────────────────────────────────
 
@@ -1238,7 +1179,7 @@ class Pipeline:
         """LLM call с function-calling tools. Non-streaming, retry/429 в SDK.
 
         enable_thinking=False всегда (default клиента) — для агентского цикла
-        (search/get_neighbors decisions) thinking не нужен.
+        (search/find_section decisions) thinking не нужен.
         """
         return self._run(self._llm_agent.complete_with_tools(
             messages,
@@ -1268,8 +1209,8 @@ class Pipeline:
                 '- При использовании информации вставляй номер документа-источника '
                 'в формате [N], где N — это число из заголовка `[N] Документ: ...` '
                 'в результатах tool-вызовов на ЭТОМ ходу. '
-                'Нумерация СКВОЗНАЯ — один и тот же документ во всех search/get_doc/'
-                'get_neighbors имеет ОДНО И ТО ЖЕ N. Если в выдаче встречается `[5] Документ: X` — '
+                'Нумерация СКВОЗНАЯ — один и тот же документ во всех search/get_doc '
+                'имеет ОДНО И ТО ЖЕ N. Если в выдаче встречается `[5] Документ: X` — '
                 'для цитирования X всегда используй [5]. '
                 'ЗАПРЕЩЕНО ссылаться на номера из прошлых ходов диалога — они уже не действительны. '
                 'Например: "Для настройки Docker нужно установить Docker Desktop [1]." '
@@ -1318,9 +1259,6 @@ class Pipeline:
 
     def _search(self, text: str, limit: int, scope_active: bool = False) -> list[dict]:
         return self._run(self._searcher.search_chunks(text, limit, scope_active=scope_active))
-
-    def _fetch_chunk_by_order(self, doc_id: str, order: int) -> dict | None:
-        return self._run(self._searcher.fetch_chunk_by_order(doc_id, order))
 
     def _fetch_doc_summaries(self, doc_ids: list[str]) -> dict[str, str]:
         return self._run(self._searcher.fetch_doc_summaries(doc_ids))
@@ -1447,12 +1385,6 @@ def _format_tool_status(fn_name: str, fn_args: dict, resolve_title=None) -> str:
             scope.append('на страницах: ' + ', '.join(_title(did) for did in doc_ids))
         suffix = '; '.join(scope) if scope else 'по всей базе'
         return f'[{query}] {suffix}'
-    if fn_name == 'get_neighbors':
-        doc_id = fn_args.get('doc_id', '')
-        order = fn_args.get('order', 0)
-        window = fn_args.get('window', 2)
-        title = _title(doc_id)
-        return f'[{title}] блок #{order} (±{window}) — расширение контекста'
     if fn_name == 'get_doc':
         doc_id = fn_args.get('doc_id', '')
         query = fn_args.get('query', '')
