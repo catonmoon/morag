@@ -46,42 +46,10 @@ Write a descriptive overview of this section:
 """
 
 
-_COMPACT_PROMPT = """\
-You are a documentation analyst. The following knowledge map layer is too long.
-
-{layer_text}
-
-Compact it while strictly preserving:
-- ALL markdown headings (##, ###, ####) with their section ids
-- The hierarchical structure
-- Section ids in parentheses
-
-Remove or shorten ONLY the descriptive text under headings. Keep each description to 1 sentence max.
-Respond in the same language as the original.
-"""
-
-
-_SYSTEM_PROMPT_TEMPLATE = """\
-You are a documentation analyst. Your task is to create a single, concise knowledge map \
-that serves as a system prompt for a RAG assistant.
-
-Below are knowledge maps of all documentation sections:
-
-{section_maps}
-
-Merge them into a single structured document that:
-- Provides a clear overview of the entire knowledge base
-- Groups related sections together
-- For each section: 1-2 sentence description + id in parentheses
-- Highlights what types of questions each section can answer
-- Is concise enough to fit in a system prompt
-
-Requirements:
-- Use the same language as the original documents
-- Format as markdown
-- Include section ids for search filtering
-- Total length should not exceed the available budget
-"""
+# Adaptive weighted-стратегия. Глубина — фиксированная: root → дети → стоп.
+_KM_MAX_DEPTH = 2
+# Минимальное число токенов на одну brief-строку «- Имя (id: …) — хинт».
+_KM_BRIEF_LINE_TOKENS = 30
 
 
 _SLUG_RE = re.compile(r'[^a-z0-9]+')
@@ -101,15 +69,17 @@ def _slugify(text: str, fallback: str = 'topic') -> str:
     return s or fallback
 
 
-def _first_sentence(s: str, max_chars: int = 240) -> str:
-    """Вернуть первое предложение строки или первые max_chars символов."""
-    s = (s or '').strip().replace('\n', ' ')
-    if not s:
-        return ''
-    m = re.search(r'[.!?](?:\s|$)', s[:max_chars + 50])
-    if m:
-        return s[:m.end()].strip()
-    return s[:max_chars].strip()
+def _ratio_in_words(ratio: float) -> str:
+    """Описание «во сколько раз короче» по-русски. Для prompt'а LLM-сжатия."""
+    if ratio < 1.6:
+        return 'примерно в полтора раза'
+    if ratio < 2.5:
+        return 'примерно вдвое'
+    if ratio < 3.5:
+        return 'примерно втрое'
+    if ratio < 5:
+        return 'примерно вчетверо'
+    return f'примерно в {ratio:.0f} раз'
 
 
 def _node_title(doc: Document, parent: Document | None = None) -> str:
@@ -132,11 +102,8 @@ class KnowledgeMapGenerator:
         llm_client,
         doc_repo: DocRepository,
         collection: str = 'knowledge_map',
-        depth: int = 2,
-        max_depth: int | None = None,
-        node_max_tokens: int = 256,
         node_min_tokens: int = 256,
-        prompt_strategy: str = 'fixed',
+        prompt_strategy: str = 'weighted',
         prompt_budget: int = 8192,
         token_counter: TokenCounter | None = None,
         concurrency: int = 4,
@@ -144,16 +111,11 @@ class KnowledgeMapGenerator:
         flat_topics_target: int | None = None,
         flat_topics_max_input_docs: int = 3000,
         flat_topics_assign_batch: int = 5,
-        depth1_section_ids: list[str] | None = None,
-        auto_depth1_children_threshold: int | None = None,
     ) -> None:
         self._client = client
         self._llm_client = llm_client
         self._doc_repo = doc_repo
         self._collection = collection
-        self._depth = depth
-        self._max_depth = max_depth  # None = до самого дна
-        self._node_max_tokens = node_max_tokens
         self._node_min_tokens = node_min_tokens
         self._prompt_strategy = prompt_strategy
         self._prompt_budget = prompt_budget
@@ -163,11 +125,6 @@ class KnowledgeMapGenerator:
         self._flat_topics_target = flat_topics_target
         self._flat_topics_max_input_docs = flat_topics_max_input_docs
         self._flat_topics_assign_batch = flat_topics_assign_batch
-        # _depth1_section_ids: явно указанные ID. Эффективный набор (с учётом
-        # auto_threshold) формируется в generate() когда children_map известен.
-        self._depth1_section_ids_explicit = frozenset(depth1_section_ids or [])
-        self._depth1_section_ids: frozenset[str] = self._depth1_section_ids_explicit
-        self._auto_depth1_threshold = auto_depth1_children_threshold
 
     async def ensure_collection(self) -> None:
         """Создать коллекцию для карт если не существует."""
@@ -228,20 +185,6 @@ class KnowledgeMapGenerator:
                 if parent_id in all_ids:
                     children_map[parent_id].append(doc)
 
-        # Эффективный depth1_section_ids: явно перечисленные + auto-detected по
-        # порогу количества детей. Auto-добавление логируется (видно в логе какие
-        # секции свернулись, по сколько детей у каждой).
-        effective = set(self._depth1_section_ids_explicit)
-        if self._auto_depth1_threshold is not None:
-            for pid, kids in children_map.items():
-                if len(kids) > self._auto_depth1_threshold and pid not in effective:
-                    effective.add(pid)
-                    logger.info(
-                        'KnowledgeMap auto-depth1: %s (%d children > threshold %d)',
-                        pid, len(kids), self._auto_depth1_threshold,
-                    )
-        self._depth1_section_ids = frozenset(effective)
-
         # Корни: из конфига (ancestor_ids) или по отсутствию parent
         if root_ids:
             roots = [doc for doc in all_docs if doc.id in root_ids]
@@ -273,20 +216,12 @@ class KnowledgeMapGenerator:
             ]
 
         logger.info(
-            'KnowledgeMap: %d docs, %d roots, depth=%d, max_depth=%s',
-            len(all_docs), len(roots), self._depth, self._max_depth,
+            'KnowledgeMap: %d docs, %d roots, strategy=%s',
+            len(all_docs), len(roots), self._prompt_strategy,
         )
 
         maps: dict[str, str] = {}
-
-        if self._prompt_strategy != 'weighted':
-            # fixed: генерируем карты узлов (для описаний в промпте)
-            await asyncio.gather(
-                *(self._generate_for_node(root, children_map, maps, depth=0) for root in roots),
-            )
-
-        # Собираем системный промпт
-        system_prompt = await self._build_system_prompt_tree(roots, children_map, maps)
+        system_prompt = await self._build_weighted_prompt(roots, children_map, maps)
         maps['_system_prompt'] = system_prompt
         logger.info(
             'KnowledgeMap: system prompt built (%d chars, %d tok)',
@@ -298,89 +233,6 @@ class KnowledgeMapGenerator:
 
         logger.info('KnowledgeMap: generated %d maps + system prompt', len(maps) - 1)
         return maps
-
-    async def _generate_for_node(
-        self,
-        doc: Document,
-        children_map: dict[str, list[Document]],
-        maps: dict[str, str],
-        depth: int,
-    ) -> str:
-        """Сгенерировать карту для узла.
-
-        Стратегия: собираем сырую карту из doc_summary всех потомков с h-заголовками.
-        Если влезает в контекст LLM — один вызов (LLM видит всю картину).
-        Если нет — fallback на пакетное обобщение (матрёшка).
-        """
-        children = children_map.get(doc.id, [])
-
-        # Лист, достигли max_depth, или shallow-раздел — возвращаем doc_summary
-        if (not children
-                or (self._max_depth is not None and depth >= self._max_depth)
-                or doc.id in self._depth1_section_ids):
-            summary = doc.payload.get('doc_summary', '')
-            title = _node_title(doc)
-            return f'{title} (id: {doc.id}): {summary}' if summary else ''
-
-        title = _node_title(doc)
-        prompt_overhead = self._counter.count(
-            _MAP_PROMPT.format(section_title='', children_summaries=''),
-        )
-        available = self._llm_client.context_window - prompt_overhead - self._node_max_tokens
-
-        # Собираем сырую карту: h-заголовки + doc_summary всех потомков рекурсивно
-        raw_lines: list[str] = []
-        self._build_raw_map(children, children_map, raw_lines, heading_level=2)
-        raw_map = '\n'.join(raw_lines)
-        raw_tokens = self._counter.count(raw_map)
-
-        if raw_tokens <= available:
-            # Влезает — один LLM-вызов, LLM видит всю картину
-            logger.debug('KnowledgeMap: node %s — raw map %d tok, single call', doc.id, raw_tokens)
-            accumulated = await self._summarize_batch(title, raw_map, max_tokens=None)
-        else:
-            # Не влезает — fallback на пакетное обобщение
-            logger.info(
-                'KnowledgeMap: node %s — raw map %d tok > %d available, using batched fallback',
-                doc.id, raw_tokens, available,
-            )
-            # Сначала обобщаем подуровни параллельно (матрёшка)
-            results = await asyncio.gather(
-                *(self._generate_for_node(child, children_map, maps, depth + 1)
-                  for child in children),
-            )
-            children_texts = [r for r in results if r]
-
-            accumulated = ''
-            batch: list[str] = []
-            batch_tokens = 0
-
-            for child_text in children_texts:
-                child_tokens = self._counter.count(child_text)
-                acc_tokens = self._counter.count(accumulated) if accumulated else 0
-
-                if batch and acc_tokens + batch_tokens + child_tokens > available:
-                    batch_text = (accumulated + '\n\n' + '\n\n'.join(batch)
-                                  if accumulated else '\n\n'.join(batch))
-                    accumulated = await self._summarize_batch(title, batch_text)
-                    batch = []
-                    batch_tokens = 0
-
-                batch.append(child_text)
-                batch_tokens += child_tokens
-
-            if batch:
-                batch_text = (accumulated + '\n\n' + '\n\n'.join(batch)
-                              if accumulated else '\n\n'.join(batch))
-                accumulated = await self._summarize_batch(title, batch_text)
-
-        if accumulated:
-            map_text = f'# {title} (id: {doc.id})\n\n{accumulated}'
-            maps[doc.id] = map_text
-            logger.info('KnowledgeMap: generated map for %s (%d chars)', doc.id, len(map_text))
-            return map_text
-
-        return doc.payload.get('doc_summary', '')
 
     def _build_raw_map(
         self,
@@ -448,9 +300,10 @@ class KnowledgeMapGenerator:
         return accumulated
 
     async def _summarize_batch(
-        self, title: str, summaries: str, max_tokens: int | None = None,
+        self, title: str, summaries: str, max_tokens: int,
     ) -> str:
-        """Обобщить пакет summary через LLM."""
+        """Обобщить пакет summary через LLM. max_tokens — guard rail, не cap;
+        результат, при необходимости, доужимается через _compact_until_fits."""
         async with self._sem:
             prompt = _MAP_PROMPT.format(
                 section_title=title,
@@ -459,7 +312,7 @@ class KnowledgeMapGenerator:
             try:
                 result = await self._llm_client.complete(
                     [{'role': 'user', 'content': prompt}],
-                    max_tokens=max_tokens if max_tokens is not None else self._node_max_tokens,
+                    max_tokens=max_tokens,
                     params=GenerationParams(enable_thinking=False),
                 )
                 return result.strip()
@@ -505,375 +358,362 @@ class KnowledgeMapGenerator:
             return f'**Источник: {kind_display} «{name}»**'
         return f'**Источник: {kind_display}**'
 
-    async def _build_system_prompt_tree(
-        self,
-        roots: list[Document],
-        children_map: dict[str, list[Document]],
-        maps: dict[str, str],
-    ) -> str:
-        """Программная сборка системного промпта.
-
-        Структура точная из Qdrant: # корень → ## подраздел → ### подподраздел.
-        Описания — doc_summary или LLM-обобщение, ужатые в бюджет.
-        """
-        if self._prompt_strategy == 'weighted':
-            return await self._build_weighted_prompt(roots, children_map, maps)
-
-        # fixed strategy
-        lines: list[str] = ['# Карта документации\n']
-        groups = self._group_roots_by_source(roots)
-        multi_source = len(groups) > 1
-        for key, group_roots in groups:
-            if multi_source:
-                lines.append(self._format_source_header(key))
-                lines.append('')
-            for root in group_roots:
-                await self._append_node_to_prompt(
-                    root, children_map, maps, lines, heading_level=1, parent=None,
-                )
-
-        result = '\n'.join(lines)
-        result_tokens = self._counter.count(result)
-        logger.info(
-            'KnowledgeMap: system prompt %d tok (fixed, %d source group(s))',
-            result_tokens, len(groups),
-        )
-        return result
-
     async def _build_weighted_prompt(
         self,
         roots: list[Document],
         children_map: dict[str, list[Document]],
         maps: dict[str, str],
     ) -> str:
-        """Weighted стратегия: общий бюджет распределяется по потомкам.
+        """Adaptive weighted-стратегия (top-down budget propagation).
 
-        Корни получают минимум (описаны через детей).
-        Средний уровень — максимум, пропорционально числу скрытых потомков.
+        KM нужна агенту как навигационная карта. Хотим, чтобы крупные ветки
+        получали больше места и разворачивались с подсекциями, а мелкие — шли
+        строкой перечня. Решение «отдельный раздел или строка» — per-child по
+        бюджету, без ручных списков.
+
+        Алгоритм:
+          1. Вес узла = сумма токенов doc_summary всех потомков (+ самого).
+          2. Виртуальный root распределяет `prompt_budget` по группам
+             (source_kind, source_name) пропорционально весам.
+          3. Внутри узла: per-child пропорциональный бюджет от веса. Если
+             ребёнку достаётся ≥ node_min_tokens — он становится отдельным
+             разделом (`### Header + абзац + рекурсия`), иначе уходит в
+             перечень одной строкой `- Имя (id) — короткий хинт`.
+          4. Глубина зафиксирована = _KM_MAX_DEPTH=2. На depth=2 узел всегда
+             в collapse-режиме (один summary subtree, дети не разворачиваются).
+          5. Сжатие — через _compact_until_fits: LLM рекурсивно ужимает с
+             варьируемой формулировкой, никаких truncate'ов.
         """
-        # 1. Собираем все узлы которые попадут в промпт с числом потомков
-        nodes: list[tuple[Document, int, int]] = []  # (doc, heading_level, descendant_count)
-        self._collect_prompt_nodes(roots, children_map, nodes, heading_level=1)
+        weights = self._compute_summary_weights(roots, children_map)
 
-        # 2. Считаем overhead заголовков (плейсхолдеры)
-        heading_overhead = sum(
-            self._counter.count(
-                '#' * min(hl + 1, 4) + ' '
-                + _node_title(doc)
-                + f' (id: {doc.id})\n',
-            )
-            for doc, hl, _ in nodes
-        )
-        header_line = self._counter.count('# Карта документации\n\n')
-        available = self._prompt_budget - heading_overhead - header_line
-
-        if available <= 0:
-            logger.warning('KnowledgeMap: no budget for descriptions (%d overhead)', heading_overhead)
-            available = 100
-
-        # 3. Распределяем бюджет
-        #    Корни с потомками — 0 (описаны через детей)
-        #    Корни без потомков (leaf roots) — получают бюджет как обычные узлы
-        #    Остальные — пропорционально числу потомков
-        budgeted_nodes = [
-            (doc, hl, dc) for doc, hl, dc in nodes
-            if hl > 1 or not children_map.get(doc.id) or doc.id in self._depth1_section_ids
-        ]
-        total_weight = sum(dc + 1 for _, _, dc in budgeted_nodes) or 1
-
-        budgets: dict[str, int] = {}
-        for doc, hl, dc in nodes:
-            has_children = bool(children_map.get(doc.id))
-            is_depth1 = doc.id in self._depth1_section_ids
-            if hl == 1 and has_children and not is_depth1:
-                budgets[doc.id] = 0  # корни с потомками — без описания (дети опишут)
-            else:
-                weight = dc + 1
-                budgets[doc.id] = max(self._node_min_tokens, available * weight // total_weight)
-
-        logger.info(
-            'KnowledgeMap: weighted budget: %d nodes (%d non-root), %d available tok, '
-            'total_weight=%d',
-            len(nodes), len(budgeted_nodes), available, total_weight,
-        )
-
-        # 4. Собираем промпт с бюджетами
-        lines: list[str] = ['# Карта документации\n']
         groups = self._group_roots_by_source(roots)
         multi_source = len(groups) > 1
+
+        # Бюджет заголовка карты + опциональных source-разделителей
+        overhead = self._counter.count('# Карта документации\n\n')
+        if multi_source:
+            overhead += sum(
+                self._counter.count(self._format_source_header(k) + '\n\n')
+                for k, _ in groups
+            )
+        available = max(self._prompt_budget - overhead, self._node_min_tokens)
+
+        total_w = sum(weights[r.id] for r in roots) or 1
+
+        lines: list[str] = ['# Карта документации\n']
         for key, group_roots in groups:
             if multi_source:
                 lines.append(self._format_source_header(key))
                 lines.append('')
+            group_w = sum(weights[r.id] for r in group_roots) or 1
+            group_budget = available * group_w // total_w
             for root in group_roots:
-                await self._append_node_weighted(
-                    root, children_map, maps, lines,
-                    heading_level=1, budgets=budgets, parent=None,
+                root_budget = max(
+                    group_budget * weights[root.id] // group_w,
+                    self._node_min_tokens,
                 )
+                logger.info(
+                    'KnowledgeMap: root %s weight=%d budget=%d',
+                    root.id, weights[root.id], root_budget,
+                )
+                text = await self._render_node(
+                    root, root_budget, depth=1,
+                    children_map=children_map, weights=weights,
+                )
+                lines.append(text)
 
         result = '\n'.join(lines)
         result_tokens = self._counter.count(result)
         logger.info(
-            'KnowledgeMap: system prompt %d tok (weighted, %d source group(s))',
+            'KnowledgeMap: system prompt %d tok (adaptive, %d source group(s))',
             result_tokens, len(groups),
         )
         return result
 
-    def _collect_prompt_nodes(
-        self,
-        docs: list[Document],
-        children_map: dict[str, list[Document]],
-        nodes: list[tuple[Document, int, int]],
-        heading_level: int,
-    ) -> None:
-        """Собрать узлы для промпта с числом всех потомков (рекурсивно)."""
-        for doc in docs:
-            dc = self._count_all_descendants(doc.id, children_map)
-            nodes.append((doc, heading_level, dc))
-            if doc.id in self._depth1_section_ids:
-                children_count = len(children_map.get(doc.id, []))
-                logger.info(
-                    'depth1_section_ids: skipping children of %s (%s), '
-                    '%d direct children not expanded',
-                    doc.id, _node_title(doc), children_count,
-                )
-                continue
-            if doc.id not in self._depth1_section_ids:
-                children = children_map.get(doc.id, [])
-                if children and heading_level < self._depth:
-                    self._collect_prompt_nodes(children, children_map, nodes, heading_level + 1)
-
-    def _count_all_descendants(
-        self, doc_id: str, children_map: dict[str, list[Document]],
-    ) -> int:
-        """Посчитать всех потомков рекурсивно (не только прямых)."""
-        children = children_map.get(doc_id, [])
-        count = len(children)
-        for child in children:
-            count += self._count_all_descendants(child.id, children_map)
-        return count
-
-    async def _append_node_weighted(
-        self,
-        doc: Document,
-        children_map: dict[str, list[Document]],
-        maps: dict[str, str],
-        lines: list[str],
-        heading_level: int,
-        budgets: dict[str, int],
-        parent: Document | None = None,
-    ) -> None:
-        """Добавить узел с описанием в рамках выделенного бюджета.
-
-        Для средних узлов (с потомками): собираем raw map из doc_summary потомков,
-        LLM обобщает с max_tokens=budget. Без промежуточных карт.
-        """
-        title = _node_title(doc, parent)
-        prefix = '#' * min(heading_level + 1, 4)
-        budget = budgets.get(doc.id, 0)
-
-        children = children_map.get(doc.id, [])
-
-        if budget > 0 and children:
-            # Средний узел: собираем raw map потомков → LLM обобщает.
-            raw_lines: list[str] = []
-            self._build_raw_map(children, children_map, raw_lines, heading_level=2)
-            raw_map = '\n'.join(raw_lines)
-            # Guard против 400/CUDA-OOM от модели: raw_map не должен превышать
-            # context_window минус output_budget. Если raw_map влезает — один
-            # вызов; если нет — iterative_summarize пакетами (накопитель +
-            # батч → summary → новый накопитель). См. инцидент 2026-05
-            # (cudaErrorLaunchFailure на ~60К input).
-            input_budget = self._llm_client.context_window - 500 - budget
-            raw_tokens = self._counter.count(raw_map)
-            if raw_tokens <= input_budget or input_budget <= 0:
-                description = await self._summarize_batch(title, raw_map, max_tokens=budget)
-            else:
-                logger.info(
-                    'KnowledgeMap: weighted node %s — raw map %d tok > input_budget %d, batched',
-                    doc.id, raw_tokens, input_budget,
-                )
-                description = await self._iterative_summarize(
-                    title, raw_lines, input_budget, budget,
-                )
-        elif budget > 0:
-            # Лист: doc_summary, при необходимости сжимаем
-            description = doc.payload.get('doc_summary', '')
-            if description and self._counter.count(description) > budget:
-                description = await self._compact_description(title, description, max_tokens=budget)
-        else:
-            description = ''
-
-        if budget > 0 and description:
-            desc_tokens = self._counter.count(description)
-            if desc_tokens > budget:
-                description = await self._compact_description(title, description, max_tokens=budget)
-
-            lines.append(f'{prefix} {title} (id: {doc.id})')
-            lines.append(f'{description}\n')
-        else:
-            lines.append(f'{prefix} {title} (id: {doc.id})\n')
-
-        if doc.id not in self._depth1_section_ids:
-            children = children_map.get(doc.id, [])
-            if children and heading_level < self._depth:
-                for child in children:
-                    await self._append_node_weighted(
-                        child, children_map, maps, lines,
-                        heading_level + 1, budgets=budgets, parent=doc,
-                    )
-
-    async def _append_node_to_prompt(
-        self,
-        doc: Document,
-        children_map: dict[str, list[Document]],
-        maps: dict[str, str],
-        lines: list[str],
-        heading_level: int,
-        parent: Document | None = None,
-    ) -> None:
-        """Добавить узел в системный промпт."""
-        title = _node_title(doc, parent)
-        prefix = '#' * min(heading_level + 1, 4)
-
-        # Описание: из карты (LLM-обобщение) или doc_summary
-        map_text = maps.get(doc.id, '')
-        if map_text:
-            description = self._extract_description(map_text)
-        else:
-            description = doc.payload.get('doc_summary', '')
-
-        # Ужать если превышает max_tokens
-        if description:
-            desc_tokens = self._counter.count(description)
-            if desc_tokens > self._node_max_tokens:
-                description = await self._compact_description(title, description)
-
-            lines.append(f'{prefix} {title} (id: {doc.id})')
-            lines.append(f'{description}\n')
-        else:
-            lines.append(f'{prefix} {title} (id: {doc.id})\n')
-
-        if doc.id not in self._depth1_section_ids:
-            children = children_map.get(doc.id, [])
-            if children and heading_level < self._depth:
-                for child in children:
-                    await self._append_node_to_prompt(
-                        child, children_map, maps, lines, heading_level + 1, parent=doc,
-                    )
-
-    def _append_node(
-        self,
-        doc: Document,
-        children_map: dict[str, list[Document]],
-        maps: dict[str, str],
-        lines: list[str],
-        heading_level: int,
-    ) -> None:
-        """Рекурсивно добавить узел в системный промпт с правильным уровнем заголовка."""
-        title = _node_title(doc)
-        prefix = '#' * min(heading_level + 1, 4)  # ## для корней, ### для детей, #### для внуков
-
-        # Описание узла: берём из карты (LLM-обобщение) или doc_summary
-        map_text = maps.get(doc.id, '')
-        if map_text:
-            # Извлекаем только описание (без заголовка карты — он дублируется)
-            description = self._extract_description(map_text)
-        else:
-            description = doc.payload.get('doc_summary', '')
-
-        if description:
-            lines.append(f'{prefix} {title} (id: {doc.id})')
-            lines.append(f'{description}\n')
-
-        # Рекурсия по потомкам (до depth уровней в промпте)
-        children = children_map.get(doc.id, [])
-        if children and heading_level < self._depth:
-            for child in children:
-                self._append_node(child, children_map, maps, lines, heading_level + 1)
-
-    async def _compact_description(
-        self, title: str, description: str, max_tokens: int | None = None,
-    ) -> str:
-        """LLM ужимает описание узла, сохраняя суть."""
-        budget = max_tokens or self._node_max_tokens
-        async with self._sem:
-            prompt = (
-                f'Сожми описание раздела "{title}", сохранив максимум деталей. '
-                f'Несколько предложений. Отвечай на языке оригинала.\n\n{description}'
-            )
-            try:
-                result = await self._llm_client.complete(
-                    [{'role': 'user', 'content': prompt}],
-                    max_tokens=budget,
-                    params=GenerationParams(enable_thinking=False),
-                )
-                return result.strip()
-            except Exception:
-                logger.warning('KnowledgeMap: compact failed for %s, keeping first sentence', title)
-                # Fallback: первое предложение
-                for sep in ['. ', '.\n']:
-                    idx = description.find(sep)
-                    if idx > 0:
-                        return description[:idx + 1]
-                return description
-
-    @staticmethod
-    def _extract_description(map_text: str) -> str:
-        """Извлечь описание из карты, убрав все markdown заголовки.
-
-        Структура задаётся программно, а не LLM — заголовки из карты не нужны.
-        """
-        lines = map_text.strip().split('\n')
-        result = [line for line in lines if not line.startswith('#')]
-        return '\n'.join(result).strip()
-
-    async def _compact_prompt(
+    def _compute_summary_weights(
         self,
         roots: list[Document],
         children_map: dict[str, list[Document]],
-        maps: dict[str, str],
+    ) -> dict[str, int]:
+        """Вес узла = tokens(doc_summary) + Σ весов потомков. Минимум 1, чтобы
+        пустые узлы не делали распределение нулевым."""
+        weights: dict[str, int] = {}
+
+        def walk(doc: Document) -> int:
+            if doc.id in weights:
+                return weights[doc.id]
+            text = doc.payload.get('doc_summary', '') or _node_title(doc)
+            own = max(self._counter.count(text), 1)
+            for child in children_map.get(doc.id, []):
+                own += walk(child)
+            weights[doc.id] = own
+            return own
+
+        for r in roots:
+            walk(r)
+        return weights
+
+    async def _render_node(
+        self,
+        doc: Document,
+        budget: int,
+        depth: int,
+        children_map: dict[str, list[Document]],
+        weights: dict[str, int],
     ) -> str:
-        """Ужать системный промпт по слоям, сохраняя структуру.
+        """Диспетчер. На максимальной глубине / для листа — collapse. Иначе —
+        expandable, где per-child решается «отдельный раздел или строка перечня»."""
+        children = children_map.get(doc.id, [])
+        if depth >= _KM_MAX_DEPTH or not children:
+            return await self._render_collapse(doc, budget, depth, children_map)
+        return await self._render_expandable(doc, budget, depth, children_map, weights)
 
-        Для каждого корня: собрать его часть дерева → если > max_tokens/2 → LLM ужимает
-        до max_tokens/2, сохраняя заголовки и id.
+    async def _render_expandable(
+        self,
+        doc: Document,
+        budget: int,
+        depth: int,
+        children_map: dict[str, list[Document]],
+        weights: dict[str, int],
+    ) -> str:
+        """## Header + self-summary + микс развёрнутых разделов и brief-listing.
+
+        Per-child решение по предварительному бюджету (пропорционально весу):
+          - если ≥ _KM_BRIEF_LINE_TOKENS → разворачивается в свой раздел
+          - если меньше → попадает в перечень `- Title (id) — short hint`
+        Точный бюджет distribute'ится между big-разделами уже после учёта
+        overhead'ов заголовков и строк listing'а.
         """
-        half_budget = self._node_max_tokens // 2
-        budget_per_root = max(half_budget // len(roots), 256) if roots else half_budget
+        children = children_map[doc.id]
 
-        compacted_parts: list[str] = []
-        for root in roots:
-            lines: list[str] = []
-            self._append_node(root, children_map, maps, lines, heading_level=1)
-            root_text = '\n'.join(lines)
-            root_tokens = self._counter.count(root_text)
+        # Header + строки listing'а — фиксированный overhead (точная оценка по токенизатору)
+        header_overhead = self._counter.count(f'{"#" * min(depth + 1, 4)} {_node_title(doc)} (id: {doc.id})\n\n')
 
-            if root_tokens > budget_per_root:
-                logger.info(
-                    'KnowledgeMap: compacting root %s (%d tok → %d budget)',
-                    root.id, root_tokens, budget_per_root,
-                )
-                root_text = await self._compact_layer(root_text, budget_per_root)
+        # 1. Provisional распределение между всеми детьми по весу
+        total_w = sum(weights[c.id] for c in children) or 1
+        provisional = {c.id: budget * weights[c.id] // total_w for c in children}
 
-            compacted_parts.append(root_text)
+        # 2. Per-child big/brief. Порог — node_min_tokens: если ребёнку не
+        # хватает даже на «минимально содержательный» абзац, ему нет смысла
+        # быть отдельным разделом, идёт в перечень одной строкой.
+        section_min = self._node_min_tokens
+        big_children = [c for c in children if provisional[c.id] >= section_min]
+        brief_children = [c for c in children if provisional[c.id] < section_min]
 
-        return '# Карта документации\n\n' + '\n\n'.join(compacted_parts)
+        # 3. Точный overhead и self-summary budget
+        brief_overhead = len(brief_children) * _KM_BRIEF_LINE_TOKENS
+        big_headers_overhead = len(big_children) * header_overhead
+        # self-summary — фиксированная доля либо node_min_tokens (минимум на содержательный self).
+        # Если big_children пустой — всё содержимое идёт в self-summary (узел с большим self + brief listing).
+        self_budget = max(budget // (len(big_children) + 2), self._node_min_tokens)
 
-    async def _compact_layer(self, layer_text: str, target_tokens: int) -> str:
-        """LLM ужимает слой до target_tokens, сохраняя структуру."""
+        # 4. Бюджет на тела big-разделов = всё, что осталось после overheads
+        big_pool = budget - header_overhead - self_budget - brief_overhead - big_headers_overhead
+        if big_pool < 0:
+            big_pool = 0
+
+        # 5. Распределяем big_pool между big_children по весу
+        big_total_w = sum(weights[c.id] for c in big_children) or 1
+        big_budgets = {
+            c.id: max(big_pool * weights[c.id] // big_total_w, self._node_min_tokens)
+            for c in big_children
+        }
+
+        # 6. Рендер. Self + big — параллельно. Brief — параллельно отдельной группой.
+        title = _node_title(doc)
+
+        async def render_big(c: Document) -> str:
+            return await self._render_node(c, big_budgets[c.id], depth + 1, children_map, weights)
+
+        async def render_brief_line(c: Document) -> str:
+            ctitle = _node_title(c)
+            prefix_tokens = self._counter.count(f'- {ctitle} (id: {c.id}) — ')
+            # На сам hint остаётся _KM_BRIEF_LINE_TOKENS - prefix
+            hint_budget = max(_KM_BRIEF_LINE_TOKENS - prefix_tokens, 6)
+            text = c.payload.get('doc_summary', '') or ''
+            if not text:
+                return f'- {ctitle} (id: {c.id})'
+            hint = await self._compact_until_fits(ctitle, text, hint_budget)
+            return f'- {ctitle} (id: {c.id}) — {hint}' if hint else f'- {ctitle} (id: {c.id})'
+
+        self_text, big_texts, brief_lines = await asyncio.gather(
+            self._compact_until_fits(title, doc.payload.get('doc_summary', '') or '', self_budget),
+            asyncio.gather(*(render_big(c) for c in big_children)),
+            asyncio.gather(*(render_brief_line(c) for c in brief_children)),
+        )
+
+        prefix = '#' * min(depth + 1, 4)
+        parts = [f'{prefix} {title} (id: {doc.id})', '']
+        if self_text:
+            parts.extend([self_text, ''])
+        parts.extend(big_texts)
+        if brief_lines:
+            parts.extend(brief_lines)
+            parts.append('')
+        return '\n'.join(parts).rstrip() + '\n'
+
+    async def _render_collapse(
+        self,
+        doc: Document,
+        budget: int,
+        depth: int,
+        children_map: dict[str, list[Document]],
+    ) -> str:
+        """## Header + один summary, покрывающий узел и весь subtree.
+
+        Используется для листьев и для узлов на максимальной глубине.
+        Никаких truncate'ов — только LLM-обобщение с recompact-петлёй.
+        """
+        children = children_map.get(doc.id, [])
+        prefix = '#' * min(depth + 1, 4)
+        title = _node_title(doc)
+
+        if not children:
+            desc = await self._compact_until_fits(
+                title, doc.payload.get('doc_summary', '') or '', budget,
+            )
+            parts = [f'{prefix} {title} (id: {doc.id})', '']
+            if desc:
+                parts.extend([desc, ''])
+            return '\n'.join(parts)
+
+        # raw_map = doc_summary всех потомков, LLM обобщает в budget токенов.
+        raw_lines: list[str] = []
+        self._build_raw_map(children, children_map, raw_lines, heading_level=2)
+        raw_map = '\n'.join(raw_lines)
+
+        # max_tokens здесь — НЕ cap на размер summary, а либеральный guard
+        # против runaway-генерации. LLM может выдать больше budget; за этим
+        # пойдёт _compact_until_fits, который через recompact-петлю сожмёт
+        # без обрезок.
+        liberal_max = max(int(budget * 1.5) + 64, 256)
+        input_budget = self._llm_client.context_window - 500 - liberal_max
+        raw_tokens = self._counter.count(raw_map)
+        if raw_tokens <= input_budget or input_budget <= 0:
+            description = await self._summarize_batch(title, raw_map, max_tokens=liberal_max)
+        else:
+            logger.info(
+                'KnowledgeMap: collapse %s — raw %d tok > %d available, batched',
+                doc.id, raw_tokens, input_budget,
+            )
+            description = await self._iterative_summarize(
+                title, raw_lines, input_budget, liberal_max,
+            )
+        # _summarize_batch с liberal_max почти всегда выдаст больше budget —
+        # рекурсивно сжимаем через LLM до точного укладывания.
+        description = await self._compact_until_fits(title, description, budget)
+
+        parts = [f'{prefix} {title} (id: {doc.id})', '']
+        if description:
+            parts.extend([description, ''])
+        return '\n'.join(parts)
+
+    async def _compact_until_fits(
+        self, title: str, text: str, target_tokens: int, max_iters: int = 4,
+    ) -> str:
+        """Сжать text до target_tokens через LLM. Никаких truncate'ов.
+
+        Принцип:
+          - Если текст уже ≤ target — возвращаем как есть.
+          - Иначе LLM сжимает с формулировкой, варьируемой по итерации
+            («вдвое короче» → «всё ещё длинно» → «оставь только главное» → …).
+          - max_tokens в API ставим либерально — это техническая защита от
+            runaway, а не cap на результат (иначе LLM режет на середине).
+          - Если LLM не уложился — повтор с более жёсткой просьбой, пока
+            (а) уложимся, (б) max_iters, (в) прогресса больше нет.
+          - В корнере (LLM упёрся): возвращаем последний результат как есть —
+            переборщить на N токенов лучше, чем потерять смысл обрезкой.
+        """
+        text = (text or '').strip()
+        if not text:
+            return ''
+        current = self._counter.count(text)
+        if current <= target_tokens:
+            return text
+
+        # Идём по всем итерациям до max_iters — каждая итерация использует
+        # ДРУГУЮ формулировку promtа. Прерываемся только если последовательно
+        # 2 итерации подряд не дали прогресса (упёрлись).
+        stuck = 0
+        best_text = text
+        best_tokens = current
+        for iter_idx in range(max_iters):
+            new_text = await self._llm_compact_to_target(
+                title, text, target_tokens, current, iter_idx,
+            )
+            new_tokens = self._counter.count(new_text)
+            if new_tokens <= target_tokens:
+                return new_text
+            if new_tokens < best_tokens:
+                best_text, best_tokens = new_text, new_tokens
+            if new_tokens >= int(current * 0.95):
+                stuck += 1
+                if stuck >= 2:
+                    logger.warning(
+                        'KnowledgeMap: compact_until_fits «%s» не сходится '
+                        '(%d → %d ток, цель %d, итер %d). Возвращаю наименьший.',
+                        title, current, best_tokens, target_tokens, iter_idx,
+                    )
+                    return best_text
+                # текст не меняем — пробуем другую формулировку на тех же данных
+                continue
+            stuck = 0
+            text, current = new_text, new_tokens
+        return best_text
+
+    async def _llm_compact_to_target(
+        self,
+        title: str,
+        text: str,
+        target_tokens: int,
+        current_tokens: int,
+        iter_idx: int,
+    ) -> str:
+        """Один LLM-вызов сжатия. Формулировка варьируется по итерации, чтобы
+        LLM попробовал разные стратегии. max_tokens — не cap, а guard rail."""
+        ratio = max(current_tokens / max(target_tokens, 1), 1.3)
+        ratio_word = _ratio_in_words(ratio)
+        if iter_idx == 0:
+            instruction = (
+                f'Сожми описание раздела «{title}» {ratio_word} короче, '
+                f'не теряя ключевых тем и сути.'
+            )
+        elif iter_idx == 1:
+            instruction = (
+                f'Описание раздела «{title}» всё ещё слишком длинное. '
+                f'Перепиши его ещё вдвое короче, оставляя ключевые темы.'
+            )
+        elif iter_idx == 2:
+            instruction = (
+                f'Описание раздела «{title}» нужно ещё сократить. '
+                f'Оставь только главное — 2–3 предложения о том, что в разделе.'
+            )
+        else:
+            instruction = (
+                f'Финальная попытка: опиши раздел «{title}» одним связным '
+                f'абзацем длиной примерно {target_tokens} токенов. '
+                f'Любые подробности можно опустить, но смысл сохрани.'
+            )
+
+        prompt = (
+            f'{instruction} Уложись примерно в {target_tokens} токенов. '
+            f'Закончи законченным предложением. Без markdown-заголовков. '
+            f'Отвечай на языке оригинала.\n\n{text}'
+        )
+        # Либеральный max_tokens: даём LLM свободу нормально закончить мысль.
+        # Если он выйдет за target — следующая итерация recompact'нёт. Не cap.
+        max_tokens = max(int(target_tokens * 2) + 64, 256)
         async with self._sem:
-            prompt = _COMPACT_PROMPT.format(layer_text=layer_text)
             try:
                 result = await self._llm_client.complete(
                     [{'role': 'user', 'content': prompt}],
-                    max_tokens=target_tokens,
+                    max_tokens=max_tokens,
                     params=GenerationParams(enable_thinking=False),
                 )
                 return result.strip()
             except Exception:
-                logger.exception('KnowledgeMap: compact failed, using truncated')
-                return self._counter.truncate(layer_text, target_tokens)
+                logger.exception('KnowledgeMap: compact LLM call failed for «%s»', title)
+                return text
 
     # ── flat_topics strategy ──────────────────────────────────────────────
 
