@@ -109,13 +109,11 @@ indexing:
   # Knowledge Map (карта документации, ADR-0010)
   knowledge_map:
     enabled: true
-    depth: 2                         # уровней в системном промпте
-    prompt_strategy: weighted        # 'fixed' | 'weighted' | 'flat_topics'
-    prompt_budget: 8192              # для weighted: общий бюджет токенов
-    node_min_tokens: 256             # для weighted: минимальный бюджет на узел
-    # node_max_tokens: 256           # для fixed: лимит на узел
-    # depth1_section_ids: ["12345"]  # разделы с depth=1: только сам раздел, без потомков
-    # flat_topics_target: 20         # целевое число тем (для plain-структуры)
+    prompt_strategy: weighted        # 'weighted' (adaptive, глубина=2) | 'flat_topics'
+    prompt_budget: 8192              # целевой размер system prompt в токенах
+    node_min_tokens: 256             # порог big-vs-brief: ниже — узел уходит в перечень одной строкой
+    # exclude_source_types: ['attached_jira', 'attached_pdf', 'jira']
+    # flat_topics_target: 20         # целевое число тем (для flat_topics)
     # flat_topics_assign_batch: 5
     # flat_topics_max_input_docs: 3000
 

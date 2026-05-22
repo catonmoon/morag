@@ -276,21 +276,20 @@ class ContextConfig(BaseModel):
 
 class KnowledgeMapConfig(BaseModel):
     enabled: bool = False
-    depth: int = 2
-    max_depth: int | None = None
     collection: str = 'knowledge_map'
-    prompt_strategy: str = 'fixed'
-    node_max_tokens: int = 256
-    node_min_tokens: int = 256
+    # Алгоритм построения промпта:
+    #   weighted    — adaptive: бюджет top-down пропорционально весам, per-child
+    #                 решение «отдельный раздел или строка перечня» по бюджету.
+    #                 Глубина зафиксирована = 2 (root → дети → стоп). Default.
+    #   flat_topics — LLM-кластеризация плоского списка документов в темы.
+    #                 Для источников без иерархии.
+    prompt_strategy: str = 'weighted'
+    # Целевой размер system prompt в токенах. Это «громкость» KM.
     prompt_budget: int = 8192
+    # Порог big-vs-brief: ребёнок с пропорциональным бюджетом < node_min_tokens
+    # уходит в строку перечня (`- Имя — хинт`), иначе — в отдельный раздел.
+    node_min_tokens: int = 256
     exclude_source_types: list[str] = ['attached_jira', 'attached_pdf']
-    depth1_section_ids: list[str] = []
-    # Автоматически добавлять в depth1 любой узел с числом прямых детей > threshold.
-    # None = выключено (только явно перечисленные depth1_section_ids).
-    # Полезно когда заранее не знаешь какие корни «крупные» — например свежий
-    # Confluence-source: после первой индексации видишь сколько у каждого корня
-    # детей и можешь поставить, скажем, 13.
-    auto_depth1_children_threshold: int | None = None
     flat_topics_target: int | None = None
     flat_topics_max_input_docs: int = 3000
     flat_topics_assign_batch: int = 5

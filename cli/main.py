@@ -683,9 +683,6 @@ async def cmd_index(
                 llm_client=llm_clients[role_mapping.name_for('knowledge_map')],
                 doc_repo=doc_repo,
                 collection=km_cfg.collection,
-                depth=km_cfg.depth,
-                max_depth=km_cfg.max_depth,
-                node_max_tokens=km_cfg.node_max_tokens,
                 node_min_tokens=km_cfg.node_min_tokens,
                 prompt_strategy=km_cfg.prompt_strategy,
                 prompt_budget=km_cfg.prompt_budget,
@@ -695,8 +692,6 @@ async def cmd_index(
                 concurrency=km_cfg.concurrency if km_cfg.concurrency is not None
                 else config.indexing.concurrency,
                 exclude_source_types=km_cfg.exclude_source_types,
-                depth1_section_ids=km_cfg.depth1_section_ids,
-                auto_depth1_children_threshold=km_cfg.auto_depth1_children_threshold,
                 flat_topics_target=km_cfg.flat_topics_target,
                 flat_topics_max_input_docs=km_cfg.flat_topics_max_input_docs,
                 flat_topics_assign_batch=km_cfg.flat_topics_assign_batch,
@@ -772,9 +767,6 @@ async def cmd_rebuild_km(
         llm_client=km_llm,
         doc_repo=doc_repo,
         collection=km_cfg.collection,
-        depth=km_cfg.depth,
-        max_depth=km_cfg.max_depth,
-        node_max_tokens=km_cfg.node_max_tokens,
         node_min_tokens=km_cfg.node_min_tokens,
         prompt_strategy=km_cfg.prompt_strategy,
         prompt_budget=km_cfg.prompt_budget,
@@ -786,8 +778,6 @@ async def cmd_rebuild_km(
         flat_topics_target=km_cfg.flat_topics_target,
         flat_topics_max_input_docs=km_cfg.flat_topics_max_input_docs,
         flat_topics_assign_batch=km_cfg.flat_topics_assign_batch,
-        depth1_section_ids=km_cfg.depth1_section_ids,
-        auto_depth1_children_threshold=km_cfg.auto_depth1_children_threshold,
     )
     # Roots — со всех Confluence-инстансов, prefix как в ID документов
     root_ids = set()
