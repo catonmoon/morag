@@ -177,7 +177,6 @@ class KnowledgeMapGenerator:
 
         # Построить дерево
         children_map = defaultdict(list)  # parent_id → [child_docs]
-        roots = []
         all_ids = {d.id for d in all_docs}
 
         for doc in all_docs:
@@ -220,9 +219,8 @@ class KnowledgeMapGenerator:
             len(all_docs), len(roots), self._prompt_strategy,
         )
 
-        maps: dict[str, str] = {}
-        system_prompt = await self._build_weighted_prompt(roots, children_map, maps)
-        maps['_system_prompt'] = system_prompt
+        system_prompt = await self._build_weighted_prompt(roots, children_map)
+        maps: dict[str, str] = {'_system_prompt': system_prompt}
         logger.info(
             'KnowledgeMap: system prompt built (%d chars, %d tok)',
             len(system_prompt), self._counter.count(system_prompt),
@@ -362,7 +360,6 @@ class KnowledgeMapGenerator:
         self,
         roots: list[Document],
         children_map: dict[str, list[Document]],
-        maps: dict[str, str],
     ) -> str:
         """Adaptive weighted-стратегия (top-down budget propagation).
 
