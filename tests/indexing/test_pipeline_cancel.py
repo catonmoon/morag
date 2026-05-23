@@ -46,6 +46,7 @@ def make_doc(doc_id: str, parent_doc_ids: list[str] | None = None) -> Document:
 def doc_repo() -> AsyncMock:
     mock = AsyncMock(spec=DocRepository)
     mock.get_ids_by_source_instance.return_value = set()
+    mock.get_payloads_by_ids.return_value = {}
     mock.get_by_id.return_value = None
     return mock
 
@@ -65,6 +66,9 @@ class FakeReporter:
 
     def start_phase(self, name: str, total: int) -> None:
         self.phases.append((name, total))
+
+    def set_predicted_real_total(self, value: int) -> None:
+        pass
 
     def document_start(self, doc_id: str, title: str | None = None, url: str | None = None) -> None:
         pass

@@ -1517,12 +1517,6 @@
                    :value="setup.retrieval.search.find_section.top_docs ?? ''"
                    @input="setup.retrieval.search.find_section.top_docs = $event.target.value === '' ? null : parseInt($event.target.value)">
           </div>
-          <div>
-            <label>Citation max chars</label>
-            <input type="number" min="100"
-                   :value="setup.retrieval.search.citation_max_chars ?? ''"
-                   @input="setup.retrieval.search.citation_max_chars = $event.target.value === '' ? null : parseInt($event.target.value)">
-          </div>
         </div>
 
         <h3 style="margin-top:1.2rem; margin-bottom:0.4rem; font-size:0.95rem">Прочее</h3>
@@ -1634,7 +1628,7 @@
             reranker: { llm: '', enable_thinking: null, temperature: null, max_tokens: null },
             search: {
               limit: null, unique_docs_cap: null, sections_limit: null,
-              max_iterations: null, citation_max_chars: null, answer_max_tokens: null,
+              max_iterations: null, answer_max_tokens: null,
               find_section: { doc_pool: null, descent_threshold: null, top_docs: null },
             },
             features: { enable_diversity_nudge: null },
@@ -2524,7 +2518,6 @@
               unique_docs_cap: search.unique_docs_cap ?? null,
               sections_limit: search.sections_limit ?? null,
               max_iterations: search.max_iterations ?? null,
-              citation_max_chars: search.citation_max_chars ?? null,
               answer_max_tokens: search.answer_max_tokens ?? null,
               find_section: {
                 doc_pool: fs.doc_pool ?? null,
@@ -2794,57 +2787,88 @@
         },
 
         etaText() {
-          // Адаптивный ETA на основе rolling 60-секундного окна completion-событий.
-          // Skip-документы (idempotency) и реально-обработанные считаются отдельно:
-          // для ETA используется только rate реального процессинга и проекция
-          // skip-ratio из недавнего окна. Это переживает skip-blast в начале
-          // обновления (rate=0 → ETA не отображается), а потом адаптируется
-          // под фактический режим работы.
+          // ETA на основе total-elapsed + processed_real, без экстраполяции
+          // skipRatio из rolling-окна. Прошлый skip-blast (idempotency) не
+          // предсказывает будущее — pipeline.run() pre-pass'ом считает точное
+          // число документов которые реально пройдут обработку, и кладёт в
+          // status как `predicted_real_total`. Если оно известно — используем
+          // его напрямую; иначе fallback на «остаток = total - processed»
+          // (старая логика, конкретно неточная для reindex'ов с 90% skip).
+          //
+          // min  = (predicted_real_remaining) / (processed_real / elapsed)
+          // max  = учёт тяжести in-flight через chunks (sum оставшихся +
+          //        non-started docs ≥ как in-flight в среднем по chunks).
+          // Если min≈max — точка, иначе — range.
           this._now_tick;  // зависимость от ежесекундного тика для пересчёта
           const p = this.status?.progress;
-          if (!p?.total || !p.processed) return '';
+          if (!p?.total) return '';
+          const startMs = p.started_at ? Date.parse(p.started_at) : NaN;
+          if (isNaN(startMs)) return '';
+          const elapsedSec = (Date.now() - startMs) / 1000;
+          if (elapsedSec < 30) return '';  // прогрев
 
-          const completions = p.recent_completions || [];
-          const now = Date.now();
-          const windowMs = 60_000;
-          const windowed = completions.filter(c => {
-            const ts = Date.parse(c.ts);
-            return !isNaN(ts) && (now - ts) <= windowMs;
-          });
-          if (windowed.length < 3) {
-            // Слишком мало данных — пока никакой оценки.
-            return '';
-          }
+          const real = p.processed_real ?? 0;
+          if (real < 2) return '';  // не на чем считать rate
 
-          const realInWindow = windowed.filter(c => c.kind === 'real').length;
-          const skipRatio = (windowed.length - realInWindow) / windowed.length;
-          if (realInWindow === 0) {
-            // Окно полностью skip — ETA непредсказуем (не знаем когда начнутся реальные).
-            return '';
-          }
-
-          const oldestTs = Date.parse(windowed[0].ts);
-          const newestTs = Date.parse(windowed[windowed.length - 1].ts);
-          const windowDurationSec = Math.max((newestTs - oldestTs) / 1000, 1);
-          const realRatePerSec = realInWindow / windowDurationSec;
+          const realRatePerSec = real / elapsedSec;
           if (realRatePerSec <= 0) return '';
 
-          const remaining = p.total - p.processed;
-          const remainingReal = remaining * (1 - skipRatio);
-          const etaSec = remainingReal / realRatePerSec;
-          if (!isFinite(etaSec) || etaSec < 0) return '';
-          return `ETA ~${formatDuration(etaSec)}`;
+          // Точный остаток real-docs из pre-pass. Если не известен —
+          // консервативный fallback (все оставшиеся docs).
+          let remainingReal;
+          if (typeof p.predicted_real_total === 'number') {
+            remainingReal = Math.max(0, p.predicted_real_total - real);
+          } else {
+            remainingReal = Math.max(0, p.total - p.processed);
+          }
+          if (remainingReal === 0) return '';
+
+          const etaMinSec = remainingReal / realRatePerSec;
+
+          // Pессимистичная оценка через chunks: суммируем оставшиеся chunks
+          // в in-flight + проецируем avg chunks/doc на ещё не стартовавшие.
+          const inFlight = p.current_docs || [];
+          let etaMaxSec = etaMinSec;
+          if (inFlight.length > 0) {
+            const totalChunksInFlight = inFlight.reduce((s, d) => s + (d.chunks_total || 0), 0);
+            if (totalChunksInFlight > 0) {
+              const avgChunksPerDoc = totalChunksInFlight / inFlight.length;
+              const remainingChunksInFlight = inFlight.reduce(
+                (s, d) => s + Math.max(0, (d.chunks_total || 0) - (d.chunks_done || 0)),
+                0,
+              );
+              const notStarted = Math.max(0, remainingReal - inFlight.length);
+              const remainingChunksEstimate = remainingChunksInFlight + notStarted * avgChunksPerDoc;
+              // chunks/sec ≈ realRate × avgChunksPerDoc (proxy: считаем что
+              // прошлые real-docs были в среднем такие же по чанкам).
+              const chunksPerSec = realRatePerSec * avgChunksPerDoc;
+              if (chunksPerSec > 0) {
+                etaMaxSec = Math.max(etaMinSec, remainingChunksEstimate / chunksPerSec);
+              }
+            }
+          }
+
+          if (!isFinite(etaMinSec) || etaMinSec < 0) return '';
+          // Если диапазон узкий (<20% разницы) — показываем точку.
+          if (etaMaxSec / etaMinSec < 1.2) {
+            return `ETA ~${formatDuration(etaMinSec)}`;
+          }
+          return `ETA ~${formatDuration(etaMinSec)}–${formatDuration(etaMaxSec)}`;
         },
 
         progressCountText() {
           // Главный счётчик прогресса. При наличии skip-ов показывает breakdown
-          // (real / skipped) — иначе плоский processed/total.
+          // (real / skipped) — иначе плоский processed/total. Если pre-pass
+          // дал предсказание `predicted_real_total` — указываем «~N» рядом.
           const p = this.status?.progress;
           if (!p) return '';
           const real = p.processed_real ?? p.processed;
           const skipped = (p.processed ?? 0) - real;
           if (skipped > 0) {
-            return `${p.processed}/${p.total} (real: ${real}, skipped: ${skipped})`;
+            const predicted = (typeof p.predicted_real_total === 'number')
+              ? ` / ~${p.predicted_real_total}`
+              : '';
+            return `${p.processed}/${p.total} (real: ${real}${predicted}, skipped: ${skipped})`;
           }
           return `${p.processed ?? 0}/${p.total ?? 0}`;
         },

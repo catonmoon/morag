@@ -10,9 +10,9 @@ import base64
 import json
 import logging
 import os
+import re
 from typing import Any, Coroutine, Dict, Generator, Iterator, List, TypeVar, Union
 
-from markdown_it import MarkdownIt
 from pydantic import BaseModel
 from qdrant_client import AsyncQdrantClient
 
@@ -80,7 +80,6 @@ def _try_load_config() -> Config | None:
         logger.warning('Failed to load config %s: %s — env-only mode', cfg_path, exc)
         return None
 
-_md = MarkdownIt()
 
 # ── Tool definitions (OpenAI function calling) ───────────────────────────────
 
@@ -326,7 +325,6 @@ def _init_valves_from_env() -> dict:
         'ENABLE_THINKING': _eb('ENABLE_THINKING'),
         'RERANK_ENABLE_THINKING': _eb('RERANK_ENABLE_THINKING'),
         'ENABLE_DIVERSITY_NUDGE': _eb('ENABLE_DIVERSITY_NUDGE'),
-        'CITATION_MAX_CHARS': _ei('CITATION_MAX_CHARS'),
         'HTTP_TIMEOUT': _ei('HTTP_TIMEOUT'),
         'ADMIN_INSTRUCTIONS': _e('ADMIN_INSTRUCTIONS'),
     }
@@ -485,10 +483,6 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
         'max_iterations': _int_or(
             v.MAX_ITERATIONS, search.max_iterations if search else None, default=9,
         ),
-        'citation_max_chars': _int_or(
-            v.CITATION_MAX_CHARS, search.citation_max_chars if search else None,
-            default=5000,
-        ),
         'enable_diversity_nudge': _bool_or(
             v.ENABLE_DIVERSITY_NUDGE,
             features.enable_diversity_nudge if features else None,
@@ -564,7 +558,6 @@ class Pipeline:
         ENABLE_THINKING: bool | None = None       # None = config; True/False = override agent thinking
         RERANK_ENABLE_THINKING: bool | None = None
         ENABLE_DIVERSITY_NUDGE: bool | None = None
-        CITATION_MAX_CHARS: int = 0
         HTTP_TIMEOUT: int = 0
         ADMIN_INSTRUCTIONS: str = ''
 
@@ -1281,7 +1274,8 @@ class Pipeline:
     # ── Citations ─────────────────────────────────────────────────────────────
 
     def _emit_grouped_sources(self, all_chunks: dict[str, dict]) -> Generator:
-        """Сгруппировать чанки по документу, объединить тексты, emit один citation на документ."""
+        """Сгруппировать чанки по документу, emit один citation на документ
+        с массивом чанков в `data.document` (каждый чанк — отдельный элемент)."""
         # Группировка по doc_id
         by_doc: dict[str, list[dict]] = {}
         for chunk in all_chunks.values():
@@ -1294,17 +1288,13 @@ class Pipeline:
             path = chunks[0]['path'][0] if chunks[0]['path'] else doc_id
             doc_name = self._get_doc_title(doc_id)
             url = chunks[0].get('url')
-            # Объединить тексты чанков (с разделителем), лимит по CITATION_MAX_CHARS
-            combined = '\n\n---\n\n'.join(c['text'] for c in chunks)
-            if len(combined) > self._s['citation_max_chars']:
-                combined = combined[:self._s['citation_max_chars']] + '...'
-            docs.append((path, doc_name, url, combined, doc_id))
+            docs.append((path, doc_name, url, chunks, doc_id))
 
         docs.sort(key=lambda d: d[0])
 
-        for path, doc_name, url, combined, doc_id in docs:
-            yield self._emit_source(
-                doc_name, combined, url,
+        for path, doc_name, url, chunks, doc_id in docs:
+            yield self._emit_source_multi(
+                doc_name, chunks, url,
                 source_id=doc_id,
                 number=self._doc_numbering.get(doc_id),
             )
@@ -1321,27 +1311,42 @@ class Pipeline:
         }
 
     @staticmethod
-    def _emit_source(
-        name: str, content: str, url: str | None = None, source_id: str | None = None,
-        number: int | None = None,
+    @staticmethod
+    def _emit_source_multi(
+        name: str, chunks: list[dict], url: str | None = None,
+        source_id: str | None = None, number: int | None = None,
     ) -> dict[str, Any]:
-        html_content = _md.render(content)
-        metadata: dict[str, Any] = {'source': source_id or name, 'name': name, 'html': True}
+        """Citation для документа с несколькими чанками — каждый чанк отдельный
+        элемент `data.document` (без склеивания и принудительной обрезки).
+        OWUI рендерит массив как развёрнутый список под одной карточкой источника.
+
+        Отдаём raw markdown (без `html: True`). OWUI sanitize'ит даже inline
+        `style` атрибуты, поэтому HTML с темо-нейтральными стилями не работает.
+        Plain markdown отображается как сырой текст («## H», «| col |»), но
+        читаем в любой теме — что приоритетнее форматирования."""
+        documents: list[str] = []
+        metadata_list: list[dict[str, Any]] = []
+        for c in chunks:
+            documents.append(c.get('text', ''))
+            meta: dict[str, Any] = {
+                'source': source_id or name, 'name': name,
+            }
+            if url:
+                meta['url'] = url
+            if number is not None:
+                meta['citation_number'] = number
+            if 'order' in c:
+                meta['order'] = c['order']
+            metadata_list.append(meta)
         source: dict[str, Any] = {'name': name}
         if url:
-            metadata['url'] = url
             source['url'] = url
-        # Сквозной N из агентской нумерации (`_doc_numbering`) — нужен клиенту
-        # (Mattermost-плагин), чтобы превратить «[N]» в тексте ответа в ссылку
-        # на соответствующий источник. OWUI это поле игнорирует.
-        if number is not None:
-            metadata['citation_number'] = number
         return {
             'event': {
                 'type': 'citation',
                 'data': {
-                    'document': [html_content],
-                    'metadata': [metadata],
+                    'document': documents,
+                    'metadata': metadata_list,
                     'source': source,
                 },
             }

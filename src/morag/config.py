@@ -432,7 +432,6 @@ class RetrievalSearchConfig(BaseModel):
     unique_docs_cap: int = 10
     sections_limit: int = 5
     max_iterations: int = 9
-    citation_max_chars: int = 5000
     answer_max_tokens: int = 0
     # HNSW search-time `ef` для dense-канала. 0 = не переопределять (Qdrant default).
     # Поднимать при росте корпуса если ANN recall просел (релевантный чанк есть,

@@ -78,6 +78,31 @@ class DocRepository:
             return None
         return _payload_to_document(results[0].payload)
 
+    async def get_payloads_by_ids(self, doc_ids: list[str]) -> dict[str, dict]:
+        """Batch-выборка payload'ов нескольких документов. Возвращает `{doc_id: payload}`.
+        Документы которых нет в сторе — просто отсутствуют в результате.
+
+        Для pre-pass idempotency-предсказания: 1-2 Qdrant вызова вместо N.
+        """
+        if not doc_ids:
+            return {}
+        # Qdrant retrieve умеет batch; делим на куски 1000 на запрос для safety
+        result: dict[str, dict] = {}
+        batch_size = 1000
+        for i in range(0, len(doc_ids), batch_size):
+            batch = doc_ids[i:i + batch_size]
+            point_ids = [_doc_id_to_point_id(d) for d in batch]
+            points = await self._client.retrieve(
+                collection_name=self._collection,
+                ids=point_ids,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for p in points:
+                if p.payload and 'id' in p.payload:
+                    result[p.payload['id']] = p.payload
+        return result
+
     async def upsert(self, document: Document) -> None:
         """Сохранить или обновить документ. Автоматически выставляет indexed_at."""
         point_id = _doc_id_to_point_id(document.id)

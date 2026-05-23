@@ -47,7 +47,6 @@ class SearchIn(BaseModel):
     unique_docs_cap: int | None = None
     sections_limit: int | None = None
     max_iterations: int | None = None
-    citation_max_chars: int | None = None
     answer_max_tokens: int | None = None
     find_section: FindSectionIn | None = None
 

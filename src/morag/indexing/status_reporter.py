@@ -36,6 +36,11 @@ class StatusReporter(Protocol):
         """Начать новую фазу с известным числом единиц работы."""
         ...
 
+    def set_predicted_real_total(self, value: int) -> None:
+        """Pre-pass предсказание: сколько документов реально пройдут обработку
+        (остальные будут skipnut'ы по idempotency). Для точного ETA в UI."""
+        ...
+
     def document_start(self, doc_id: str, title: str | None = None, url: str | None = None) -> None:
         """Начать обработку документа — добавить в in-flight список."""
         ...
@@ -69,6 +74,9 @@ class NullStatusReporter:
     """Реализация-пустышка для CLI без подключённой консоли."""
 
     def start_phase(self, name: str, total: int) -> None:
+        pass
+
+    def set_predicted_real_total(self, value: int) -> None:
         pass
 
     def document_start(self, doc_id: str, title: str | None = None, url: str | None = None) -> None:
@@ -115,6 +123,12 @@ class FileStatusReporter:
         self._processed = 0
         self._processed_real = 0
         self._total = 0
+        # Предсказанное число документов, которые реально будут обработаны
+        # (не skipnut'ы по idempotency). Выставляется один раз pre-pass'ом в
+        # начале фазы. Когда задано — UI считает точный ETA через
+        # (predicted_real_total - processed_real) / realRate.
+        # None = pre-pass не делался (или ещё не закончен).
+        self._predicted_real_total: int | None = None
         self._in_flight: dict[str, dict] = {}  # doc_id -> {title, url, started_at, chunks_done, chunks_total}
         # Кольцевой буфер последних N completion-событий — UI считает rolling-rate
         # за окно (60с) для адаптивного ETA. kind='real' если документ прошёл
@@ -135,12 +149,23 @@ class FileStatusReporter:
             self._processed = 0
             self._processed_real = 0
             self._total = total
+            self._predicted_real_total = None  # сбрасываем — следующая фаза заполнит сама
             self._in_flight.clear()
             self._recent_completions.clear()
             # errors_count и recent_errors НЕ сбрасываются — они per-RUN, не per-phase.
             # Один run = один FileStatusReporter instance (создан в cmd_index),
             # пробегает phases [stubs, indexing_*, bm25, knowledge_map] и собирает
             # ошибки за весь прогон.
+            self._write()
+
+    def set_predicted_real_total(self, value: int) -> None:
+        """Заполнить предсказание pre-pass'ом перед main-loop.
+
+        Используется для точного ETA: UI знает сразу сколько докум.
+        будет реально обработано (не skipnut'ы), без extrapolation skip-ratio.
+        """
+        with self._lock:
+            self._predicted_real_total = value
             self._write()
 
     def document_start(self, doc_id: str, title: str | None = None, url: str | None = None) -> None:
@@ -211,6 +236,7 @@ class FileStatusReporter:
             'processed': self._processed,
             'processed_real': self._processed_real,
             'total': self._total,
+            'predicted_real_total': self._predicted_real_total,
             'current_docs': list(self._in_flight.values()),
             'recent_completions': list(self._recent_completions),
             'errors_count': self._errors_count,

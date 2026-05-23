@@ -133,6 +133,49 @@ class IndexingPipeline:
                 ],
             )
 
+    async def _predict_real_count(self, stubs: list[Document]) -> int:
+        """Pre-pass: оценить сколько stubs реально пройдут обработку (не skip).
+
+        Делает ОДИН batch-fetch payload'ов всех stubs из docs collection и
+        сравнивает in-memory: updated_at + embedder_fingerprint. Это покрывает
+        ~95% skip-кейсов (нормальный idempotency-flow). НЕ проверяет
+        count(chunks) — это потребовало бы отдельных запросов в chunks
+        collection per doc. Если документ имеет неполный набор чанков
+        (предыдущий crash), pre-pass его посчитает как skip, а main-loop
+        обработает как real — predicted_real_total окажется чуть занижен.
+        Это приемлемо: реальный ETA получится слегка пессимистичным.
+
+        Reindex-effort (`reindex_floor`) — все документы с run_number < floor
+        считаются real. Если floor не задан — обычный idempotency-предикт.
+        """
+        if not stubs:
+            return 0
+        stored = await self._doc_repo.get_payloads_by_ids([s.id for s in stubs])
+        real_count = 0
+        for stub in stubs:
+            payload = stored.get(stub.id)
+            if payload is None:
+                real_count += 1  # документа нет в сторе → новый, real
+                continue
+            if self._reindex_floor is not None:
+                rn = payload.get('run_number')
+                if not isinstance(rn, int) or rn < self._reindex_floor:
+                    real_count += 1
+                continue
+            # Обычный flow: updated_at + embedder_fingerprint
+            stored_updated = payload.get('updated_at')
+            stub_updated_iso = stub.updated_at.isoformat() if stub.updated_at else None
+            if stored_updated != stub_updated_iso:
+                real_count += 1
+                continue
+            if self._embedder_fingerprint is not None:
+                if payload.get('embedder_fingerprint') != self._embedder_fingerprint:
+                    real_count += 1
+                    continue
+            # Иначе считаем skip (предположительно — финальная проверка
+            # count(chunks) делается уже в main-loop).
+        return real_count
+
     async def _is_up_to_date(self, stub: Document) -> bool:
         """Проверить актуальность документа по стабу метаданных без загрузки контента."""
         existing = await self._doc_repo.get_by_id(stub.id)
@@ -272,6 +315,17 @@ class IndexingPipeline:
             )
             for doc_id in orphaned:
                 await self._doc_repo.cascade_delete(doc_id, self._chunk_repo)
+
+        # Pre-pass: предсказать сколько документов реально пройдут обработку
+        # (не skipnut'ы по idempotency). Один batch Qdrant запрос вместо N
+        # отдельных. Используется UI для точного ETA с самого старта прогона —
+        # без extrapolation skip-ratio из rolling-окна.
+        predicted_real = await self._predict_real_count(stubs)
+        self._status_reporter.set_predicted_real_total(predicted_real)
+        logger.info(
+            'Pre-pass: predicted %d/%d documents will need real processing (~%d%% skip)',
+            predicted_real, total, int((1 - predicted_real / max(total, 1)) * 100),
+        )
 
         sem = asyncio.Semaphore(self._concurrency)
 

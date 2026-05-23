@@ -50,6 +50,7 @@ def setup_source(source: MagicMock, docs: list[Document]) -> None:
 def doc_repo() -> AsyncMock:
     mock = AsyncMock(spec=DocRepository)
     mock.get_ids_by_source_instance.return_value = set()
+    mock.get_payloads_by_ids.return_value = {}
     return mock
 
 
