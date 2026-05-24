@@ -15,6 +15,7 @@ from typing import Any, Coroutine, Dict, Generator, Iterator, List, TypeVar, Uni
 
 from pydantic import BaseModel
 from qdrant_client import AsyncQdrantClient
+from markdown_it import MarkdownIt
 
 # Импорт из installed morag-пакета (ставится через services/pipeline/Dockerfile).
 # Файл специально назван morag_pipeline.py (не morag.py) чтобы избежать коллизии с
@@ -401,6 +402,11 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
             agent_role.temperature if agent_role else None,
             default=0.3,
         ),
+        # Анти-петельные параметры для Qwen3 9B (см. QwenLM Issue #145).
+        # Не выносим в Valves — это не пользовательский настройка, а тех-параметр.
+        'agent_top_p': agent_role.top_p if agent_role else 1.0,
+        'agent_top_k': agent_role.top_k if agent_role else 0,
+        'agent_presence_penalty': agent_role.presence_penalty if agent_role else 0.0,
         'agent_max_tokens': _int_or(
             v.LLM_MAX_TOKENS,
             agent_role.max_tokens if agent_role else None,
@@ -783,8 +789,6 @@ class Pipeline:
                     )
                     continue
 
-                # Emit citations (сгруппированные по документу)
-                yield from self._emit_grouped_sources(all_chunks)
                 doc_count = len(unique_docs)
                 yield self._emit_status(
                     '✅', f'Найдено {_plural(doc_count, "документ", "документа", "документов")} за {_plural(tool_call_count, "шаг", "шага", "шагов")}', True,
@@ -794,9 +798,17 @@ class Pipeline:
                     doc_count, tool_call_count, iteration + 1,
                     _count_by(list(all_chunks.values()), 'source_type'),
                 )
-                # Stream финального ответа (всегда через _stream_final для thinking)
+                # Stream финального ответа, параллельно буферим текст для подсветки
+                # цитат — после стрима оборачиваем в <mark> предложения из чанков,
+                # которые встречаются в ответе.
                 agent_messages.append(message)
-                yield from self._stream_final(agent_messages)
+                answer_parts: list[str] = []
+                for token in self._stream_final(agent_messages):
+                    answer_parts.append(token)
+                    yield token
+                yield from self._emit_grouped_sources(
+                    _highlight_chunks(all_chunks, ''.join(answer_parts)),
+                )
                 return
 
             # LLM вызвал tools — обработать
@@ -850,10 +862,15 @@ class Pipeline:
 
         # Лимит итераций — принудить ответ без tools
         yield self._emit_status('⚠️', f'Лимит итераций ({self._s["max_iterations"]}), генерирую ответ', False)
-        yield from self._emit_grouped_sources(all_chunks)
         doc_count = len({c['doc_id'] for c in all_chunks.values()})
         yield self._emit_status('✅', f'Найдено {_plural(doc_count, "документ", "документа", "документов")}', True)
-        yield from self._stream_final(agent_messages)
+        answer_parts: list[str] = []
+        for token in self._stream_final(agent_messages):
+            answer_parts.append(token)
+            yield token
+        yield from self._emit_grouped_sources(
+            _highlight_chunks(all_chunks, ''.join(answer_parts)),
+        )
 
     # ── Diversity nudge ────────────────────────────────────────────────────────
 
@@ -1177,7 +1194,12 @@ class Pipeline:
         return self._run(self._llm_agent.complete_with_tools(
             messages,
             tools=_TOOLS,
-            params=GenerationParams(temperature=self._s['agent_temperature']),
+            params=GenerationParams(
+                temperature=self._s['agent_temperature'],
+                top_p=self._s['agent_top_p'],
+                top_k=self._s['agent_top_k'],
+                presence_penalty=self._s['agent_presence_penalty'],
+            ),
             max_tokens=self._s['agent_max_tokens'],
         ))
 
@@ -1215,7 +1237,12 @@ class Pipeline:
         max_tokens = self._s['agent_answer_max_tokens'] if self._s['agent_answer_max_tokens'] > 0 else None
         agen = self._llm_agent.stream_complete(
             final_messages,
-            params=GenerationParams(temperature=self._s['agent_temperature']),
+            params=GenerationParams(
+                temperature=self._s['agent_temperature'],
+                top_p=self._s['agent_top_p'],
+                top_k=self._s['agent_top_k'],
+                presence_penalty=self._s['agent_presence_penalty'],
+            ),
             max_tokens=max_tokens,
         )
         in_thinking = False
@@ -1311,7 +1338,6 @@ class Pipeline:
         }
 
     @staticmethod
-    @staticmethod
     def _emit_source_multi(
         name: str, chunks: list[dict], url: str | None = None,
         source_id: str | None = None, number: int | None = None,
@@ -1320,16 +1346,17 @@ class Pipeline:
         элемент `data.document` (без склеивания и принудительной обрезки).
         OWUI рендерит массив как развёрнутый список под одной карточкой источника.
 
-        Отдаём raw markdown (без `html: True`). OWUI sanitize'ит даже inline
-        `style` атрибуты, поэтому HTML с темо-нейтральными стилями не работает.
-        Plain markdown отображается как сырой текст («## H», «| col |»), но
-        читаем в любой теме — что приоритетнее форматирования."""
+        Каждый чанк рендерится как HTML с встроенным CSS и отдаётся с
+        `metadata.html: true`. OWUI кладёт такой документ в sandboxed iframe
+        через `srcdoc` — это даёт полную изоляцию от темы UI: чёрный текст
+        на белом фоне читается одинаково в любой OWUI-теме."""
         documents: list[str] = []
         metadata_list: list[dict[str, Any]] = []
         for c in chunks:
-            documents.append(c.get('text', ''))
+            documents.append(_render_chunk_html(c.get('text', '')))
             meta: dict[str, Any] = {
                 'source': source_id or name, 'name': name,
+                'html': True,
             }
             if url:
                 meta['url'] = url
@@ -1351,6 +1378,182 @@ class Pipeline:
                 },
             }
         }
+
+
+# Markdown→HTML рендерер для citation-чанков. CommonMark + GFM-таблицы.
+# html=True — пропускаем inline-HTML, в частности `<mark>` теги, которые мы
+# добавляем для подсветки совпадающих с ответом предложений. Content наш
+# собственный (легальные документы из lex.uz), не пользовательский.
+_MD = MarkdownIt('commonmark', {'breaks': True, 'html': True}).enable('table')
+
+
+# Подсветка предложений в чанках, совпадающих с ответом агента ──────────────
+
+_WORD_RE = re.compile(r'[A-Za-zА-Яа-яЁё0-9]+', re.UNICODE)
+# Разрезаем на «предложения»: по концу предложения (./!/?) ИЛИ переводам строк,
+# чтобы пункты списка и заголовки markdown тоже шли отдельными единицами.
+_SENT_SPLIT_RE = re.compile(r'(?<=[.!?])\s+|\n+')
+# 2-словные n-граммы из стеммированных токенов — терпимо к парафразам со
+# вставленными словами (например «реклама алкогольной продукции» vs «реклама
+# алкоголя»). Stemming устраняет разницу окончаний (запрещается / запрещена).
+_SHINGLE_SIZE = 2
+
+# Snowball Russian — uses no external data, bundled in nltk.
+try:
+    from nltk.stem.snowball import SnowballStemmer
+    _STEMMER_RU = SnowballStemmer('russian')
+    _STEMMER_EN = SnowballStemmer('english')
+except ImportError:
+    _STEMMER_RU = None
+    _STEMMER_EN = None
+
+
+def _stem(word: str) -> str:
+    """Стем слова — русский для кириллических, английский для латиницы.
+    Без nltk возвращаем исходное слово (graceful degradation)."""
+    if not _STEMMER_RU:
+        return word
+    if _CYR_RE.search(word):
+        return _STEMMER_RU.stem(word)
+    return _STEMMER_EN.stem(word)
+
+
+_CYR_RE = re.compile(r'[А-Яа-яЁё]')
+
+# Стоп-слова, которые сами по себе не должны давать совпадение (всегда есть в ответах).
+_STOPWORDS = frozenset({
+    'и', 'в', 'на', 'с', 'по', 'из', 'для', 'не', 'а', 'но', 'или', 'что', 'как',
+    'это', 'тот', 'этот', 'который', 'если', 'при', 'до', 'от', 'к', 'у', 'о', 'об',
+    'же', 'ли', 'бы', 'то', 'так', 'там', 'тут', 'был', 'была', 'было', 'быть',
+    'is', 'and', 'or', 'the', 'a', 'an', 'of', 'to', 'in', 'on', 'at', 'for', 'with',
+})
+
+
+def _normalize_tokens(text: str) -> list[str]:
+    """Нижний регистр + стемминг (RU/EN), без стоп-слов."""
+    return [
+        _stem(w) for w in _WORD_RE.findall(text.lower())
+        if w not in _STOPWORDS
+    ]
+
+
+def _shingles(tokens: list[str], size: int = _SHINGLE_SIZE) -> set[tuple[str, ...]]:
+    """Множество n-грамм длины size."""
+    if len(tokens) < size:
+        return set()
+    return {tuple(tokens[i:i + size]) for i in range(len(tokens) - size + 1)}
+
+
+def _strip_thinking(text: str) -> str:
+    """Удалить <think>...</think> блоки — это не часть видимого ответа."""
+    return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+
+
+# Структурные markdown-маркеры в начале строки (заголовок/список/blockquote).
+# Их нельзя помещать внутрь <mark>, иначе markdown теряет распознавание.
+_MD_PREFIX_RE = re.compile(
+    r'^(\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s+))?(.*)$', re.DOTALL,
+)
+
+
+def _highlight_sentences(chunk_text: str, answer_shingles: set[tuple[str, ...]]) -> str:
+    """Найти в chunk_text предложения, чьи n-граммы пересекаются с
+    answer_shingles, обернуть их в <mark>...</mark>.
+
+    Структура markdown сохраняется один-в-один: разделители (`\\n`, пробелы
+    после знака конца предложения) попадают в split через capturing group и
+    включаются обратно в результат. Markdown-маркеры (`##`, `-`, `1.`, `>`)
+    остаются вне обёртки <mark>, чтобы парсер их видел.
+    """
+    if not answer_shingles:
+        return chunk_text
+    # Capturing group в split → separator'ы попадают в результат как чередующиеся
+    # элементы (sentence, sep, sentence, sep, ...).
+    pieces = re.split(r'((?:(?<=[.!?])\s+)|(?:\n+))', chunk_text)
+    out: list[str] = []
+    for i, piece in enumerate(pieces):
+        if i % 2 == 1:  # separator — кладём как есть
+            out.append(piece)
+            continue
+        if not piece.strip():
+            out.append(piece)
+            continue
+        sent_shingles = _shingles(_normalize_tokens(piece))
+        if not (sent_shingles & answer_shingles):
+            out.append(piece)
+            continue
+        # Совпадение: оборачиваем содержимое (без структурного префикса).
+        m = _MD_PREFIX_RE.match(piece)
+        prefix, content = (m.group(1) or ''), m.group(2)
+        if content.strip():
+            out.append(f'{prefix}<mark>{content}</mark>')
+        else:
+            out.append(piece)
+    return ''.join(out)
+
+
+def _highlight_chunks(all_chunks: dict[str, dict], answer: str) -> dict[str, dict]:
+    """Вернуть новый dict чанков, в которых text-поле обёрнуто <mark> вокруг
+    предложений, чьи 4-граммы пересекаются с ответом агента.
+
+    Если ответ пустой или короткий — возвращаем исходные чанки без изменений.
+    """
+    answer_visible = _strip_thinking(answer)
+    answer_tokens = _normalize_tokens(answer_visible)
+    answer_shingles = _shingles(answer_tokens)
+    if not answer_shingles:
+        return all_chunks
+    out: dict[str, dict] = {}
+    for cid, chunk in all_chunks.items():
+        new_chunk = dict(chunk)
+        new_chunk['text'] = _highlight_sentences(chunk.get('text', ''), answer_shingles)
+        out[cid] = new_chunk
+    return out
+
+
+_CHUNK_HTML_CSS = """\
+:root { color-scheme: light; }
+html, body { background: #ffffff; color: #1a1a1a; }
+body {
+  margin: 0; padding: 12px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 14px; line-height: 1.5;
+}
+h1, h2, h3, h4 { color: #0a0a0a; margin: 0.6em 0 0.3em; font-weight: 600; }
+h1 { font-size: 1.25em; }
+h2 { font-size: 1.15em; }
+h3 { font-size: 1.05em; }
+p { margin: 0.4em 0; }
+ul, ol { margin: 0.4em 0; padding-left: 1.6em; }
+li { margin: 0.2em 0; }
+table { border-collapse: collapse; margin: 0.6em 0; width: 100%; }
+td, th { border: 1px solid #d0d0d0; padding: 4px 8px; vertical-align: top; }
+th { background: #f4f4f4; font-weight: 600; }
+code { background: #f5f5f5; padding: 1px 4px; border-radius: 3px;
+       font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
+pre { background: #f5f5f5; padding: 8px; border-radius: 4px; overflow-x: auto; }
+pre code { background: transparent; padding: 0; }
+blockquote { border-left: 3px solid #ccc; margin: 0.5em 0; padding-left: 0.8em; color: #555; }
+mark { background: #fff3a0; padding: 0 2px; border-radius: 2px; }
+a { color: #0a58ca; }
+hr { border: none; border-top: 1px solid #e0e0e0; margin: 1em 0; }
+"""
+
+
+def _render_chunk_html(chunk_text: str) -> str:
+    """Markdown-чанк → standalone HTML с встроенным CSS под белый фон.
+
+    OWUI отдаёт `metadata.html: true` контент в sandboxed iframe (`srcdoc`),
+    поэтому наши стили не конфликтуют с темой OWUI. Цвета фиксированные —
+    чёрный текст на белом фоне в любой теме (требование юристов).
+    """
+    body = _MD.render(chunk_text or '')
+    return (
+        '<!DOCTYPE html>'
+        '<html lang="ru"><head><meta charset="utf-8">'
+        f'<style>{_CHUNK_HTML_CSS}</style></head>'
+        f'<body>{body}</body></html>'
+    )
 
 
 def _count_by(items: list[dict], key: str) -> dict[str, int]:

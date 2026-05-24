@@ -392,6 +392,13 @@ class RetrievalAgentConfig(_RetrievalRoleBase):
     enable_thinking: bool | None = None    # default «не слать флаги» (xAI compat)
     temperature: float = 0.3
     max_tokens: int = 4096
+    # Sampling-параметры для борьбы с reasoning-петлями (Qwen3 9B при низкой
+    # температуре часто зацикливается; presence_penalty + top_k/top_p — это
+    # рекомендация QwenLM Issue #145). Default'ы консервативные — старые
+    # конфиги без этих полей работают как раньше.
+    top_p: float = 1.0
+    top_k: int = 0                          # 0 = выключен (vLLM/Ollama convention)
+    presence_penalty: float = 0.0
 
 
 class RetrievalRerankerConfig(_RetrievalRoleBase):

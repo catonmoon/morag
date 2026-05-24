@@ -168,18 +168,12 @@ class LLMContextGenerator(ContextGenerator):
             )
             return ''
 
-        # Окно вокруг позиции чанка или полный документ
-        if self._window_tokens:
-            window_limit = min(self._window_tokens, available_for_doc)
-            doc_text = _extract_window(doc_text, char_offset, window_limit, self._token_counter)
-        else:
-            doc_token_count = self._token_counter.count(doc_text)
-            if doc_token_count > available_for_doc:
-                logger.info(
-                    'LLMContextGenerator: doc_text truncated from %d to %d tokens',
-                    doc_token_count, available_for_doc,
-                )
-                doc_text = self._token_counter.truncate(doc_text, available_for_doc)
+        # Окно вокруг позиции чанка размером min(window_tokens, available_for_doc).
+        # Если window_tokens не задан — забиваем весь доступный бюджет, центрируя на
+        # позиции чанка (а не head-truncate, который терял бы окрестность для чанков
+        # из тела большого документа).
+        window_limit = min(self._window_tokens or available_for_doc, available_for_doc)
+        doc_text = _extract_window(doc_text, char_offset, window_limit, self._token_counter)
 
         prompt = _PROMPT_TEMPLATE.format(
             doc_summary=doc_summary, doc_text=doc_text, chunk_text=chunk_text,
