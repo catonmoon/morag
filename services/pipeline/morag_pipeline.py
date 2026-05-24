@@ -745,6 +745,10 @@ class Pipeline:
         search_count = 0
         searched_section_ids: set[str] = set()
         diversity_nudge_sent = False
+        # Аккумулируем `query` из всех tool-вызовов (find_section / search / get_doc).
+        # Используются для подсветки совпадающих предложений в citation-чанках —
+        # «что искали», а не «что написал агент в ответе».
+        agent_queries: list[str] = []
         # Сквозная нумерация документов per-pipe-call. Каждый tool-выдача форматирует
         # `[N] Документ:` используя глобальный N — повторный документ из второго
         # search получит тот же номер что в первом. Решает проблему конфликтующих
@@ -798,17 +802,16 @@ class Pipeline:
                     doc_count, tool_call_count, iteration + 1,
                     _count_by(list(all_chunks.values()), 'source_type'),
                 )
-                # Stream финального ответа, параллельно буферим текст для подсветки
-                # цитат — после стрима оборачиваем в <mark> предложения из чанков,
-                # которые встречаются в ответе.
-                agent_messages.append(message)
-                answer_parts: list[str] = []
-                for token in self._stream_final(agent_messages):
-                    answer_parts.append(token)
-                    yield token
+                # Citations с подсветкой совпавших предложений (источник —
+                # сами поисковые запросы агента: «что искали»). Эмитим до
+                # стрима ответа — юрист видит источники сразу, пока ответ
+                # формируется. Запросы агента короткие, но n-грамм + стемминг
+                # позволяют находить релевантные предложения в чанках.
                 yield from self._emit_grouped_sources(
-                    _highlight_chunks(all_chunks, ''.join(answer_parts)),
+                    _highlight_chunks(all_chunks, ' '.join(agent_queries)),
                 )
+                agent_messages.append(message)
+                yield from self._stream_final(agent_messages)
                 return
 
             # LLM вызвал tools — обработать
@@ -830,6 +833,11 @@ class Pipeline:
                     search_count += 1
                     for sid in (fn_args.get('section_ids') or []):
                         searched_section_ids.add(sid)
+
+                # Аккумулируем query для подсветки в citation-чанках.
+                query = fn_args.get('query')
+                if isinstance(query, str) and query.strip():
+                    agent_queries.append(query)
 
                 # Выполнение + статус
                 status_text = _format_tool_status(fn_name, fn_args, resolve_title=self._get_doc_title)
@@ -864,13 +872,10 @@ class Pipeline:
         yield self._emit_status('⚠️', f'Лимит итераций ({self._s["max_iterations"]}), генерирую ответ', False)
         doc_count = len({c['doc_id'] for c in all_chunks.values()})
         yield self._emit_status('✅', f'Найдено {_plural(doc_count, "документ", "документа", "документов")}', True)
-        answer_parts: list[str] = []
-        for token in self._stream_final(agent_messages):
-            answer_parts.append(token)
-            yield token
         yield from self._emit_grouped_sources(
-            _highlight_chunks(all_chunks, ''.join(answer_parts)),
+            _highlight_chunks(all_chunks, ' '.join(agent_queries)),
         )
+        yield from self._stream_final(agent_messages)
 
     # ── Diversity nudge ────────────────────────────────────────────────────────
 
@@ -1387,18 +1392,12 @@ class Pipeline:
 _MD = MarkdownIt('commonmark', {'breaks': True, 'html': True}).enable('table')
 
 
-# Подсветка предложений в чанках, совпадающих с ответом агента ──────────────
+# Подсветка слов из поисковых запросов агента ─────────────────────────────────
 
 _WORD_RE = re.compile(r'[A-Za-zА-Яа-яЁё0-9]+', re.UNICODE)
-# Разрезаем на «предложения»: по концу предложения (./!/?) ИЛИ переводам строк,
-# чтобы пункты списка и заголовки markdown тоже шли отдельными единицами.
-_SENT_SPLIT_RE = re.compile(r'(?<=[.!?])\s+|\n+')
-# 2-словные n-граммы из стеммированных токенов — терпимо к парафразам со
-# вставленными словами (например «реклама алкогольной продукции» vs «реклама
-# алкоголя»). Stemming устраняет разницу окончаний (запрещается / запрещена).
-_SHINGLE_SIZE = 2
+_CYR_RE = re.compile(r'[А-Яа-яЁё]')
 
-# Snowball Russian — uses no external data, bundled in nltk.
+# Snowball Russian/English — без внешних данных, в nltk встроено.
 try:
     from nltk.stem.snowball import SnowballStemmer
     _STEMMER_RU = SnowballStemmer('russian')
@@ -1409,8 +1408,7 @@ except ImportError:
 
 
 def _stem(word: str) -> str:
-    """Стем слова — русский для кириллических, английский для латиницы.
-    Без nltk возвращаем исходное слово (graceful degradation)."""
+    """Стем — RU для кириллических, EN для латиницы; без nltk → как есть."""
     if not _STEMMER_RU:
         return word
     if _CYR_RE.search(word):
@@ -1418,7 +1416,7 @@ def _stem(word: str) -> str:
     return _STEMMER_EN.stem(word)
 
 
-_CYR_RE = re.compile(r'[А-Яа-яЁё]')
+_MIN_HIGHLIGHT_STEM_LEN = 3  # короче 3 символов стем — мусор, не подсвечиваем
 
 # Стоп-слова, которые сами по себе не должны давать совпадение (всегда есть в ответах).
 _STOPWORDS = frozenset({
@@ -1429,86 +1427,72 @@ _STOPWORDS = frozenset({
 })
 
 
-def _normalize_tokens(text: str) -> list[str]:
-    """Нижний регистр + стемминг (RU/EN), без стоп-слов."""
-    return [
-        _stem(w) for w in _WORD_RE.findall(text.lower())
-        if w not in _STOPWORDS
-    ]
+def _query_stems(queries: str) -> set[str]:
+    """Извлечь стемы характерных слов из строки запросов агента.
+    Стоп-слова и слова со стемом короче _MIN_HIGHLIGHT_STEM_LEN отбрасываем."""
+    stems: set[str] = set()
+    for w in _WORD_RE.findall(queries.lower()):
+        if w in _STOPWORDS:
+            continue
+        s = _stem(w)
+        if len(s) >= _MIN_HIGHLIGHT_STEM_LEN:
+            stems.add(s)
+    return stems
 
 
-def _shingles(tokens: list[str], size: int = _SHINGLE_SIZE) -> set[tuple[str, ...]]:
-    """Множество n-грамм длины size."""
-    if len(tokens) < size:
-        return set()
-    return {tuple(tokens[i:i + size]) for i in range(len(tokens) - size + 1)}
+def _build_highlight_re(stems: set[str]) -> re.Pattern | None:
+    """Регекс матчит любое слово в тексте, чей стем-префикс есть в `stems`.
+    `\\bSTEM[A-Za-zА-Яа-яЁё]*\\b` для каждого стема, через альтернацию."""
+    if not stems:
+        return None
+    # Sort by length desc — более длинные стемы первыми, чтобы regex выбирал
+    # более специфичный match (alternation matches left-to-right в Python re).
+    alt = '|'.join(re.escape(s) for s in sorted(stems, key=len, reverse=True))
+    # Lookahead/behind для границ слова, совместимое с Unicode/кириллицей:
+    # перед и после стема не должно быть буквы/цифры.
+    return re.compile(
+        r'(?<![A-Za-zА-Яа-яЁё0-9])(' + alt + r')([A-Za-zА-Яа-яЁё]*)',
+        re.IGNORECASE | re.UNICODE,
+    )
 
 
-def _strip_thinking(text: str) -> str:
-    """Удалить <think>...</think> блоки — это не часть видимого ответа."""
-    return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+# Не подсвечиваем внутри HTML-тегов (`<td>`, `<a href="…">`) — иначе ломаем
+# сам тег. Разрезаем текст по тегам, обрабатываем только text-части.
+_HTML_TAG_RE = re.compile(r'<[^>]+>')
 
 
-# Структурные markdown-маркеры в начале строки (заголовок/список/blockquote).
-# Их нельзя помещать внутрь <mark>, иначе markdown теряет распознавание.
-_MD_PREFIX_RE = re.compile(
-    r'^(\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s+))?(.*)$', re.DOTALL,
-)
+def _highlight_chunks(all_chunks: dict[str, dict], queries: str) -> dict[str, dict]:
+    """Обернуть в <mark> каждое появление слова, чей стем встречается в
+    запросах агента. Работает на уровне слов (а не предложений) — как в
+    поисковом snippet'е. Стемминг ловит склонения: запрос «Ольга Давыдова»
+    подсветит «Ольгу», «Давыдовой», и т.д.
 
-
-def _highlight_sentences(chunk_text: str, answer_shingles: set[tuple[str, ...]]) -> str:
-    """Найти в chunk_text предложения, чьи n-граммы пересекаются с
-    answer_shingles, обернуть их в <mark>...</mark>.
-
-    Структура markdown сохраняется один-в-один: разделители (`\\n`, пробелы
-    после знака конца предложения) попадают в split через capturing group и
-    включаются обратно в результат. Markdown-маркеры (`##`, `-`, `1.`, `>`)
-    остаются вне обёртки <mark>, чтобы парсер их видел.
+    Слова короче 3 символов (после стемминга) и стоп-слова не подсвечиваются.
+    HTML-теги (`<td>` и т.п.) пропускаются, чтобы не ломать markup.
     """
-    if not answer_shingles:
-        return chunk_text
-    # Capturing group в split → separator'ы попадают в результат как чередующиеся
-    # элементы (sentence, sep, sentence, sep, ...).
-    pieces = re.split(r'((?:(?<=[.!?])\s+)|(?:\n+))', chunk_text)
-    out: list[str] = []
-    for i, piece in enumerate(pieces):
-        if i % 2 == 1:  # separator — кладём как есть
-            out.append(piece)
-            continue
-        if not piece.strip():
-            out.append(piece)
-            continue
-        sent_shingles = _shingles(_normalize_tokens(piece))
-        if not (sent_shingles & answer_shingles):
-            out.append(piece)
-            continue
-        # Совпадение: оборачиваем содержимое (без структурного префикса).
-        m = _MD_PREFIX_RE.match(piece)
-        prefix, content = (m.group(1) or ''), m.group(2)
-        if content.strip():
-            out.append(f'{prefix}<mark>{content}</mark>')
-        else:
-            out.append(piece)
-    return ''.join(out)
-
-
-def _highlight_chunks(all_chunks: dict[str, dict], answer: str) -> dict[str, dict]:
-    """Вернуть новый dict чанков, в которых text-поле обёрнуто <mark> вокруг
-    предложений, чьи 4-граммы пересекаются с ответом агента.
-
-    Если ответ пустой или короткий — возвращаем исходные чанки без изменений.
-    """
-    answer_visible = _strip_thinking(answer)
-    answer_tokens = _normalize_tokens(answer_visible)
-    answer_shingles = _shingles(answer_tokens)
-    if not answer_shingles:
+    pattern = _build_highlight_re(_query_stems(queries))
+    if pattern is None:
         return all_chunks
-    out: dict[str, dict] = {}
-    for cid, chunk in all_chunks.items():
-        new_chunk = dict(chunk)
-        new_chunk['text'] = _highlight_sentences(chunk.get('text', ''), answer_shingles)
-        out[cid] = new_chunk
-    return out
+    def wrap(text: str) -> str:
+        # Разрезаем по тегам — внутри тегов не трогаем; в text-частях подсвечиваем.
+        out: list[str] = []
+        last = 0
+        for m in _HTML_TAG_RE.finditer(text):
+            out.append(pattern.sub(
+                lambda w: f'<mark>{w.group(0)}</mark>',
+                text[last:m.start()],
+            ))
+            out.append(m.group(0))  # сам тег — как есть
+            last = m.end()
+        out.append(pattern.sub(
+            lambda w: f'<mark>{w.group(0)}</mark>',
+            text[last:],
+        ))
+        return ''.join(out)
+    return {
+        cid: {**c, 'text': wrap(c.get('text', ''))}
+        for cid, c in all_chunks.items()
+    }
 
 
 _CHUNK_HTML_CSS = """\
