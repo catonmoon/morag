@@ -84,6 +84,28 @@ def _try_load_config() -> Config | None:
 
 # ── Tool definitions (OpenAI function calling) ───────────────────────────────
 
+_GLOSSARY_TOOL: dict = {
+    'type': 'function',
+    'function': {
+        'name': 'lookup_glossary',
+        'description': '',  # подменяется в Pipeline.__init__ описанием из config
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'query': {
+                    'type': 'string',
+                    'description': (
+                        'Термин/аббревиатура, расшифровку которой ищешь, '
+                        'на русском (можно несколько через пробел).'
+                    ),
+                },
+            },
+            'required': ['query'],
+        },
+    },
+}
+
+
 _TOOLS = [
     {
         'type': 'function',
@@ -348,6 +370,9 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
     find_sec = search.find_section if search else None
     features = retr.features if retr else None
     prompts = retr.prompts if retr else None
+    # getattr — back-compat: старый morag.config (на деплоях, которые ещё не
+    # обновили src/morag/config.py) не знает поле glossary.
+    glossary = getattr(retr, 'glossary', None) if retr else None
 
     # Резолв agent LLM-инстанса из llms-pool
     agent_llm = cfg.llm_by_name(agent_role.llm) if (agent_role and cfg) else None
@@ -508,6 +533,12 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
                 'по всей базе знаний.'
             ),
         ),
+
+        # Глоссарий (optional tool, через Console UI). doc_ids — список;
+        # старые конфиги с одиночным `doc_id` мигрированы Pydantic-валидатором.
+        'glossary_enabled': (glossary.enabled if glossary else False),
+        'glossary_doc_ids': (list(glossary.doc_ids) if glossary else []),
+        'glossary_description': (glossary.description if glossary else ''),
     }
     return s
 
@@ -676,11 +707,27 @@ class Pipeline:
         # 6. Сохранить merged settings — pipe() читает их вместо self.valves
         #    (там sentinel-defaults, fully resolved тут).
         self._s = s
+
+        # 7. Tool-list (динамический — глоссарий-tool опциональный, через config).
+        self._tools = list(_TOOLS)
+        if s['glossary_enabled'] and s['glossary_doc_ids']:
+            tool = json.loads(json.dumps(_GLOSSARY_TOOL))  # deep copy
+            desc = s.get('glossary_description') or 'базе глоссария'
+            tool['function']['description'] = (
+                f'Расшифровка аббревиатур и терминов: {desc}. '
+                'ОБЯЗАТЕЛЬНО вызывай ПЕРВЫМ (до find_section/search) если в вопросе '
+                'есть хотя бы одно сокращение из 2+ заглавных букв (API, SSO, IAM и т.п.) '
+                'или необычный термин — глоссарий вернёт расшифровку, без которой '
+                'последующий поиск по самой аббревиатуре даст шум вместо результата.'
+            )
+            self._tools.append(tool)
         logger.info(
             'Pipeline initialized: agent=%s/%s, rerank=%s/%s, qdrant=%s, '
-            'config_loaded=%s', s['agent_url'], s['agent_model'],
+            'config_loaded=%s, tools=%d, glossary=%s',
+            s['agent_url'], s['agent_model'],
             s['rerank_url'], s['rerank_model'], s['qdrant_url'],
-            self._config is not None,
+            self._config is not None, len(self._tools),
+            f'{len(s["glossary_doc_ids"])} doc(s)' if s['glossary_enabled'] else 'off',
         )
 
     def _run(self, coro: Coroutine[Any, Any, _T]) -> _T:
@@ -721,6 +768,38 @@ class Pipeline:
 
         # 2. Собрать system prompt
         system_content = _SYSTEM_PROMPT
+        if self._s['glossary_enabled'] and self._s['glossary_doc_ids']:
+            desc = self._s.get('glossary_description') or (
+                'глоссарий с расшифровками аббревиатур и специальных терминов'
+            )
+            system_content += (
+                '\n\n## Глоссарий — ОБЯЗАТЕЛЬНЫЙ ПЕРВЫЙ ШАГ при сокращениях\n'
+                f'`lookup_glossary(query)` — {desc}.\n\n'
+                '🛑 ЕСЛИ в вопросе пользователя ЕСТЬ ХОТЯ БЫ ОДНО сокращение/аббревиатура '
+                '(2+ заглавных буквы подряд, например: API, SSO, VPN, SLA, IAM; '
+                'или необычный термин с большой буквы) — ОБЯЗАТЕЛЬНО **ПЕРВЫМ ШАГОМ**, '
+                'ДО find_section, вызови `lookup_glossary(query="<все аббревиатуры через пробел>")`.\n\n'
+                'Зачем: без расшифровки ты будешь искать по самой аббревиатуре, а в '
+                'документах она часто пишется развёрнуто. Расшифровка даёт правильные '
+                'ключевые слова для последующего find_section/search.\n\n'
+                '🎯 ФОРМАТ ЗАПРОСА ПОСЛЕ ГЛОССАРИЯ: в последующих find_section/search '
+                'ОБЯЗАТЕЛЬНО включай **И полное название, И аббревиатуру** в формате '
+                '`Полное название (АББР)`. В документации термин может быть написан '
+                'и так, и так — без обоих вариантов поиск пропустит половину упоминаний.\n\n'
+                'Пример последовательности (две аббревиатуры):\n'
+                '  Вопрос: «Как настраивается SSO через IAM?»\n'
+                '  1. `lookup_glossary(query="SSO IAM")` →\n'
+                '     - SSO = Single Sign-On\n'
+                '     - IAM = Identity and Access Management\n'
+                '  2. `find_section(query="настройка Single Sign-On (SSO) через Identity and Access Management (IAM)")`\n'
+                '  3. `search(query="настройка SSO через IAM", section_ids=[...])`\n\n'
+                'Если для одной аббревиатуры глоссарий вернул НЕСКОЛЬКО значений — '
+                'выбери то, что лучше подходит по контексту вопроса; если непонятно — '
+                'спроси у пользователя.\n\n'
+                'Можно вызывать `lookup_glossary` несколько раз в одном диалоге — но '
+                'на ОДИН термин достаточно одного вызова (повторный — пустая трата токенов). '
+                'Если в вопросе НЕТ сокращений — пропускай этот шаг, иди сразу в find_section.'
+            )
         if self._s['admin_instructions']:
             system_content += (
                 '\n\n## Обязательные инструкции администратора\n'
@@ -745,6 +824,11 @@ class Pipeline:
         search_count = 0
         searched_section_ids: set[str] = set()
         diversity_nudge_sent = False
+        glossary_nudge_sent = False  # после первого lookup_glossary инжектим
+        # напоминание формата «Полное название (АББР)» для последующих
+        # find_section/search. Vision LLM плохо держит длинные правила в
+        # хвосте system prompt — runtime-нудж рядом с результатом глоссария
+        # сильно лучше следуется.
         # Аккумулируем `query` из всех tool-вызовов (find_section / search / get_doc).
         # Используются для подсветки совпадающих предложений в citation-чанках —
         # «что искали», а не «что написал агент в ответе».
@@ -841,7 +925,10 @@ class Pipeline:
 
                 # Выполнение + статус
                 status_text = _format_tool_status(fn_name, fn_args, resolve_title=self._get_doc_title)
-                icon = {'search': '🔍', 'find_section': '🗺️', 'get_doc': '📄'}.get(fn_name, '🛠️')
+                icon = {
+                    'search': '🔍', 'find_section': '🗺️', 'get_doc': '📄',
+                    'lookup_glossary': '📖',
+                }.get(fn_name, '🛠️')
                 yield self._emit_status(icon, status_text, False)
 
                 result, chunks = self._execute_tool(fn_name, fn_args)
@@ -867,6 +954,23 @@ class Pipeline:
                     'tool_call_id': call_id,
                     'content': result,
                 })
+
+                # После первого lookup_glossary инжектим напоминание о формате
+                # «Полное название (АББР)» — sysprompt не выдерживает (Vision LLM
+                # игнорирует правило в хвосте). Свежий user-message рядом с
+                # tool_result LLM держит охотнее.
+                if fn_name == 'lookup_glossary' and not glossary_nudge_sent:
+                    glossary_nudge_sent = True
+                    agent_messages.append({
+                        'role': 'user',
+                        'content': (
+                            '⚠️ Напоминание: теперь сформулируй find_section и search '
+                            'с ПОЛНЫМИ названиями терминов из глоссария И их '
+                            'аббревиатурами в формате «Полное название (АББР)». '
+                            'В документации термин встречается и так, и так — '
+                            'без обеих форм поиск пропустит половину упоминаний.'
+                        ),
+                    })
 
         # Лимит итераций — принудить ответ без tools
         yield self._emit_status('⚠️', f'Лимит итераций ({self._s["max_iterations"]}), генерирую ответ', False)
@@ -950,7 +1054,32 @@ class Pipeline:
             return self._tool_find_section(args['query'])
         elif name == 'get_doc':
             return self._tool_get_doc(args['doc_id'], args['query'])
+        elif name == 'lookup_glossary':
+            return self._tool_glossary(args['query'])
         return f'Неизвестный инструмент: {name}', []
+
+    def _tool_glossary(self, query: str) -> tuple[str, list[dict]]:
+        """Зовём `_tool_get_doc` для каждого настроенного doc_id глоссария,
+        мерджим результаты. Для одного doc_id — тождественно `_tool_get_doc`."""
+        doc_ids = self._s['glossary_doc_ids']
+        if not doc_ids:
+            return 'Глоссарий не настроен.', []
+        if len(doc_ids) == 1:
+            return self._tool_get_doc(doc_ids[0], query)
+        # Multi-doc: rerank каждый документ независимо, склеиваем top'ы.
+        text_parts: list[str] = []
+        all_chunks: list[dict] = []
+        for did in doc_ids:
+            text, chunks = self._tool_get_doc(did, query)
+            if chunks:
+                text_parts.append(text)
+                all_chunks.extend(chunks)
+        if not all_chunks:
+            return (
+                f'В глоссариях ({len(doc_ids)} док.) нет релевантных терминов '
+                f'для запроса «{query}». Попробуй переформулировать.'
+            ), []
+        return '\n\n---\n\n'.join(text_parts), all_chunks
 
     def _tool_search(
         self,
@@ -1198,7 +1327,7 @@ class Pipeline:
         """
         return self._run(self._llm_agent.complete_with_tools(
             messages,
-            tools=_TOOLS,
+            tools=self._tools,
             params=GenerationParams(
                 temperature=self._s['agent_temperature'],
                 top_p=self._s['agent_top_p'],
@@ -1325,11 +1454,16 @@ class Pipeline:
         docs.sort(key=lambda d: d[0])
 
         for path, doc_name, url, chunks, doc_id in docs:
-            yield self._emit_source_multi(
-                doc_name, chunks, url,
-                source_id=doc_id,
-                number=self._doc_numbering.get(doc_id),
-            )
+            # ОДИН citation event на ОДИН чанк — гарантия что SSE-строка
+            # маленькая (~2KB), не упирается в aiohttp/HTTP-chunked лимиты.
+            # OWUI сама агрегирует events по source.name в один сайдбарный
+            # элемент. Берём первые N чанков (упорядочены по `order`).
+            for c in chunks[:_CITATION_MAX_CHUNKS]:
+                yield self._emit_source_multi(
+                    doc_name, [c], url,
+                    source_id=doc_id,
+                    number=self._doc_numbering.get(doc_id),
+                )
 
     # ── Open WebUI events ─────────────────────────────────────────────────────
 
@@ -1495,33 +1629,29 @@ def _highlight_chunks(all_chunks: dict[str, dict], queries: str) -> dict[str, di
     }
 
 
-_CHUNK_HTML_CSS = """\
-:root { color-scheme: light; }
-html, body { background: #ffffff; color: #1a1a1a; }
-body {
-  margin: 0; padding: 12px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  font-size: 14px; line-height: 1.5;
-}
-h1, h2, h3, h4 { color: #0a0a0a; margin: 0.6em 0 0.3em; font-weight: 600; }
-h1 { font-size: 1.25em; }
-h2 { font-size: 1.15em; }
-h3 { font-size: 1.05em; }
-p { margin: 0.4em 0; }
-ul, ol { margin: 0.4em 0; padding-left: 1.6em; }
-li { margin: 0.2em 0; }
-table { border-collapse: collapse; margin: 0.6em 0; width: 100%; }
-td, th { border: 1px solid #d0d0d0; padding: 4px 8px; vertical-align: top; }
-th { background: #f4f4f4; font-weight: 600; }
-code { background: #f5f5f5; padding: 1px 4px; border-radius: 3px;
-       font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.9em; }
-pre { background: #f5f5f5; padding: 8px; border-radius: 4px; overflow-x: auto; }
-pre code { background: transparent; padding: 0; }
-blockquote { border-left: 3px solid #ccc; margin: 0.5em 0; padding-left: 0.8em; color: #555; }
-mark { background: #fff3a0; padding: 0 2px; border-radius: 2px; }
-a { color: #0a58ca; }
-hr { border: none; border-top: 1px solid #e0e0e0; margin: 1em 0; }
-"""
+# Минимальный CSS: повторяется в КАЖДОМ chunk-HTML (т.к. metadata.html=true
+# рендерит каждый в свой iframe srcdoc). Большой CSS × 24 чанка = одна
+# SSE-строка >60KB → aiohttp/OWUI падает «Chunk too big». Тут компромисс:
+# читаемость + theme-lock на белом фоне с минимальной разметкой.
+_CHUNK_HTML_CSS = (
+    'body{background:#fff;color:#1a1a1a;margin:0;padding:10px;'
+    'font:14px/1.5 system-ui,-apple-system,sans-serif}'
+    'h1,h2,h3,h4{margin:.5em 0 .2em;color:#000}'
+    'h1{font-size:1.25em}h2{font-size:1.15em}h3{font-size:1.05em}'
+    'p{margin:.3em 0}ul,ol{margin:.3em 0;padding-left:1.4em}'
+    'table{border-collapse:collapse;width:100%}'
+    'td,th{border:1px solid #ccc;padding:3px 6px}'
+    'th{background:#eee}'
+    'code{background:#f0f0f0;padding:1px 3px;font:.9em monospace}'
+    'mark{background:#fff3a0}a{color:#0a58ca}'
+)
+
+
+_CITATION_MAX_CHARS = 800  # на один чанк в citation: больше — обрезаем с «…».
+_CITATION_MAX_CHUNKS = 5  # макс чанков на один citation event (топ по релевантности).
+# Бюджет: 5 чанков × 800 chars × 6 bytes/char (JSON-escape кириллицы) ≈ 24KB
+# per citation event. Безопасно для aiohttp (default line limit ~64KB).
+# Агент получает полный текст через tool_result — обрезка только для UI.
 
 
 def _render_chunk_html(chunk_text: str) -> str:
@@ -1530,8 +1660,16 @@ def _render_chunk_html(chunk_text: str) -> str:
     OWUI отдаёт `metadata.html: true` контент в sandboxed iframe (`srcdoc`),
     поэтому наши стили не конфликтуют с темой OWUI. Цвета фиксированные —
     чёрный текст на белом фоне в любой теме (требование юристов).
+
+    Чанк обрезается до `_CITATION_MAX_CHARS`: большие юр-чанки (5-10K) ×
+    десяток в одном citation event делают SSE-строку слишком большой и
+    OWUI/aiohttp падает с «Chunk too big». Для агента полный текст всё
+    равно остаётся (он смотрит tool_result, не citation).
     """
-    body = _MD.render(chunk_text or '')
+    text = chunk_text or ''
+    if len(text) > _CITATION_MAX_CHARS:
+        text = text[:_CITATION_MAX_CHARS] + '\n\n_…[обрезано для отображения]_'
+    body = _MD.render(text)
     return (
         '<!DOCTYPE html>'
         '<html lang="ru"><head><meta charset="utf-8">'
@@ -1582,6 +1720,9 @@ def _format_tool_status(fn_name: str, fn_args: dict, resolve_title=None) -> str:
         query = fn_args.get('query', '')
         title = _title(doc_id)
         return f'[{query}] глубокое чтение документа: {title}'
+    if fn_name == 'lookup_glossary':
+        query = fn_args.get('query', '')
+        return f'[{query}] поиск определения'
     return f'{fn_name}({json.dumps(fn_args, ensure_ascii=False)})'
 
 

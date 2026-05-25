@@ -24,6 +24,102 @@ from services.console.config_io import read_layered, read_local, validate_merged
 router = APIRouter()
 
 
+@router.get('/doc-lookup')
+async def doc_lookup(id: str, request: Request) -> dict[str, Any]:
+    """Достать title + url документа из Qdrant docs collection.
+
+    Принимает на вход разные форматы:
+      - Полный doc_id вида `confluence:virgo:1068775100` — резолв через uuid5
+        (быстро, один запрос).
+      - URL страницы (например, `https://virgo.redelephant.ru/pages/viewpage.action?pageId=...`)
+        или просто numeric pageId — поиск по payload.url или по hash-суффиксу
+        doc_id (медленнее, scroll + filter).
+
+    Возвращает `{ok, id, title, url}` — поле `id` это resolved полный doc_id
+    (Console пишет его в config). `{ok: false, error}` если не найден.
+    """
+    cfg_path = request.app.state.config_path
+    merged = read_layered(cfg_path)
+    qdrant_cfg = (merged.get('qdrant') or {})
+    host = qdrant_cfg.get('host', 'qdrant')
+    port = qdrant_cfg.get('port', 6333)
+    docs_collection = qdrant_cfg.get('collection_docs', 'docs')
+
+    import httpx
+    import re as _re
+    base = f'http://{host}:{port}/collections/{docs_collection}'
+    inp = (id or '').strip()
+    if not inp:
+        return {'ok': False, 'id': id, 'error': 'пустой запрос'}
+
+    async with httpx.AsyncClient(timeout=10) as c:
+        # 1) Точный doc_id — пробуем uuid5 lookup напрямую (samый быстрый путь).
+        if ':' in inp:
+            point_id = _doc_uuid(inp)
+            r = await c.get(f'{base}/points/{point_id}',
+                            params={'with_payload': 'true', 'with_vector': 'false'})
+            if r.status_code == 200:
+                return _format_doc_lookup_response(inp, r.json())
+
+        # 2) URL → ищем по payload.url (exact match).
+        if inp.startswith(('http://', 'https://')):
+            r = await c.post(f'{base}/points/scroll', json={
+                'limit': 1, 'with_payload': True, 'with_vector': False,
+                'filter': {'must': [{'key': 'url', 'match': {'value': inp}}]},
+            })
+            r.raise_for_status()
+            points = (r.json().get('result') or {}).get('points') or []
+            if points:
+                payload = points[0].get('payload') or {}
+                return _format_doc_lookup_response(payload.get('id') or inp, {'result': {'payload': payload}})
+
+        # 3) URL с pageId или просто numeric — фильтр по суффиксу `:<pageId>` в id.
+        page_id_match = _re.search(r'(?:pageId=|^)(\d+)$', inp)
+        if page_id_match:
+            page_id = page_id_match.group(1)
+            r = await c.post(f'{base}/points/scroll', json={
+                'limit': 5, 'with_payload': True, 'with_vector': False,
+            })
+            r.raise_for_status()
+            # Нужен полноценный фильтр по суффиксу — Qdrant не умеет regex, поэтому
+            # фильтруем приближённо через text match по `:<pageId>` и client-side
+            # уточняем endswith.
+            r2 = await c.post(f'{base}/points/scroll', json={
+                'limit': 50, 'with_payload': True, 'with_vector': False,
+                'filter': {'must': [{'key': 'id', 'match': {'text': page_id}}]},
+            })
+            if r2.status_code == 200:
+                for p in (r2.json().get('result') or {}).get('points') or []:
+                    pl = p.get('payload') or {}
+                    if (pl.get('id') or '').endswith(f':{page_id}'):
+                        return _format_doc_lookup_response(pl['id'], {'result': {'payload': pl}})
+
+    return {'ok': False, 'id': inp, 'error': 'не найден в базе'}
+
+
+def _doc_uuid(doc_id: str) -> str:
+    """Qdrant point id = uuid5(_DOC_NAMESPACE, doc_id). NS из
+    morag.storage.repository._DOC_NAMESPACE."""
+    import uuid
+    _DOC_NS = uuid.UUID('a1b2c3d4-e5f6-7890-abcd-ef1234567890')
+    return str(uuid.uuid5(_DOC_NS, doc_id))
+
+
+def _format_doc_lookup_response(doc_id: str, qdrant_response: dict) -> dict[str, Any]:
+    payload = (qdrant_response.get('result') or {}).get('payload') or {}
+    title = (
+        payload.get('title')
+        or (payload.get('path') or [doc_id])[0]
+        or doc_id
+    )
+    return {
+        'ok': True,
+        'id': payload.get('id') or doc_id,
+        'title': title,
+        'url': payload.get('url') or '',
+    }
+
+
 # ---------------------------------------------------------------------------
 # Request schema (повторяет RetrievalConfig, без обязательности llm-полей —
 # UI может присылать частичные правки + валидация дальше через validate_merged)
@@ -59,12 +155,20 @@ class PromptsIn(BaseModel):
     admin_instructions: str = ''
 
 
+class GlossaryIn(BaseModel):
+    enabled: bool = False
+    doc_id: str = ''                # back-compat (single)
+    doc_ids: list[str] = Field(default_factory=list)
+    description: str = ''
+
+
 class RetrievalIn(BaseModel):
     agent: RoleIn | None = None
     reranker: RoleIn | None = None
     search: SearchIn = SearchIn()
     features: FeaturesIn = FeaturesIn()
     prompts: PromptsIn = PromptsIn()
+    glossary: GlossaryIn = GlossaryIn()
     http_timeout: int | None = None
 
 

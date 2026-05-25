@@ -460,6 +460,31 @@ class RetrievalPromptsConfig(BaseModel):
     admin_instructions: str = ''
 
 
+class RetrievalGlossaryConfig(BaseModel):
+    """Подключаемый tool `lookup_glossary(query)` — обращение к одному или
+    нескольким документам-глоссариям для расшифровки терминов/аббревиатур.
+
+    `doc_ids` — список doc_id (если несколько — реранкер ранжирует чанки из
+    всех вместе, агент видит top по релевантности независимо от источника).
+    Старое поле `doc_id` (single) поддерживается для back-compat — при load
+    конвертируется в `doc_ids=[doc_id]`.
+
+    `enabled=True` без doc_ids — pipeline ругается при init и tool не добавляется.
+    `description` — короткая фраза для system prompt.
+    """
+    enabled: bool = False
+    doc_id: str = ''           # deprecated: для back-compat со старыми конфигами
+    doc_ids: list[str] = Field(default_factory=list)
+    description: str = ''
+
+    @model_validator(mode='after')
+    def _migrate_doc_id(self):
+        """Если задан `doc_id` (single) и `doc_ids` пуст — мигрируем в список."""
+        if self.doc_id and not self.doc_ids:
+            self.doc_ids = [self.doc_id]
+        return self
+
+
 class RetrievalConfig(BaseModel):
     """Настройки агентского RAG-pipeline. Используется services/pipeline.
 
@@ -481,6 +506,7 @@ class RetrievalConfig(BaseModel):
     search: RetrievalSearchConfig = RetrievalSearchConfig()
     features: RetrievalFeaturesConfig = RetrievalFeaturesConfig()
     prompts: RetrievalPromptsConfig = RetrievalPromptsConfig()
+    glossary: RetrievalGlossaryConfig = RetrievalGlossaryConfig()
     http_timeout: int = 300
 
 

@@ -1019,15 +1019,27 @@
                                       (chip.status === 'loading' ? ' loading' : '') +
                                       (chip.status === 'error' ? ' error' : '')"
                               :title="chip.url || chip.error || chip.id">
-                          <span class="chip-id" x-text="/^\d+$/.test(chip.id) ? chip.id : '🔗'"></span>
-                          <template x-if="chip.status === 'loading'">
-                            <span><span class="chip-sep">·</span>загрузка…</span>
+                          <template x-if="chip.url">
+                            <a :href="chip.url" target="_blank" rel="noopener" style="color:inherit; text-decoration:none">
+                              <span class="chip-id" x-text="/^\d+$/.test(chip.id) ? chip.id : '🔗'"></span>
+                              <template x-if="chip.status === 'ok' && chip.path">
+                                <span><span class="chip-sep">·</span><span class="chip-path" x-text="chip.path"></span></span>
+                              </template>
+                            </a>
                           </template>
-                          <template x-if="chip.status === 'error'">
-                            <span><span class="chip-sep">·</span>⚠ не найдено</span>
-                          </template>
-                          <template x-if="chip.status === 'ok' && chip.path">
-                            <span><span class="chip-sep">·</span><span class="chip-path" x-text="chip.path"></span></span>
+                          <template x-if="!chip.url">
+                            <span>
+                              <span class="chip-id" x-text="/^\d+$/.test(chip.id) ? chip.id : '🔗'"></span>
+                              <template x-if="chip.status === 'loading'">
+                                <span><span class="chip-sep">·</span>загрузка…</span>
+                              </template>
+                              <template x-if="chip.status === 'error'">
+                                <span><span class="chip-sep">·</span>⚠ не найдено</span>
+                              </template>
+                              <template x-if="chip.status === 'ok' && chip.path">
+                                <span><span class="chip-sep">·</span><span class="chip-path" x-text="chip.path"></span></span>
+                              </template>
+                            </span>
                           </template>
                           <button type="button" class="chip-rm"
                                   @click="removeChip(field.name, idx)"
@@ -1537,6 +1549,68 @@
           </div>
         </div>
 
+        <h3 style="margin-top:1.2rem; margin-bottom:0.4rem; font-size:0.95rem">Глоссарий (опциональный tool)</h3>
+        <div class="help" style="margin-bottom:0.6rem">
+          Если включён — агент получит дополнительный tool
+          <code>lookup_glossary(query)</code> для расшифровки аббревиатур и
+          терминов из указанного документа. Применяется когда вопрос содержит
+          непонятные сокращения или специальные термины.
+        </div>
+        <div style="margin-bottom:0.6rem">
+          <label style="display:flex; align-items:center; gap:0.5rem; margin:0">
+            <input type="checkbox"
+                   :checked="setup.retrieval.glossary.enabled"
+                   @change="setup.retrieval.glossary.enabled = $event.target.checked">
+            <span>Подключить глоссарий</span>
+          </label>
+        </div>
+        <div x-show="setup.retrieval.glossary.enabled" style="margin-top:0.5rem">
+          <label>Документы-глоссарии (можно несколько; doc_id, URL страницы или просто pageId)</label>
+          <div class="chip-list">
+            <template x-for="(chip, idx) in (setup.retrieval.glossary.doc_chips || [])" :key="chip.id + ':' + idx">
+              <span :class="'chip' +
+                            (chip.status === 'loading' ? ' loading' : '') +
+                            (chip.status === 'error' ? ' error' : '')"
+                    :title="chip.url || chip.error || chip.id">
+                <template x-if="chip.url">
+                  <a :href="chip.url" target="_blank" rel="noopener" style="color:inherit; text-decoration:none">
+                    <span class="chip-id" x-text="_glossaryChipLabel(chip)"></span>
+                    <template x-if="chip.title">
+                      <span><span class="chip-sep">·</span><span class="chip-path" x-text="chip.title"></span></span>
+                    </template>
+                  </a>
+                </template>
+                <template x-if="!chip.url">
+                  <span>
+                    <span class="chip-id" x-text="_glossaryChipLabel(chip)"></span>
+                    <template x-if="chip.status === 'loading'">
+                      <span><span class="chip-sep">·</span>загрузка…</span>
+                    </template>
+                    <template x-if="chip.status === 'error'">
+                      <span><span class="chip-sep">·</span>⚠ <span x-text="chip.error || 'не найден'"></span></span>
+                    </template>
+                    <template x-if="chip.title && !chip.error">
+                      <span><span class="chip-sep">·</span><span class="chip-path" x-text="chip.title"></span></span>
+                    </template>
+                  </span>
+                </template>
+                <button type="button" class="chip-rm"
+                        @click="removeGlossaryDoc(idx)"
+                        title="Удалить">×</button>
+              </span>
+            </template>
+            <input class="chip-input" type="text"
+                   :placeholder="(setup.retrieval.glossary.doc_chips || []).length ? '' : 'pageId / URL страницы / confluence:virgo:1068775100'"
+                   @keydown="onGlossaryChipKeydown($event)"
+                   @paste="onGlossaryChipPaste($event)"
+                   @blur="flushGlossaryChipInput($event)">
+          </div>
+          <label style="margin-top:0.7rem">Описание глоссария (попадает в system prompt агента)</label>
+          <textarea x-model="setup.retrieval.glossary.description"
+                    placeholder="Например: «Содержит расшифровки внутренних аббревиатур и специальных терминов компании»."
+                    style="min-height:3.5rem"></textarea>
+        </div>
+
         <h3 style="margin-top:1.2rem; margin-bottom:0.4rem; font-size:0.95rem">System prompt</h3>
         <label>Admin instructions (вклеиваются в system prompt)</label>
         <textarea x-model="setup.retrieval.prompts.admin_instructions"
@@ -1633,6 +1707,7 @@
             },
             features: { enable_diversity_nudge: null },
             prompts: { admin_instructions: '' },
+            glossary: { enabled: false, doc_id: '', description: '', doc_chip: null },
             http_timeout: null,
             // UI state
             llms: [],                             // подгружаются с /api/retrieval/config
@@ -2531,13 +2606,152 @@
             this.setup.retrieval.prompts = {
               admin_instructions: eff.prompts?.admin_instructions ?? '',
             };
+            const gl = eff.glossary || {};
+            // Поддержка обоих форматов: новый doc_ids (list) и старый doc_id (single).
+            const ids = (gl.doc_ids && gl.doc_ids.length)
+              ? gl.doc_ids
+              : (gl.doc_id ? [gl.doc_id] : []);
+            this.setup.retrieval.glossary = {
+              enabled: !!gl.enabled,
+              doc_ids: [...ids],
+              description: gl.description || '',
+              doc_chips: ids.map(id => ({ id, status: 'loading' })),
+            };
             this.setup.retrieval.http_timeout = eff.http_timeout ?? null;
             this.setup.retrieval.loaded = true;
             this.setup.retrieval.result = '';
+            // Резолвим title для всех существующих chip'ов параллельно.
+            for (const chip of this.setup.retrieval.glossary.doc_chips) {
+              this._resolveGlossaryChipById(chip.id);
+            }
           } catch (e) {
             this.setup.retrieval.result = '✗ Не удалось загрузить: ' + e.message;
             this.setup.retrieval.resultKind = 'error';
           }
+        },
+
+        // ─── Glossary chips — единообразное поведение с Confluence-чипами ───
+        // Используем тот же `_parseChipTokens` (numeric pageId / URL?pageId=…)
+        // + расширение: примем «голый» doc_id вида `confluence:name:id`. Резолв
+        // через локальный /api/retrieval/doc-lookup (наш backend нормализует
+        // URL → canonical id и возвращает title/url).
+
+        _parseGlossaryTokens(text) {
+          if (!text) return [];
+          const tokens = this._parseChipTokens(text);
+          // Дополнительно ловим строки вида `prefix:name:pageId` (doc_id) и
+          // прочие непустые токены, которые встречающийся parser отбросил.
+          const seen = new Set(tokens.map(t => t.id));
+          for (const raw of text.split(/[\s,;]+/)) {
+            const s = raw.trim();
+            if (!s || seen.has(s)) continue;
+            if (/^\d+$/.test(s) || /^https?:\/\//i.test(s)) continue; // уже учтено
+            tokens.push({ id: s, kind: 'doc_id' });
+            seen.add(s);
+          }
+          return tokens;
+        },
+
+        _addGlossaryChips(tokens) {
+          const list = this.setup.retrieval.glossary.doc_chips || [];
+          const existing = new Set(list.map(c => c.id));
+          const added = [];
+          for (const tok of tokens) {
+            if (existing.has(tok.id)) continue;
+            existing.add(tok.id);
+            list.push({ id: tok.id, status: 'loading', kind: tok.kind });
+            added.push(tok.id);
+          }
+          this.setup.retrieval.glossary.doc_chips = [...list];
+          for (const id of added) this._resolveGlossaryChipById(id);
+          return added;
+        },
+
+        async _resolveGlossaryChipById(rawId) {
+          // Найти chip с этим id (input) и резолвнуть через backend.
+          const find = () => (this.setup.retrieval.glossary.doc_chips || [])
+            .findIndex(c => c.id === rawId);
+          let idx = find();
+          if (idx < 0) return;
+          let r;
+          try {
+            r = await this.fetchJson(`/api/retrieval/doc-lookup?id=${encodeURIComponent(rawId)}`);
+          } catch (e) {
+            r = { ok: false, error: e.message };
+          }
+          const list = this.setup.retrieval.glossary.doc_chips || [];
+          idx = find();  // могло сдвинуться, ищем снова
+          if (idx < 0) return;
+          if (r.ok) {
+            list[idx] = { ...list[idx], id: r.id, status: 'ok', title: r.title, url: r.url, kind: 'doc_id' };
+          } else {
+            list[idx] = { ...list[idx], status: 'error', error: r.error };
+          }
+          this.setup.retrieval.glossary.doc_chips = [...list];
+          this._syncGlossaryDocIds();
+        },
+
+        _glossaryChipLabel(chip) {
+          // Что показать как chip-id: численный pageId — это, doc_id «conf:x:N» →
+          // показать N, прочее → 🔗.
+          const id = chip.id || '';
+          if (/^\d+$/.test(id)) return id;
+          const m = id.match(/:(\d+)$/);
+          if (m) return m[1];
+          return '🔗';
+        },
+
+        onGlossaryChipKeydown(event) {
+          if (event.key === 'Enter' || event.key === ',' || event.key === ' ' || event.key === 'Tab') {
+            const text = event.target.value;
+            const ids = this._parseGlossaryTokens(text);
+            if (ids.length) {
+              event.preventDefault();
+              event.target.value = '';
+              this._addGlossaryChips(ids);
+            } else if (event.key === 'Enter') {
+              event.preventDefault();
+            }
+          } else if (event.key === 'Backspace' && !event.target.value) {
+            const list = this.setup.retrieval.glossary.doc_chips || [];
+            if (list.length) {
+              list.pop();
+              this.setup.retrieval.glossary.doc_chips = [...list];
+              this._syncGlossaryDocIds();
+            }
+          }
+        },
+
+        onGlossaryChipPaste(event) {
+          const text = (event.clipboardData || window.clipboardData).getData('text');
+          const ids = this._parseGlossaryTokens(text);
+          if (ids.length) {
+            event.preventDefault();
+            this._addGlossaryChips(ids);
+          }
+        },
+
+        flushGlossaryChipInput(event) {
+          const text = event.target.value;
+          const ids = this._parseGlossaryTokens(text);
+          if (ids.length) {
+            event.target.value = '';
+            this._addGlossaryChips(ids);
+          }
+        },
+
+        removeGlossaryDoc(idx) {
+          const list = this.setup.retrieval.glossary.doc_chips || [];
+          list.splice(idx, 1);
+          this.setup.retrieval.glossary.doc_chips = [...list];
+          this._syncGlossaryDocIds();
+        },
+
+        _syncGlossaryDocIds() {
+          // doc_chips → doc_ids: оставляем только successfully resolved.
+          this.setup.retrieval.glossary.doc_ids = (this.setup.retrieval.glossary.doc_chips || [])
+            .filter(c => c.status === 'ok')
+            .map(c => c.id);
         },
 
         async saveRetrieval() {
@@ -2550,6 +2764,11 @@
               search: this.setup.retrieval.search,
               features: this.setup.retrieval.features,
               prompts: this.setup.retrieval.prompts,
+              glossary: {
+                enabled: this.setup.retrieval.glossary.enabled,
+                doc_ids: this.setup.retrieval.glossary.doc_ids || [],
+                description: this.setup.retrieval.glossary.description,
+              },
               http_timeout: this.setup.retrieval.http_timeout,
             };
             const r = await this.fetchJson('/api/retrieval/config', {
