@@ -46,6 +46,91 @@ Write a descriptive overview of this section:
 """
 
 
+# ==========================================================================
+# Промпты для нового KM-алгоритма (frontier + bottom-up summarization).
+# Карта предназначена для AI-агента: по ней он решает, в какой section_id
+# идти искать ответ. Поэтому в описаниях важны якоря для навигации
+# (имена систем/тем/инструментов), а не литература.
+# ==========================================================================
+
+# Intermediate: bottom-up summary поддерева. Цель — продуктивный текст с
+# навигационными якорями. БЕЗ строгого target на длину — LLM решает сам.
+_KM_INTERMEDIATE_PROMPT = """\
+Ты строишь карту документации для AI-агента. По карте агент решает, в какой раздел идти искать ответ на вопрос пользователя.
+
+Опиши раздел «{section_title}». Карта — навигационный инструмент, а не учебник.
+
+Что включить (якоря для навигации):
+- Имена систем, сервисов, инструментов (например: Casper, Абрам, Гэндальф, Kubernetes, ClickHouse).
+- Доменные темы и понятия (не «процессы», а «онбординг, эскалация инцидентов, ретроспективы»).
+- Названия продуктов, команд, проектов, отделов.
+- НЕ перечисляй все ID документов из исходника — это не нужно для навигации, агент сам найдёт.
+
+Что не нужно:
+- Markdown-заголовки (#, ##), списки, буллеты.
+- Общие фразы: «единый источник правды», «обеспечивает прозрачность», «централизованный репозиторий», «исчерпывающее руководство», «комплексный справочник».
+- Литературные обороты, метафоры, оценочные суждения.
+- Лишние пояснения «что значит этот термин» — агент знает термины.
+
+Формат: один связный абзац, описательный стиль, лаконично. На языке оригинала.
+
+Содержимое раздела:
+{children_summaries}
+"""
+
+
+# Compact: жёсткое сжатие финального summary узла под budget. iter 0 = разумный
+# размер с примером, iter ≥1 = супер-сжатый формат. target в предложениях
+# (LLM лучше следует «N предложений» чем «N токенов») + format example.
+_KM_COMPACT_PROMPT = """\
+Это описание раздела «{section_title}» для карты документации AI-агента. Карта — это короткий каталог тем, не справочник.
+
+ЗАДАЧА: ПЕРЕПИШИ описание в формате «{target_sentences} предложений, не больше».
+
+Что должно быть:
+- Краткая суть раздела (1 предложение про общую тему).
+- Перечисление 3-7 ключевых подтем через запятую (просто названия, без описаний).
+- 1-3 главных имени систем/инструментов если они есть.
+
+Что НЕЛЬЗЯ:
+- Перечислять ID документов (это уже не нужно тут).
+- Описывать содержимое каждой подтемы.
+- Использовать общие фразы «единый источник», «обеспечивает», «централизованный».
+- Делать список или буллеты — нужен связный текст.
+
+ПРИМЕР ХОРОШЕГО ОПИСАНИЯ ({target_sentences} предл.):
+«Раздел про DevOps-практики команды ML. Ключевые темы: онбординг, эскалация инцидентов, ретроспективы, перформанс-ревью. Основные инструменты: Jira, Confluence, Slack.»
+
+Исходный текст:
+{text}
+"""
+
+
+# Compact с эскалацией: ещё жёстче, ещё короче, плюс возможная смена формата.
+_KM_COMPACT_PROMPT_HARDER = """\
+Описание раздела «{section_title}» всё ещё длиннее нужного ({current_tokens} токенов, нужно ~{target_tokens} = {target_sentences} предложений).
+
+ВАЖНО: предыдущая попытка БЫЛА СЛИШКОМ ДЛИННОЙ. Сейчас сделай ЕЩЁ КОРОЧЕ.
+
+Финальный формат — РОВНО {target_sentences} предложения:
+- 1 предложение: о чём этот раздел в целом.
+- 1 предложение: 3-5 ключевых тем через запятую (только названия!).
+{extra_line}
+
+ЗАПРЕТЫ:
+- Никаких ID документов.
+- Никаких подробностей про подразделы.
+- Никаких общих фраз («единый источник правды», «обеспечивает» и т.п.).
+- Только связный текст, БЕЗ списков/буллетов/заголовков.
+
+ПРИМЕР:
+«Раздел про эксплуатацию ML-систем команды Х. Ключевые темы: инциденты, мониторинг, ретроспективы.»
+
+Текущий текст (слишком длинный):
+{text}
+"""
+
+
 # Adaptive weighted-стратегия. Глубина — фиксированная: root → дети → стоп.
 _KM_MAX_DEPTH = 2
 # Минимальное число токенов на одну brief-строку «- Имя (id: …) — хинт».
@@ -111,6 +196,9 @@ class KnowledgeMapGenerator:
         flat_topics_target: int | None = None,
         flat_topics_max_input_docs: int = 3000,
         flat_topics_assign_batch: int = 5,
+        subtree_depth_limit: int = 2,
+        intermediate_max_tokens: int | None = 8192,
+        per_element_min_tokens: int = 50,
     ) -> None:
         self._client = client
         self._llm_client = llm_client
@@ -125,6 +213,17 @@ class KnowledgeMapGenerator:
         self._flat_topics_target = flat_topics_target
         self._flat_topics_max_input_docs = flat_topics_max_input_docs
         self._flat_topics_assign_batch = flat_topics_assign_batch
+        # Параметры нового алгоритма (frontier + bottom-up).
+        self._subtree_depth_limit = subtree_depth_limit
+        self._intermediate_max_tokens = intermediate_max_tokens
+        self._per_element_min_tokens = per_element_min_tokens
+        # Точный overhead промпта-шаблона (без children_summaries).
+        self._prompt_overhead_tokens = self._counter.count(
+            _KM_INTERMEDIATE_PROMPT.format(
+                section_title='X' * 50,
+                children_summaries='',
+            ),
+        )
 
     async def ensure_collection(self) -> None:
         """Создать коллекцию для карт если не существует."""
@@ -458,12 +557,42 @@ class KnowledgeMapGenerator:
         children_map: dict[str, list[Document]],
         weights: dict[str, int],
     ) -> str:
-        """Диспетчер. На максимальной глубине / для листа — collapse. Иначе —
-        expandable, где per-child решается «отдельный раздел или строка перечня»."""
+        """Диспетчер. На максимальной глубине / для листа — collapse.
+
+        Pre-check: если бюджет на элемент expandable < per_element_min_tokens —
+        сразу collapse без попытки expandable (защита от случаев типа
+        «128 children + budget 1024 = 7 ток на элемент — невозможно»).
+
+        H2-fallback: если expandable перерасходовал свой budget — откатываемся
+        на collapse с тем же budget.
+        """
         children = children_map.get(doc.id, [])
         if depth >= _KM_MAX_DEPTH or not children:
             return await self._render_collapse(doc, budget, depth, children_map)
-        return await self._render_expandable(doc, budget, depth, children_map, weights)
+
+        # Pre-check
+        per_element = budget / (len(children) + 1)
+        if per_element < self._per_element_min_tokens:
+            logger.info(
+                'KnowledgeMap: precheck %s: per-element %.1f < %d (children=%d, '
+                'budget=%d) → collapse',
+                doc.id, per_element, self._per_element_min_tokens,
+                len(children), budget,
+            )
+            return await self._render_collapse(doc, budget, depth, children_map)
+
+        expanded = await self._render_expandable(
+            doc, budget, depth, children_map, weights,
+        )
+        expanded_tokens = self._counter.count(expanded)
+        if expanded_tokens <= budget:
+            return expanded
+
+        logger.info(
+            'KnowledgeMap: expand %s overflow %d > budget %d → fallback to collapse',
+            doc.id, expanded_tokens, budget,
+        )
+        return await self._render_collapse(doc, budget, depth, children_map)
 
     async def _render_expandable(
         self,
@@ -556,70 +685,223 @@ class KnowledgeMapGenerator:
         depth: int,
         children_map: dict[str, list[Document]],
     ) -> str:
-        """## Header + один summary, покрывающий узел и весь subtree.
+        """## Header + один summary всего поддерева.
 
-        Используется для листьев и для узлов на максимальной глубине.
-        Никаких truncate'ов — только LLM-обобщение с recompact-петлёй.
+        Алгоритм: итеративный top-down + restart с frontier-поиском
+        (см. `_subtree_summary`), затем финальный compact_until_fits до budget.
+        Без truncate'ов — только LLM-обобщения с эскалирующими промптами.
         """
-        children = children_map.get(doc.id, [])
         prefix = '#' * min(depth + 1, 4)
         title = _node_title(doc)
 
-        if not children:
-            desc = await self._compact_until_fits(
-                title, doc.payload.get('doc_summary', '') or '', budget,
-            )
-            parts = [f'{prefix} {title} (id: {doc.id})', '']
-            if desc:
-                parts.extend([desc, ''])
-            return '\n'.join(parts)
-
-        # raw_map = doc_summary всех потомков, LLM обобщает в budget токенов.
-        raw_lines: list[str] = []
-        self._build_raw_map(children, children_map, raw_lines, heading_level=2)
-        raw_map = '\n'.join(raw_lines)
-
-        # max_tokens здесь — НЕ cap на размер summary, а либеральный guard
-        # против runaway-генерации. LLM может выдать больше budget; за этим
-        # пойдёт _compact_until_fits, который через recompact-петлю сожмёт
-        # без обрезок.
-        liberal_max = max(int(budget * 1.5) + 64, 256)
-        input_budget = self._llm_client.context_window - 500 - liberal_max
-        raw_tokens = self._counter.count(raw_map)
-        if raw_tokens <= input_budget or input_budget <= 0:
-            description = await self._summarize_batch(title, raw_map, max_tokens=liberal_max)
-        else:
-            logger.info(
-                'KnowledgeMap: collapse %s — raw %d tok > %d available, batched',
-                doc.id, raw_tokens, input_budget,
-            )
-            description = await self._iterative_summarize(
-                title, raw_lines, input_budget, liberal_max,
-            )
-        # _summarize_batch с liberal_max почти всегда выдаст больше budget —
-        # рекурсивно сжимаем через LLM до точного укладывания.
-        description = await self._compact_until_fits(title, description, budget)
+        description = await self._subtree_summary(doc, children_map)
+        if description:
+            description = await self._compact_until_fits(title, description, budget)
 
         parts = [f'{prefix} {title} (id: {doc.id})', '']
         if description:
             parts.extend([description, ''])
         return '\n'.join(parts)
 
-    async def _compact_until_fits(
-        self, title: str, text: str, target_tokens: int, max_iters: int = 4,
+    async def _subtree_summary(
+        self,
+        doc: Document,
+        children_map: dict[str, list[Document]],
     ) -> str:
-        """Сжать text до target_tokens через LLM. Никаких truncate'ов.
+        """Итеративный top-down + restart с frontier-поиском.
+
+        Алгоритм:
+          1. Построить markdown поддерева (с учётом replacements уже свёрнутых
+             узлов и subtree_depth_limit).
+          2. Если влезает в context → один финальный LLM-вызов → return.
+          3. Иначе найти все «frontier» подсуббри (которые сами влезают в
+             context), параллельно их сжать, записать в replacements.
+          4. Restart loop.
+
+        Если ни одного нового frontier — fallback на `_iterative_summarize`
+        (бывает когда корень имеет много прямых потомков, каждый уже свёрнут).
+        """
+        title = _node_title(doc)
+        replacements: dict[str, str] = {}
+        reserve = self._intermediate_max_tokens or 4096
+        threshold = (
+            self._llm_client.context_window
+            - self._prompt_overhead_tokens
+            - reserve
+        )
+
+        max_iters = 10
+        for iteration in range(max_iters):
+            md = self._build_subtree_md(doc, children_map, replacements, depth=0)
+            md_size = self._counter.count(md)
+
+            if md_size <= threshold:
+                logger.info(
+                    'KnowledgeMap: frontier %s: tree fits %d ≤ %d → final LLM (iter %d)',
+                    doc.id, md_size, threshold, iteration,
+                )
+                return await self._summarize_subtree_llm(title, md)
+
+            frontiers: list[Document] = []
+            self._find_frontiers(
+                doc, children_map, replacements, threshold, frontiers,
+                exclude_self=True,
+            )
+
+            if not frontiers:
+                logger.info(
+                    'KnowledgeMap: frontier %s: no candidates at %d > %d → iterative_summarize',
+                    doc.id, md_size, threshold,
+                )
+                items = md.split('\n\n')
+                input_budget = self._llm_client.context_window - 500 - reserve
+                return await self._iterative_summarize(
+                    title, items, input_budget, reserve,
+                )
+
+            logger.info(
+                'KnowledgeMap: frontier %s iter %d: md=%d, summarizing %d frontiers',
+                doc.id, iteration, md_size, len(frontiers),
+            )
+
+            new_summaries = await asyncio.gather(*(
+                self._summarize_subtree_llm(
+                    _node_title(f),
+                    self._build_subtree_md(f, children_map, replacements, depth=0),
+                ) for f in frontiers
+            ))
+            for f, s in zip(frontiers, new_summaries):
+                replacements[f.id] = s
+
+        # Safety — не должны досюда дойти
+        logger.warning(
+            'KnowledgeMap: frontier %s: max iterations reached, fallback',
+            doc.id,
+        )
+        md = self._build_subtree_md(doc, children_map, replacements, depth=0)
+        return await self._summarize_subtree_llm(title, md)
+
+    def _build_subtree_md(
+        self,
+        doc: Document,
+        children_map: dict[str, list[Document]],
+        replacements: dict[str, str],
+        depth: int,
+    ) -> str:
+        """Markdown поддерева doc с учётом replacements и subtree_depth_limit.
+
+        Structural-документы — pass-through (не считаются в счётчике глубины),
+        потому что они навигационные контейнеры без контента.
+        """
+        prefix = '#' * min(depth + 1, 4)
+        title = _node_title(doc)
+        lines = [f'{prefix} {title} (id: {doc.id})']
+
+        if doc.id in replacements:
+            lines.append(replacements[doc.id])
+            return '\n'.join(lines)
+
+        own = (doc.payload.get('doc_summary') or '').strip()
+        if own:
+            lines.append(own)
+
+        for c in children_map.get(doc.id, []):
+            if c.structural:
+                child_depth = depth  # structural не увеличивает счётчик
+            else:
+                if depth + 1 > self._subtree_depth_limit:
+                    continue
+                child_depth = depth + 1
+            lines.append('')
+            lines.append(
+                self._build_subtree_md(c, children_map, replacements, child_depth),
+            )
+        return '\n'.join(lines)
+
+    def _find_frontiers(
+        self,
+        doc: Document,
+        children_map: dict[str, list[Document]],
+        replacements: dict[str, str],
+        threshold: int,
+        out: list[Document],
+        exclude_self: bool = False,
+        depth: int = 0,
+    ) -> None:
+        """Найти узлы, чья subtree-md помещается в threshold. Останавливаемся
+        на первом fitting в каждой ветке (самый высокий frontier)."""
+        if doc.id in replacements:
+            return
+        if not doc.structural and depth > self._subtree_depth_limit:
+            return
+        children = children_map.get(doc.id, [])
+        if not children:
+            return
+        if not exclude_self:
+            md = self._build_subtree_md(doc, children_map, replacements, depth=0)
+            if self._counter.count(md) <= threshold:
+                out.append(doc)
+                return
+        for c in children:
+            child_depth = depth if c.structural else depth + 1
+            self._find_frontiers(
+                c, children_map, replacements, threshold, out,
+                depth=child_depth,
+            )
+
+    async def _summarize_subtree_llm(self, title: str, raw_md: str) -> str:
+        """Один LLM-вызов на summary поддерева через _KM_INTERMEDIATE_PROMPT.
+        Без target в промпте — LLM сам решает длину. Без max_tokens cap —
+        иначе LLM режется посередине слова/id.
+
+        Если input не влезает в context → fallback на _iterative_summarize.
+        """
+        if not raw_md:
+            return ''
+
+        prompt = _KM_INTERMEDIATE_PROMPT.format(
+            section_title=title,
+            children_summaries=raw_md,
+        )
+
+        max_tokens = self._intermediate_max_tokens  # может быть None
+        reserve = max_tokens if max_tokens is not None else 4096
+        input_budget = self._llm_client.context_window - reserve
+        prompt_size = self._counter.count(prompt)
+
+        if prompt_size <= input_budget or input_budget <= 0:
+            async with self._sem:
+                try:
+                    result = await self._llm_client.complete(
+                        [{'role': 'user', 'content': prompt}],
+                        max_tokens=max_tokens,
+                        params=GenerationParams(enable_thinking=False),
+                    )
+                    return result.strip()
+                except Exception:
+                    logger.exception('KnowledgeMap: summarize failed for %s', title)
+                    return raw_md  # fallback — без сжатия
+
+        items = raw_md.split('\n\n')
+        return await self._iterative_summarize(
+            title, items, input_budget, reserve,
+        )
+
+    async def _compact_until_fits(
+        self, title: str, text: str, target_tokens: int, max_iters: int = 5,
+    ) -> str:
+        """Сжать text до target_tokens через LLM с progressive halving.
 
         Принцип:
-          - Если текст уже ≤ target — возвращаем как есть.
-          - Иначе LLM сжимает с формулировкой, варьируемой по итерации
-            («вдвое короче» → «всё ещё длинно» → «оставь только главное» → …).
-          - max_tokens в API ставим либерально — это техническая защита от
-            runaway, а не cap на результат (иначе LLM режет на середине).
-          - Если LLM не уложился — повтор с более жёсткой просьбой, пока
-            (а) уложимся, (б) max_iters, (в) прогресса больше нет.
-          - В корнере (LLM упёрся): возвращаем последний результат как есть —
-            переборщить на N токенов лучше, чем потерять смысл обрезкой.
+          - Если текст ≤ target — возвращаем как есть, без LLM.
+          - Иначе step-by-step: если current >> target (×4+) → step_target =
+            current/2 (LLM делает 2× компрессию надёжно). Меньшее over → ближе
+            к target. Достижимые шаги вместо «сожми в 14 раз за один присест».
+          - Никаких truncate'ов. max_tokens=None в LLM-вызове, текст не
+            режется посередине слова/id. LLM может выдать больше target —
+            следующая итерация recompact'нёт.
+          - Если LLM упёрся (2 итерации подряд без прогресса) — возвращаем
+            best_text. Переборщить на N токенов лучше, чем обрезка.
         """
         text = (text or '').strip()
         if not text:
@@ -628,31 +910,35 @@ class KnowledgeMapGenerator:
         if current <= target_tokens:
             return text
 
-        # Идём по всем итерациям до max_iters — каждая итерация использует
-        # ДРУГУЮ формулировку promtа. Прерываемся только если последовательно
-        # 2 итерации подряд не дали прогресса (упёрлись).
         stuck = 0
         best_text = text
         best_tokens = current
         for iter_idx in range(max_iters):
+            # Прогрессивный step_target — достижимая компрессия.
+            if current > target_tokens * 4:
+                step_target = max(current // 2, target_tokens)
+            elif current > target_tokens * 2:
+                step_target = max(int(current * 0.55), target_tokens)
+            else:
+                step_target = target_tokens
+
             new_text = await self._llm_compact_to_target(
-                title, text, target_tokens, current, iter_idx,
+                title, text, step_target, current, iter_idx,
             )
             new_tokens = self._counter.count(new_text)
             if new_tokens <= target_tokens:
                 return new_text
             if new_tokens < best_tokens:
                 best_text, best_tokens = new_text, new_tokens
-            if new_tokens >= int(current * 0.95):
+            if new_tokens >= int(current * 0.85):
                 stuck += 1
-                if stuck >= 2:
+                if stuck >= 3:
                     logger.warning(
-                        'KnowledgeMap: compact_until_fits «%s» не сходится '
-                        '(%d → %d ток, цель %d, итер %d). Возвращаю наименьший.',
-                        title, current, best_tokens, target_tokens, iter_idx,
+                        'KnowledgeMap: compact %s stuck at %d (target %d, '
+                        '%d iters); returning best=%d',
+                        title, current, target_tokens, iter_idx + 1, best_tokens,
                     )
                     return best_text
-                # текст не меняем — пробуем другую формулировку на тех же данных
                 continue
             stuck = 0
             text, current = new_text, new_tokens
@@ -666,50 +952,47 @@ class KnowledgeMapGenerator:
         current_tokens: int,
         iter_idx: int,
     ) -> str:
-        """Один LLM-вызов сжатия. Формулировка варьируется по итерации, чтобы
-        LLM попробовал разные стратегии. max_tokens — не cap, а guard rail."""
-        ratio = max(current_tokens / max(target_tokens, 1), 1.3)
-        ratio_word = _ratio_in_words(ratio)
+        """Compact с эскалацией промпта.
+
+        LLM плохо считает токены, но хорошо предложения. Переводим
+        target_tokens → target_sentences (~12-15 ток на предложение) +
+        даём format example. iter 0 — базовый, iter ≥1 — жёстче.
+
+        max_tokens=None: LLM не должен резаться на середине слова/id.
+        """
+        # ~13 токенов на предложение в среднем (русский + английский смешанный)
+        target_sentences = max(target_tokens // 13, 2)
         if iter_idx == 0:
-            instruction = (
-                f'Сожми описание раздела «{title}» {ratio_word} короче, '
-                f'не теряя ключевых тем и сути.'
-            )
-        elif iter_idx == 1:
-            instruction = (
-                f'Описание раздела «{title}» всё ещё слишком длинное. '
-                f'Перепиши его ещё вдвое короче, оставляя ключевые темы.'
-            )
-        elif iter_idx == 2:
-            instruction = (
-                f'Описание раздела «{title}» нужно ещё сократить. '
-                f'Оставь только главное — 2–3 предложения о том, что в разделе.'
+            prompt = _KM_COMPACT_PROMPT.format(
+                section_title=title,
+                target_tokens=target_tokens,
+                target_sentences=target_sentences,
+                text=text,
             )
         else:
-            instruction = (
-                f'Финальная попытка: опиши раздел «{title}» одним связным '
-                f'абзацем длиной примерно {target_tokens} токенов. '
-                f'Любые подробности можно опустить, но смысл сохрани.'
+            tight_sentences = max(target_sentences - iter_idx, 2)
+            extra_line = (
+                '- 1 предложение: основные инструменты/системы.'
+                if tight_sentences >= 3 else ''
             )
-
-        prompt = (
-            f'{instruction} Уложись примерно в {target_tokens} токенов. '
-            f'Закончи законченным предложением. Без markdown-заголовков. '
-            f'Отвечай на языке оригинала.\n\n{text}'
-        )
-        # Либеральный max_tokens: даём LLM свободу нормально закончить мысль.
-        # Если он выйдет за target — следующая итерация recompact'нёт. Не cap.
-        max_tokens = max(int(target_tokens * 2) + 64, 256)
+            prompt = _KM_COMPACT_PROMPT_HARDER.format(
+                section_title=title,
+                target_tokens=target_tokens,
+                target_sentences=tight_sentences,
+                current_tokens=current_tokens,
+                extra_line=extra_line,
+                text=text,
+            )
         async with self._sem:
             try:
                 result = await self._llm_client.complete(
                     [{'role': 'user', 'content': prompt}],
-                    max_tokens=max_tokens,
+                    max_tokens=None,
                     params=GenerationParams(enable_thinking=False),
                 )
                 return result.strip()
             except Exception:
-                logger.exception('KnowledgeMap: compact LLM call failed for «%s»', title)
+                logger.exception('KnowledgeMap: compact LLM call failed for %s', title)
                 return text
 
     # ── flat_topics strategy ──────────────────────────────────────────────

@@ -112,6 +112,9 @@ indexing:
     prompt_strategy: weighted        # 'weighted' (adaptive, глубина=2) | 'flat_topics'
     prompt_budget: 8192              # целевой размер system prompt в токенах
     node_min_tokens: 256             # порог big-vs-brief: ниже — узел уходит в перечень одной строкой
+    subtree_depth_limit: 2           # глубина subtree-md при сжатии (structural pass-through)
+    intermediate_max_tokens: 8192    # safety cap для intermediate LLM-вызовов (null = без cap)
+    per_element_min_tokens: 50       # если budget/children < 50 → сразу collapse без expandable
     # exclude_source_types: ['attached_jira', 'attached_pdf', 'jira']
     # flat_topics_target: 20         # целевое число тем (для flat_topics)
     # flat_topics_assign_batch: 5

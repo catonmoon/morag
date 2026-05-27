@@ -695,6 +695,9 @@ async def cmd_index(
                 flat_topics_target=km_cfg.flat_topics_target,
                 flat_topics_max_input_docs=km_cfg.flat_topics_max_input_docs,
                 flat_topics_assign_batch=km_cfg.flat_topics_assign_batch,
+                subtree_depth_limit=km_cfg.subtree_depth_limit,
+                intermediate_max_tokens=km_cfg.intermediate_max_tokens,
+                per_element_min_tokens=km_cfg.per_element_min_tokens,
             )
             # Roots — собираются со ВСЕХ Confluence-инстансов. ancestor_ids
             # в config — raw external IDs, в Qdrant они хранятся prefixed:
@@ -778,6 +781,9 @@ async def cmd_rebuild_km(
         flat_topics_target=km_cfg.flat_topics_target,
         flat_topics_max_input_docs=km_cfg.flat_topics_max_input_docs,
         flat_topics_assign_batch=km_cfg.flat_topics_assign_batch,
+        subtree_depth_limit=km_cfg.subtree_depth_limit,
+        intermediate_max_tokens=km_cfg.intermediate_max_tokens,
+        per_element_min_tokens=km_cfg.per_element_min_tokens,
     )
     # Roots — со всех Confluence-инстансов, prefix как в ID документов
     root_ids = set()

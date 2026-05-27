@@ -298,6 +298,19 @@ class KnowledgeMapConfig(BaseModel):
     # (длинный input при iterative_summarize для крупных секций) — снижаем
     # отдельно, не трогая doc-параллелизм.
     concurrency: int | None = None
+    # Максимальная глубина subtree-markdown'a при сжатии (frontier-алгоритм).
+    # Считается от корня раздела (= 0). Structural-документы не считаются в
+    # счётчике (pass-through). 2 — оптимально для глубоких деревьев (Confluence):
+    # render H2 (depth 0) + H3 (depth 1) + 1 уровень контекста (depth 2).
+    # Больше = больше LLM-вызовов на глубинные узлы; меньше = LLM меньше видит.
+    subtree_depth_limit: int = 2
+    # Cap на размер intermediate-summary в LLM-вызове (safety против runaway,
+    # не строгий target). None = без cap, LLM использует свой default.
+    intermediate_max_tokens: int | None = 8192
+    # Минимум токенов на элемент при expandable-рендере. Если
+    # budget/(children+1) < этого порога — сразу collapse (иначе LLM не сможет
+    # уложиться, brief-line хинты получаются бесполезные).
+    per_element_min_tokens: int = 50
 
 
 class IndexingConfig(BaseModel):
