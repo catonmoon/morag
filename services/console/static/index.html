@@ -415,6 +415,47 @@
       font-size: 0.9rem;
       padding: 0.15rem;
     }
+    /* Бейдж чипа = ID пространства (источники) / source_name (глоссарий).
+       Кликабелен: разворачивает/сворачивает путь. */
+    .chip-badge {
+      font-family: ui-monospace, SFMono-Regular, monospace;
+      font-weight: 500;
+      cursor: pointer;
+      user-select: none;
+    }
+    .chip-badge:hover { text-decoration: underline dotted; }
+    /* Выпадашка поиска страниц по названию (под chip-инпутом). */
+    .chip-search {
+      margin-top: 0.3rem;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--card-bg);
+      overflow: hidden;
+      max-height: 18rem;
+      overflow-y: auto;
+    }
+    .chip-search-item {
+      display: flex;
+      align-items: baseline;
+      gap: 0.4rem;
+      padding: 0.35rem 0.55rem;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+    .chip-search-item:hover { background: var(--code-bg); }
+    .chip-search-item .s-title { font-weight: 500; }
+    .chip-search-item .s-path {
+      color: var(--muted);
+      font-size: 0.78rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .chip-search-hint, .chip-search-empty {
+      padding: 0.4rem 0.55rem;
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
 
     /* In-flight title — две декларативные анимации без per-char delay:
 
@@ -1019,39 +1060,58 @@
                                       (chip.status === 'loading' ? ' loading' : '') +
                                       (chip.status === 'error' ? ' error' : '')"
                               :title="chip.url || chip.error || chip.id">
-                          <template x-if="chip.url">
-                            <a :href="chip.url" target="_blank" rel="noopener" style="color:inherit; text-decoration:none">
-                              <span class="chip-id" x-text="/^\d+$/.test(chip.id) ? chip.id : '🔗'"></span>
-                              <template x-if="chip.status === 'ok' && chip.path">
-                                <span><span class="chip-sep">·</span><span class="chip-path" x-text="chip.path"></span></span>
-                              </template>
-                            </a>
+                          <span class="chip-badge" @click="toggleChipPath(chipCtxSource(field), chip)"
+                                :title="chip.path ? 'Показать/скрыть путь' : ''" x-text="chipBadge(chip)"></span>
+                          <template x-if="chip.status === 'loading'">
+                            <span><span class="chip-sep">·</span>загрузка…</span>
                           </template>
-                          <template x-if="!chip.url">
+                          <template x-if="chip.status === 'error'">
+                            <span><span class="chip-sep">·</span>⚠ <span x-text="chip.error || 'не найдено'"></span></span>
+                          </template>
+                          <template x-if="chip.status === 'ok'">
                             <span>
-                              <span class="chip-id" x-text="/^\d+$/.test(chip.id) ? chip.id : '🔗'"></span>
-                              <template x-if="chip.status === 'loading'">
-                                <span><span class="chip-sep">·</span>загрузка…</span>
+                              <span class="chip-sep">·</span>
+                              <template x-if="chip.url">
+                                <a :href="chip.url" target="_blank" rel="noopener"
+                                   style="color:inherit; text-decoration:none" x-text="chip.title || chip.id"></a>
                               </template>
-                              <template x-if="chip.status === 'error'">
-                                <span><span class="chip-sep">·</span>⚠ не найдено</span>
+                              <template x-if="!chip.url">
+                                <span x-text="chip.title || chip.id"></span>
                               </template>
-                              <template x-if="chip.status === 'ok' && chip.path">
+                              <template x-if="chip._expanded && chip.path">
                                 <span><span class="chip-sep">·</span><span class="chip-path" x-text="chip.path"></span></span>
                               </template>
                             </span>
                           </template>
                           <button type="button" class="chip-rm"
-                                  @click="removeChip(field.name, idx)"
+                                  @click="removeChipAt(chipCtxSource(field), idx)"
                                   title="Удалить">×</button>
                         </span>
                       </template>
                       <input class="chip-input" type="text"
-                             :placeholder="(setup.source.form[field.name] || []).length ? '' : (field.placeholder || 'IDs через любой разделитель')"
+                             :placeholder="(setup.source.form[field.name] || []).length ? '' : (field.placeholder || 'IDs, URL или название')"
                              @keydown="onChipKeydown($event, field)"
+                             @input="onChipSearchInput($event, chipCtxSource(field))"
                              @paste="onChipPaste($event, field)"
-                             @blur="flushChipInput($event, field)">
+                             @focus="onChipSearchInput($event, chipCtxSource(field))"
+                             @blur="onChipSearchBlur(); flushChipInput($event, field)">
                     </div>
+                    <template x-if="chipSearch.active && chipSearch.key === 'source:' + field.name">
+                      <div class="chip-search">
+                        <template x-if="chipSearch.hint"><div class="chip-search-hint" x-text="chipSearch.hint"></div></template>
+                        <template x-if="chipSearch.loading"><div class="chip-search-empty">поиск…</div></template>
+                        <template x-if="!chipSearch.loading && !chipSearch.hint && !chipSearch.results.length">
+                          <div class="chip-search-empty">ничего не найдено</div>
+                        </template>
+                        <template x-for="(sug, sidx) in chipSearch.results" :key="sug.id + ':' + sidx">
+                          <div class="chip-search-item" @mousedown.prevent="pickChipSuggestion(chipCtxSource(field), sug)">
+                            <span class="chip-badge" x-text="sug.badge || '🔗'"></span>
+                            <span class="s-title" x-text="sug.title"></span>
+                            <span class="s-path" x-text="sug.path"></span>
+                          </div>
+                        </template>
+                      </div>
+                    </template>
                     <div class="help" x-show="field.help" x-text="field.help"></div>
                   </div>
                 </template>
@@ -1572,39 +1632,58 @@
                             (chip.status === 'loading' ? ' loading' : '') +
                             (chip.status === 'error' ? ' error' : '')"
                     :title="chip.url || chip.error || chip.id">
-                <template x-if="chip.url">
-                  <a :href="chip.url" target="_blank" rel="noopener" style="color:inherit; text-decoration:none">
-                    <span class="chip-id" x-text="_glossaryChipLabel(chip)"></span>
-                    <template x-if="chip.title">
-                      <span><span class="chip-sep">·</span><span class="chip-path" x-text="chip.title"></span></span>
-                    </template>
-                  </a>
+                <span class="chip-badge" @click="toggleChipPath(chipCtxGlossary(), chip)"
+                      :title="chip.path ? 'Показать/скрыть путь' : ''" x-text="chipBadge(chip)"></span>
+                <template x-if="chip.status === 'loading'">
+                  <span><span class="chip-sep">·</span>загрузка…</span>
                 </template>
-                <template x-if="!chip.url">
+                <template x-if="chip.status === 'error'">
+                  <span><span class="chip-sep">·</span>⚠ <span x-text="chip.error || 'не найден'"></span></span>
+                </template>
+                <template x-if="chip.status === 'ok'">
                   <span>
-                    <span class="chip-id" x-text="_glossaryChipLabel(chip)"></span>
-                    <template x-if="chip.status === 'loading'">
-                      <span><span class="chip-sep">·</span>загрузка…</span>
+                    <span class="chip-sep">·</span>
+                    <template x-if="chip.url">
+                      <a :href="chip.url" target="_blank" rel="noopener"
+                         style="color:inherit; text-decoration:none" x-text="chip.title || chip.id"></a>
                     </template>
-                    <template x-if="chip.status === 'error'">
-                      <span><span class="chip-sep">·</span>⚠ <span x-text="chip.error || 'не найден'"></span></span>
+                    <template x-if="!chip.url">
+                      <span x-text="chip.title || chip.id"></span>
                     </template>
-                    <template x-if="chip.title && !chip.error">
-                      <span><span class="chip-sep">·</span><span class="chip-path" x-text="chip.title"></span></span>
+                    <template x-if="chip._expanded && chip.path">
+                      <span><span class="chip-sep">·</span><span class="chip-path" x-text="chip.path"></span></span>
                     </template>
                   </span>
                 </template>
                 <button type="button" class="chip-rm"
-                        @click="removeGlossaryDoc(idx)"
+                        @click="removeChipAt(chipCtxGlossary(), idx)"
                         title="Удалить">×</button>
               </span>
             </template>
             <input class="chip-input" type="text"
-                   :placeholder="(setup.retrieval.glossary.doc_chips || []).length ? '' : 'pageId / URL страницы / confluence:virgo:1068775100'"
+                   :placeholder="(setup.retrieval.glossary.doc_chips || []).length ? '' : 'pageId / URL / confluence:virgo:… или название'"
                    @keydown="onGlossaryChipKeydown($event)"
+                   @input="onChipSearchInput($event, chipCtxGlossary())"
                    @paste="onGlossaryChipPaste($event)"
-                   @blur="flushGlossaryChipInput($event)">
+                   @focus="onChipSearchInput($event, chipCtxGlossary())"
+                   @blur="onChipSearchBlur(); flushGlossaryChipInput($event)">
           </div>
+          <template x-if="chipSearch.active && chipSearch.key === 'glossary'">
+            <div class="chip-search">
+              <template x-if="chipSearch.hint"><div class="chip-search-hint" x-text="chipSearch.hint"></div></template>
+              <template x-if="chipSearch.loading"><div class="chip-search-empty">поиск…</div></template>
+              <template x-if="!chipSearch.loading && !chipSearch.hint && !chipSearch.results.length">
+                <div class="chip-search-empty">ничего не найдено</div>
+              </template>
+              <template x-for="(sug, sidx) in chipSearch.results" :key="sug.id + ':' + sidx">
+                <div class="chip-search-item" @mousedown.prevent="pickChipSuggestion(chipCtxGlossary(), sug)">
+                  <span class="chip-badge" x-text="sug.badge || '🔗'"></span>
+                  <span class="s-title" x-text="sug.title"></span>
+                  <span class="s-path" x-text="sug.path"></span>
+                </div>
+              </template>
+            </div>
+          </template>
           <label style="margin-top:0.7rem">Описание глоссария (попадает в system prompt агента)</label>
           <textarea x-model="setup.retrieval.glossary.description"
                     placeholder="Например: «Содержит расшифровки внутренних аббревиатур и специальных терминов компании»."
@@ -1671,6 +1750,10 @@
         llmTestResults: {}, // { [llmName]: { msg, kind } } — для inline-результата кнопки Проверить
         quickstart: null,   // { ollama_available, models:[], can_apply, applying, refreshing, result, resultKind }
         embedderTestResult: '', embedderTestResultKind: '',  // для inline-результата кнопки Проверить у embedder
+
+        // Состояние выпадашки поиска страниц по названию (общее для всех chip-инпутов).
+        // key = 'source:<field>' | 'glossary' — какому инпуту принадлежит активный поиск.
+        chipSearch: { active: false, key: null, query: '', results: [], loading: false, hint: '', inputEl: null },
 
         setup: {
           // ADR-0012: Sources, LLMs, Embedder, Roles — секции wizard'а; + Schedule (cron)
@@ -2180,6 +2263,178 @@
           }
         },
 
+        // ───────── Единый chip-компонент (источники + глоссарий) ─────────
+        // Один UI/поведение для обоих мест. Различия (где список, как резолвить,
+        // куда бьёт поиск) инкапсулированы в «ctx»-адаптерах ниже.
+
+        chipCtxSource(field) {
+          const self = this;
+          return {
+            key: 'source:' + field.name,
+            kind: 'source',
+            getList: () => self.setup.source.form[field.name] || [],
+            setList: (l) => { self.setup.source.form[field.name] = [...l]; },
+            canSearch: () => !!field.search_endpoint,
+            // Источники: live-Confluence по «знакомым» пространствам.
+            search: async (query) => {
+              const spaces = self._knownSpacesForSource();
+              if (!spaces.length) {
+                return { hint: 'Введите ссылку или ID страницы — после этого можно искать по названию', results: [] };
+              }
+              const f = self.setup.source.form;
+              const data = await self.fetchJson(field.search_endpoint, {
+                method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                  url: f.url || '', username: f.username || '',
+                  api_token: f.api_token || '', password: f.password || '',
+                  source_name: self.setup.source.editingName || null,
+                  spaces, query,
+                }),
+              });
+              return { results: (data.results || []).map(r => ({
+                id: r.id, title: r.title, path: r.path, url: r.url, badge: r.space || '',
+              })) };
+            },
+            add: (chip) => {
+              const l = self.setup.source.form[field.name] || [];
+              if (l.some(c => c.id === chip.id)) return;
+              l.push(chip); self.setup.source.form[field.name] = [...l];
+            },
+          };
+        },
+
+        chipCtxGlossary() {
+          const self = this;
+          return {
+            key: 'glossary',
+            kind: 'glossary',
+            getList: () => self.setup.retrieval.glossary.doc_chips || [],
+            setList: (l) => { self.setup.retrieval.glossary.doc_chips = [...l]; self._syncGlossaryDocIds(); },
+            canSearch: () => true,
+            // Глоссарий: по уже проиндексированным докам (Qdrant), без known-spaces.
+            search: async (query) => {
+              const data = await self.fetchJson(`/api/retrieval/doc-search?q=${encodeURIComponent(query)}`);
+              return { results: (data.results || []).map(r => ({
+                id: r.id, title: r.title, path: r.path, url: r.url, badge: r.badge || '',
+              })) };
+            },
+            add: (chip) => {
+              const l = self.setup.retrieval.glossary.doc_chips || [];
+              if (l.some(c => c.id === chip.id)) return;
+              l.push(chip); self.setup.retrieval.glossary.doc_chips = [...l]; self._syncGlossaryDocIds();
+            },
+          };
+        },
+
+        chipBadge(chip) {
+          // Бейдж: spaceKey (источники) / source_name (глоссарий). Fallback —
+          // numeric pageId, или `…:N` из doc_id, иначе 🔗.
+          if (chip.badge) return chip.badge;
+          const id = chip.id || '';
+          if (/^\d+$/.test(id)) return id;
+          const m = id.match(/:(\d+)$/);
+          return m ? m[1] : '🔗';
+        },
+
+        toggleChipPath(ctx, chip) {
+          chip._expanded = !chip._expanded;
+          ctx.setList(ctx.getList());   // форс-перерисовка
+        },
+
+        removeChipAt(ctx, idx) {
+          const l = ctx.getList();
+          l.splice(idx, 1);
+          ctx.setList(l);
+        },
+
+        _isChipFreeText(text) {
+          // Свободный текст (название) vs токен (numeric pageId / URL / doc_id).
+          const s = (text || '').trim();
+          if (!s) return false;
+          if (/^\d+$/.test(s)) return false;                      // numeric pageId
+          if (/^https?:\/\//i.test(s)) return false;             // URL
+          if (/^[a-z0-9_]+:[^:\s]+:\d+$/i.test(s)) return false;  // doc_id prefix:name:id
+          return true;
+        },
+
+        _knownSpacesForSource() {
+          // «Знакомые» пространства = spaceKey уже добавленных чипов ∪ поле Spaces.
+          const set = new Set();
+          for (const fname of ['ancestor_ids', 'skip_ancestor_ids']) {
+            for (const c of (this.setup.source.form[fname] || [])) {
+              if (c.badge) set.add(c.badge);
+            }
+          }
+          for (const s of String(this.setup.source.form.spaces || '').split(/[\s,;]+/)) {
+            const k = s.trim(); if (k) set.add(k);
+          }
+          return [...set];
+        },
+
+        onChipSearchInput(event, ctx) {
+          const text = event.target.value;
+          this.chipSearch.inputEl = event.target;
+          if (!ctx.canSearch() || !this._isChipFreeText(text)) {
+            if (this.chipSearch.key === ctx.key) this._closeChipSearch();
+            return;
+          }
+          const query = text.trim();
+          this.chipSearch.active = true;
+          this.chipSearch.key = ctx.key;
+          this.chipSearch.query = query;
+          clearTimeout(this._chipSearchTimer);
+          this._chipSearchTimer = setTimeout(() => this._runChipSearch(ctx, query), 250);
+        },
+
+        async _runChipSearch(ctx, query) {
+          if (this.chipSearch.key !== ctx.key || this.chipSearch.query !== query) return;
+          this.chipSearch.loading = true;
+          this.chipSearch.hint = '';
+          let res;
+          try {
+            res = await ctx.search(query);
+          } catch (e) {
+            if (this.chipSearch.key === ctx.key && this.chipSearch.query === query) {
+              this.chipSearch.loading = false;
+              this.chipSearch.results = [];
+              this.chipSearch.hint = 'Поиск не удался: ' + e.message;
+            }
+            return;
+          }
+          if (this.chipSearch.key !== ctx.key || this.chipSearch.query !== query) return; // ответ устарел
+          this.chipSearch.loading = false;
+          this.chipSearch.hint = res.hint || '';
+          this.chipSearch.results = res.results || [];
+        },
+
+        onChipSearchBlur() {
+          // даём mousedown по пункту отработать раньше закрытия
+          setTimeout(() => this._closeChipSearch(), 150);
+        },
+
+        _closeChipSearch() {
+          this.chipSearch.active = false;
+          this.chipSearch.key = null;
+          this.chipSearch.query = '';
+          this.chipSearch.results = [];
+          this.chipSearch.hint = '';
+          this.chipSearch.loading = false;
+        },
+
+        pickChipSuggestion(ctx, sug) {
+          ctx.add({
+            id: sug.id,
+            status: 'ok',
+            kind: ctx.kind === 'glossary' ? 'doc_id' : 'id',
+            badge: sug.badge || '',
+            title: sug.title || '',
+            path: sug.path || '',
+            url: sug.url || '',
+          });
+          if (this.chipSearch.inputEl) this.chipSearch.inputEl.value = '';
+          this._closeChipSearch();
+        },
+
         // ───────── Chip-input helpers ─────────
 
         _parseChipTokens(text) {
@@ -2274,6 +2529,7 @@
                 title: info.title || '',
                 path: info.path || '',
                 url: info.url || '',
+                badge: info.space || '',  // spaceKey → бейдж чипа
               };
             } else {
               list[i] = { ...list[i], status: 'error', error: 'не получен ответ' };
@@ -2333,12 +2589,6 @@
             const added = this._addChips(field.name, ids);
             if (added.length) this._resolveChipsByIds(field, added.map(c => c.id));
           }
-        },
-
-        removeChip(fieldName, idx) {
-          const list = this.setup.source.form[fieldName] || [];
-          list.splice(idx, 1);
-          this.setup.source.form[fieldName] = [...list];
         },
 
         _serializeChipsForApply(form, preset) {
@@ -2639,13 +2889,15 @@
         _parseGlossaryTokens(text) {
           if (!text) return [];
           const tokens = this._parseChipTokens(text);
-          // Дополнительно ловим строки вида `prefix:name:pageId` (doc_id) и
-          // прочие непустые токены, которые встречающийся parser отбросил.
+          // Дополнительно ловим «голые» doc_id вида `prefix:name:pageId`.
+          // ВАЖНО: только строки с двоеточием — иначе произвольный текст названия
+          // (для поиска) превратился бы в мусорный doc_id-чип на пробел/запятую.
           const seen = new Set(tokens.map(t => t.id));
           for (const raw of text.split(/[\s,;]+/)) {
             const s = raw.trim();
             if (!s || seen.has(s)) continue;
             if (/^\d+$/.test(s) || /^https?:\/\//i.test(s)) continue; // уже учтено
+            if (!s.includes(':')) continue;  // не doc_id → это поисковый текст, не токен
             tokens.push({ id: s, kind: 'doc_id' });
             seen.add(s);
           }
@@ -2683,22 +2935,13 @@
           idx = find();  // могло сдвинуться, ищем снова
           if (idx < 0) return;
           if (r.ok) {
-            list[idx] = { ...list[idx], id: r.id, status: 'ok', title: r.title, url: r.url, kind: 'doc_id' };
+            list[idx] = { ...list[idx], id: r.id, status: 'ok', title: r.title, url: r.url,
+                          path: r.path || '', badge: r.source_name || '', kind: 'doc_id' };
           } else {
             list[idx] = { ...list[idx], status: 'error', error: r.error };
           }
           this.setup.retrieval.glossary.doc_chips = [...list];
           this._syncGlossaryDocIds();
-        },
-
-        _glossaryChipLabel(chip) {
-          // Что показать как chip-id: численный pageId — это, doc_id «conf:x:N» →
-          // показать N, прочее → 🔗.
-          const id = chip.id || '';
-          if (/^\d+$/.test(id)) return id;
-          const m = id.match(/:(\d+)$/);
-          if (m) return m[1];
-          return '🔗';
         },
 
         onGlossaryChipKeydown(event) {
@@ -2738,13 +2981,6 @@
             event.target.value = '';
             this._addGlossaryChips(ids);
           }
-        },
-
-        removeGlossaryDoc(idx) {
-          const list = this.setup.retrieval.glossary.doc_chips || [];
-          list.splice(idx, 1);
-          this.setup.retrieval.glossary.doc_chips = [...list];
-          this._syncGlossaryDocIds();
         },
 
         _syncGlossaryDocIds() {

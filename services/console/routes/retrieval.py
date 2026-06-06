@@ -105,19 +105,91 @@ def _doc_uuid(doc_id: str) -> str:
     return str(uuid.uuid5(_DOC_NS, doc_id))
 
 
+def _doc_path_str(payload: dict) -> str:
+    """payload.path — list[str] (обычно один элемент-breadcrumb). → строка."""
+    path_val = payload.get('path')
+    if isinstance(path_val, list):
+        return path_val[0] if path_val else ''
+    return path_val or ''
+
+
 def _format_doc_lookup_response(doc_id: str, qdrant_response: dict) -> dict[str, Any]:
     payload = (qdrant_response.get('result') or {}).get('payload') or {}
-    title = (
-        payload.get('title')
-        or (payload.get('path') or [doc_id])[0]
-        or doc_id
-    )
+    path = _doc_path_str(payload)
+    title = payload.get('title') or path or doc_id
     return {
         'ok': True,
         'id': payload.get('id') or doc_id,
         'title': title,
         'url': payload.get('url') or '',
+        'path': path,
+        # Бейдж glossary-чипа: spaceKey в Qdrant-payload нет — показываем source_name.
+        'source_name': payload.get('source_name') or '',
     }
+
+
+@router.get('/doc-search')
+async def doc_search(q: str, request: Request, limit: int = 10) -> dict[str, Any]:
+    """Поиск проиндексированных документов по части названия (для автокомплита глоссария).
+
+    Матчим title подстрокой (case-insensitive) на стороне Python — full-text индекс
+    на title не гарантирован. Док в коллекции на порядки меньше чанков; скроллим до
+    SCAN_CAP. При росте корпуса оптимизировать через payload full-text index + MatchText.
+    Глоссарий ссылается только на уже проиндексированное → ищем по Qdrant docs, а не
+    по живому Confluence (в отличие от поиска источников). known-spaces тут не нужны.
+    """
+    query = (q or '').strip().lower()
+    if len(query) < 2:
+        return {'results': []}
+
+    cfg_path = request.app.state.config_path
+    merged = read_layered(cfg_path)
+    qdrant_cfg = (merged.get('qdrant') or {})
+    host = qdrant_cfg.get('host', 'qdrant')
+    port = qdrant_cfg.get('port', 6333)
+    docs_collection = qdrant_cfg.get('collection_docs', 'docs')
+    limit = max(1, min(limit or 10, 25))
+
+    import httpx
+    base = f'http://{host}:{port}/collections/{docs_collection}'
+    results: list[dict[str, Any]] = []
+    offset: Any = None
+    scanned = 0
+    scan_cap = 5000
+
+    async with httpx.AsyncClient(timeout=10) as c:
+        while scanned < scan_cap and len(results) < limit:
+            body: dict[str, Any] = {
+                'limit': 256,
+                'with_vector': False,
+                'with_payload': {'include': ['id', 'title', 'path', 'url', 'source_name']},
+            }
+            if offset is not None:
+                body['offset'] = offset
+            r = await c.post(f'{base}/points/scroll', json=body)
+            if r.status_code != 200:
+                break
+            result = r.json().get('result') or {}
+            points = result.get('points') or []
+            for p in points:
+                pl = p.get('payload') or {}
+                title = pl.get('title') or ''
+                if query in title.lower():
+                    results.append({
+                        'id': pl.get('id') or '',
+                        'title': title,
+                        'path': _doc_path_str(pl),
+                        'url': pl.get('url') or '',
+                        'badge': pl.get('source_name') or '',
+                    })
+                    if len(results) >= limit:
+                        break
+            scanned += len(points)
+            offset = result.get('next_page_offset')
+            if offset is None:
+                break
+
+    return {'results': results}
 
 
 # ---------------------------------------------------------------------------

@@ -381,6 +381,174 @@ class LLMChunker(Chunker):
         return result, ''
 
 
+_BOUNDARY_SCHEMA = {
+    'type': 'object',
+    'properties': {
+        'segments': {
+            'type': 'array',
+            'items': {
+                'type': 'object',
+                'properties': {
+                    'start': {'type': 'integer'},
+                    'end': {'type': 'integer'},
+                    'topic': {'type': 'string'},
+                },
+                'required': ['start', 'end', 'topic'],
+                'additionalProperties': False,
+            },
+        },
+    },
+    'required': ['segments'],
+    'additionalProperties': False,
+}
+
+_BOUNDARY_PROMPT = """\
+Ты сегментируешь транскрипт/документ на тематические чанки для RAG-поиска.
+Вход — пронумерованные юниты (абзацы / реплики), по одному на строку, в формате `[N] текст`.
+
+Твоя задача — сгруппировать ПОДРЯД идущие юниты в тематические сегменты. Сегмент — это
+законченная мысль / одна тема / один аспект, понятный сам по себе.
+
+ВАЖНО — верни ТОЛЬКО границы по НОМЕРАМ юнитов, НЕ переписывай текст:
+- Каждый сегмент = {start, end, topic}, где start/end — номера юнитов (включительно).
+- Сегменты должны покрывать ВСЕ юниты без пропусков и нахлёстов:
+  первый start = 1, последний end = <число юнитов>, и каждый следующий start = предыдущий end + 1.
+- topic — короткая формулировка темы сегмента (3-7 слов).
+- Дели по смене темы, а не по размеру. Не дроби одну мысль; не склеивай разные темы.
+
+Верни строго JSON: {"segments": [{"start": 1, "end": 4, "topic": "..."}, ...]}.
+"""
+
+
+class BoundaryChunker(Chunker):
+    """LLM-чанкер по ГРАНИЦАМ: LLM возвращает номера юнитов где чанк начинается/кончается,
+    а не переписывает текст. Обходит проблему «LLM копирует текст в JSON → таймаут».
+
+    Юниты = абзацы (split по пустой строке) — для аудио-транскриптов это реплики
+    `[Имя] <!-- t:СЕК --> текст`, для обычного markdown — абзацы. Материализация чанка —
+    склейка юнитов по диапазону [start, end]. Таймкоды/маркеры остаются в тексте — их
+    извлекает TimestampProcessor на стадии chunk-processors.
+
+    Валидатор границ: монотонность, покрытие [1..N], непрерывность, диапазон. При нарушении —
+    1 retry с указанием ошибки; иначе fallback на склейку по token-бюджету (max_tokens).
+    """
+
+    def __init__(
+        self,
+        client,
+        token_counter: TokenCounter,
+        max_tokens: int = 800,
+        max_retries: int = 1,
+    ) -> None:
+        self._client = client
+        self._counter = token_counter
+        self._max_tokens = max_tokens
+        self._max_retries = max_retries
+
+    async def chunk(self, text: str) -> list[str]:
+        results = await self.chunk_with_metadata(text)
+        return [r.text for r in results]
+
+    async def chunk_with_metadata(
+        self, text: str, *, paged: bool = False,
+    ) -> list[ChunkResult]:
+        units = self._split_units(text)
+        if not units:
+            return []
+        if len(units) == 1:
+            return [ChunkResult(text=units[0])]
+
+        segments = await self._get_boundaries(units)
+        if segments is None:
+            segments = self._fallback_segments(units)
+
+        results: list[ChunkResult] = []
+        for start, end in segments:
+            chunk_text = '\n\n'.join(units[start - 1:end])
+            if chunk_text.strip():
+                results.append(ChunkResult(text=chunk_text))
+        return results
+
+    @staticmethod
+    def _split_units(text: str) -> list[str]:
+        """Юниты = непустые абзацы (split по пустой строке)."""
+        return [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+
+    async def _get_boundaries(self, units: list[str]) -> list[tuple[int, int]] | None:
+        numbered = '\n'.join(f'[{i + 1}] {u}' for i, u in enumerate(units))
+        messages = [
+            {'role': 'system', 'content': _BOUNDARY_PROMPT},
+            {'role': 'user', 'content': numbered},
+        ]
+        n = len(units)
+        last_err = ''
+        for attempt in range(1, self._max_retries + 2):
+            msgs = messages
+            if last_err:
+                msgs = messages + [{
+                    'role': 'user',
+                    'content': f'Предыдущий ответ невалиден: {last_err}. '
+                               f'Исправь: покрой юниты 1..{n} подряд без пропусков и нахлёстов.',
+                }]
+            try:
+                data = await self._client.complete_json(
+                    msgs, schema=_BOUNDARY_SCHEMA, schema_name='segments',
+                    params=GenerationParams(enable_thinking=False),
+                )
+            except Exception:
+                logger.warning('BoundaryChunker: attempt %d — LLM call failed', attempt, exc_info=True)
+                continue
+            segs = self._validate(data.get('segments'), n)
+            if segs is not None:
+                return segs
+            last_err = self._last_validation_error
+            logger.warning('BoundaryChunker: attempt %d — invalid boundaries: %s', attempt, last_err)
+        return None
+
+    _last_validation_error = ''
+
+    def _validate(self, segments, n: int) -> list[tuple[int, int]] | None:
+        """Проверить границы. Возвращает список (start, end) или None при нарушении."""
+        if not segments or not isinstance(segments, list):
+            self._last_validation_error = 'пустой/некорректный список segments'
+            return None
+        out: list[tuple[int, int]] = []
+        expected = 1
+        for s in segments:
+            try:
+                start, end = int(s['start']), int(s['end'])
+            except (KeyError, TypeError, ValueError):
+                self._last_validation_error = 'нет полей start/end'
+                return None
+            if start != expected:
+                self._last_validation_error = f'разрыв/нахлёст: ожидался start={expected}, получен {start}'
+                return None
+            if end < start or end > n:
+                self._last_validation_error = f'диапазон вне [start..{n}]: {start}-{end}'
+                return None
+            out.append((start, end))
+            expected = end + 1
+        if expected != n + 1:
+            self._last_validation_error = f'покрытие неполное: последний end={expected - 1}, нужно {n}'
+            return None
+        return out
+
+    def _fallback_segments(self, units: list[str]) -> list[tuple[int, int]]:
+        """Fallback: жадно набираем юниты в чанки до max_tokens."""
+        logger.warning('BoundaryChunker: fallback — greedy pack по %d токенов', self._max_tokens)
+        segs: list[tuple[int, int]] = []
+        start = 1
+        acc = 0
+        for i, u in enumerate(units, 1):
+            t = self._counter.count(u)
+            if acc and acc + t > self._max_tokens:
+                segs.append((start, i - 1))
+                start, acc = i, 0
+            acc += t
+        segs.append((start, len(units)))
+        return segs
+
+
 class SemanticChunker(Chunker):
     """Чанкер на основе семантических границ через эмбеддинги.
 

@@ -129,6 +129,9 @@ class PresetField:
     # Для kind='chips': URL endpoint'а для resolve названий по ID.
     # Получает {url, username, secret_key, secret_value, ids[]} → {id: {title, path, error}}.
     resolver_endpoint: str | None = None
+    # Для kind='chips': URL endpoint'а для поиска страниц по части названия.
+    # Получает {url, username, секрет, source_name, spaces[], query} → {results: [{id,title,path,url,space}]}.
+    search_endpoint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -383,17 +386,20 @@ SOURCE_PRESETS: list[Preset] = [
                         help='Space keys (как в URL Confluence /spaces/DOCS/...).'),
             PresetField('ancestor_ids', 'Включить разделы',
                         kind='chips', required=False,
-                        placeholder='ID или URL страниц (любые разделители)',
+                        placeholder='ID, URL или начните вводить название',
                         resolver_endpoint='/api/setup/confluence-page-paths',
+                        search_endpoint='/api/setup/confluence-search-titles',
                         help='Загружаются ТОЛЬКО потомки этих страниц '
                              '(включая их сами). Приоритет над spaces. '
                              'Можно вставлять как ID (1234567), так и URL '
                              '(https://confluence/display/SPACE/Title или '
-                             'https://confluence/pages/viewpage.action?pageId=...).'),
+                             'https://confluence/pages/viewpage.action?pageId=...), '
+                             'либо искать по части названия в уже добавленных пространствах.'),
             PresetField('skip_ancestor_ids', 'Исключить разделы',
                         kind='chips', required=False, variant='danger',
-                        placeholder='ID или URL страниц, которые НЕ загружать',
+                        placeholder='ID, URL или название страниц, которые НЕ загружать',
                         resolver_endpoint='/api/setup/confluence-page-paths',
+                        search_endpoint='/api/setup/confluence-search-titles',
                         help='Эти страницы и все их потомки пропускаются '
                              '(исключение применяется поверх ancestor_ids/spaces).'),
             PresetField('attachments_enabled', 'Индексировать PDF-вложения',
@@ -543,6 +549,7 @@ def serialize_preset(p: Preset) -> dict[str, Any]:
                 'help': f.help,
                 'variant': f.variant,
                 'resolver_endpoint': f.resolver_endpoint,
+                'search_endpoint': f.search_endpoint,
             }
             for f in p.fields
         ],

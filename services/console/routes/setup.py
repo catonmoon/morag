@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -335,24 +336,6 @@ async def confluence_page_paths(
     """
     cfg_path = request.app.state.config_path
 
-    # Resolve secret (case Edit: UI отдаёт пустой секрет → fall back на config).
-    auth_secret = (req.api_token or '').strip() or (req.password or '').strip()
-    if not auth_secret and req.source_name:
-        from services.console.config_io import read_layered
-        merged = read_layered(cfg_path)
-        existing = next(
-            (s for s in (merged.get('sources') or [])
-             if s.get('kind') == 'confluence' and s.get('name') == req.source_name),
-            None,
-        )
-        if existing:
-            auth_secret = existing.get('api_token') or existing.get('password') or ''
-    if not auth_secret:
-        raise HTTPException(
-            status_code=400,
-            detail='Заполните api_token (Cloud) или password (on-prem).',
-        )
-
     # Items могут быть numeric IDs ИЛИ URLs (Confluence display/spaces).
     # Дедупликация по input-ключу (то что прислал юзер).
     clean_inputs: list[str] = []
@@ -368,40 +351,18 @@ async def confluence_page_paths(
         return {}
 
     # atlassian-python-api — sync. Через run_in_executor чтобы не блочить event loop.
-    from atlassian import Confluence
-    is_cloud = bool(req.api_token and not req.password)
-    cf = Confluence(
-        url=req.url.rstrip('/'),
-        username=req.username,
-        password=auth_secret,
-        cloud=is_cloud,
-        timeout=10,
+    cf = _build_cf_client(
+        req.url, req.username, req.api_token, req.password, req.source_name, cfg_path,
     )
 
     sem = asyncio.Semaphore(8)
-
-    def _build_response(input_str: str, page: dict) -> dict[str, Any]:
-        title = page.get('title') or input_str
-        ancestors = page.get('ancestors') or []
-        space = (page.get('space') or {}).get('name') or (page.get('space') or {}).get('key')
-        parts = []
-        if space:
-            parts.append(space)
-        parts.extend(a.get('title') or a.get('id') for a in ancestors)
-        parts.append(title)
-        return {
-            'id': str(page.get('id') or ''),
-            'title': title,
-            'path': ' / '.join(parts),
-            'url': _confluence_page_url(req.url, page),
-        }
 
     async def fetch_one(input_str: str) -> tuple[str, dict[str, Any]]:
         async with sem:
             loop = asyncio.get_event_loop()
             try:
                 page = await loop.run_in_executor(None, lambda: _resolve_page(cf, input_str))
-                return input_str, _build_response(input_str, page)
+                return input_str, _page_info(req.url, page, input_str)
             except Exception as e:
                 logger.info('Failed to resolve confluence input %r: %s', input_str, e)
                 return input_str, {
@@ -466,6 +427,133 @@ def _confluence_page_url(base_url: str, page: dict) -> str:
     if rel.startswith('http'):
         return rel
     return f"{base_url.rstrip('/')}{rel}"
+
+
+def _resolve_confluence_secret(
+    cfg_path, source_name: str | None, api_token: str | None, password: str | None,
+) -> str:
+    """Секрет из формы; если пусто (case Edit) — fall back на config по source_name."""
+    secret = (api_token or '').strip() or (password or '').strip()
+    if not secret and source_name:
+        from services.console.config_io import read_layered
+        merged = read_layered(cfg_path)
+        existing = next(
+            (s for s in (merged.get('sources') or [])
+             if s.get('kind') == 'confluence' and s.get('name') == source_name),
+            None,
+        )
+        if existing:
+            secret = existing.get('api_token') or existing.get('password') or ''
+    return secret
+
+
+def _build_cf_client(
+    url: str, username: str, api_token: str | None, password: str | None,
+    source_name: str | None, cfg_path,
+):
+    """Сконструировать atlassian.Confluence клиент с резолвом секрета. 400 если нет."""
+    secret = _resolve_confluence_secret(cfg_path, source_name, api_token, password)
+    if not secret:
+        raise HTTPException(
+            status_code=400,
+            detail='Заполните api_token (Cloud) или password (on-prem).',
+        )
+    from atlassian import Confluence
+    is_cloud = bool(api_token and not password)
+    return Confluence(
+        url=url.rstrip('/'), username=username, password=secret,
+        cloud=is_cloud, timeout=10,
+    )
+
+
+def _page_info(base_url: str, page: dict, fallback_title: str = '') -> dict[str, Any]:
+    """Унифицированный dict страницы: id, title, path (breadcrumb), url, space (key)."""
+    title = page.get('title') or fallback_title
+    ancestors = page.get('ancestors') or []
+    space_obj = page.get('space') or {}
+    space_name = space_obj.get('name') or space_obj.get('key')
+    parts: list[str] = []
+    if space_name:
+        parts.append(space_name)
+    parts.extend(a.get('title') or a.get('id') for a in ancestors)
+    parts.append(title)
+    return {
+        'id': str(page.get('id') or ''),
+        'title': title,
+        'path': ' / '.join(p for p in parts if p),
+        'url': _confluence_page_url(base_url, page),
+        'space': space_obj.get('key'),
+    }
+
+
+class ConfluenceSearchTitlesRequest(BaseModel):
+    """Поиск страниц по префиксу названия в «знакомых» пространствах (live CQL).
+
+    Auth-поля как у /confluence-page-paths (секрет — из формы или config по source_name).
+    """
+    url: str
+    username: str
+    api_token: str | None = None
+    password: str | None = None
+    source_name: str | None = None
+    spaces: list[str] = []
+    query: str
+    limit: int = 10
+
+
+# CQL-safe space key (стандартные ключи + персональные ~user, точки/дефисы).
+_SPACE_KEY_RE = re.compile(r'^[A-Za-z0-9_~.\-]+$')
+
+
+@router.post('/confluence-search-titles')
+async def confluence_search_titles(
+    req: ConfluenceSearchTitlesRequest, request: Request,
+) -> dict[str, Any]:
+    """Live-поиск страниц Confluence по началу названия внутри заданных spaces.
+
+    Без spaces или пустого query → {results: []} (фронт показывает подсказку
+    «введите ссылку/ID, чтобы открыть пространство»). Поиск только по «знакомым»
+    пространствам — guardrail против перебора всего инстанса.
+    """
+    cfg_path = request.app.state.config_path
+    keys = [k.strip() for k in (req.spaces or []) if k and _SPACE_KEY_RE.match(k.strip())]
+    query = (req.query or '').strip()
+    if not keys or not query:
+        return {'results': []}
+
+    cf = _build_cf_client(
+        req.url, req.username, req.api_token, req.password, req.source_name, cfg_path,
+    )
+
+    space_list = ','.join(f'"{k}"' for k in keys)
+    q = query.replace('\\', '\\\\').replace('"', '\\"')
+    cql = f'type = page AND space in ({space_list}) AND title ~ "{q}*"'
+    limit = max(1, min(req.limit or 10, 25))
+
+    def _run() -> list[dict[str, Any]]:
+        resp = cf.get('rest/api/search', params={
+            'cql': cql,
+            'limit': limit,
+            'expand': 'content.space,content.ancestors',
+        })
+        out: list[dict[str, Any]] = []
+        for it in (resp or {}).get('results', []):
+            page = it.get('content') or {}
+            # _links.webui приходит на уровне результата, не content — пробрасываем.
+            if not page.get('_links') and it.get('_links'):
+                page = {**page, '_links': it['_links']}
+            if not page.get('id'):
+                continue
+            out.append(_page_info(req.url, page))
+        return out
+
+    loop = asyncio.get_event_loop()
+    try:
+        results = await loop.run_in_executor(None, _run)
+    except Exception as e:
+        logger.info('Confluence title search failed (cql=%r): %s', cql, e)
+        raise HTTPException(status_code=400, detail=f'{type(e).__name__}: {e}') from e
+    return {'results': results}
 
 
 async def _check_qdrant(qdrant_cfg) -> dict[str, Any]:

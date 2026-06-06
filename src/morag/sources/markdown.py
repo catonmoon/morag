@@ -1,9 +1,30 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from morag.sources.base import Document, Source
+
+_FRONTMATTER_RE = re.compile(r'^---\n(.*?)\n---\n?', re.DOTALL)
+
+
+def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    """Извлечь YAML-front-matter (простые `key: value`) и тело без него.
+
+    Поддерживается минимальный subset: плоские строки `key: value` в блоке `---...---`
+    в начале файла. Достаточно для `title`/`url` аудио-транскриптов. Без front-matter —
+    возвращает ({}, text).
+    """
+    m = _FRONTMATTER_RE.match(text)
+    if not m:
+        return {}, text
+    meta: dict[str, str] = {}
+    for line in m.group(1).splitlines():
+        if ':' in line:
+            key, _, val = line.partition(':')
+            meta[key.strip()] = val.strip()
+    return meta, text[m.end():]
 
 
 class MarkdownSource(Source):
@@ -78,7 +99,8 @@ class MarkdownSource(Source):
     def _load_file(self, path: Path) -> Document | None:
         try:
             stat = path.stat()
-            text = path.read_text(encoding='utf-8')
+            raw = path.read_text(encoding='utf-8')
+            meta, text = _parse_frontmatter(raw)
             updated_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
             external = str(path.relative_to(self._root))
             doc_id = self.make_id(external)
@@ -88,9 +110,11 @@ class MarkdownSource(Source):
                 text=text,
                 updated_at=updated_at,
                 source_type='markdown',
-                title=path.stem,
+                title=meta.get('title', path.stem),
                 size=stat.st_size,
-                url=path.as_uri(),
+                # front-matter `url` (напр. оригинальный mp3) переопределяет file:// —
+                # нужно для deep-link цитат на источник.
+                url=meta.get('url', path.as_uri()),
                 parent_doc_ids=self._parent_doc_ids(path),
                 payload={'source_name': self._name, 'source_kind': self._kind},
             )

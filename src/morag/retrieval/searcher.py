@@ -57,6 +57,9 @@ def _point_to_chunk(p: Any) -> dict[str, Any]:
         'creator': payload.get('creator', ''),
         'url': payload.get('url'),
         'source_type': payload.get('source_type', ''),
+        # Секундные таймкоды аудио-чанков → deep-link `#t=СЕК` на оригинал.
+        'start_sec': payload.get('start_sec'),
+        'end_sec': payload.get('end_sec'),
         'score': score,
         # Метки для table-row-narrative swap (ADR-0013). Если chunk_type
         # отсутствует в payload (старые чанки) — None, swap-логика их пропускает.

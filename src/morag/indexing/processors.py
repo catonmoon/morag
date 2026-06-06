@@ -449,6 +449,43 @@ class PageMarkerProcessor(ChunkProcessor):
         return chunks
 
 
+_TS_MARKER_RE = re.compile(r'<!-- t:(\d+\.?\d*) -->\n?')
+
+
+class TimestampProcessor(ChunkProcessor):
+    """Извлекает секундные таймкоды из маркеров <!-- t:СЕК --> в тексте чанка.
+
+    Аудио-аналог PageMarkerProcessor: первый маркер чанка → chunk.payload['start_sec']
+    (начало чанка в оригинале), последний → ['end_sec']. Маркеры вычищаются из текста,
+    чтобы не попасть в эмбеддинги. Используется retrieval'ом для deep-link `#t=СЕК` на mp3.
+
+    При батче чанк без маркера наследует последний известный таймкод (как pages).
+    """
+
+    @staticmethod
+    def _extract(chunk: Chunk) -> bool:
+        markers = _TS_MARKER_RE.findall(chunk.text)
+        if markers:
+            secs = [float(m) for m in markers]
+            chunk.payload['start_sec'] = secs[0]
+            chunk.payload['end_sec'] = secs[-1]
+        chunk.text = _TS_MARKER_RE.sub('', chunk.text)
+        return bool(markers)
+
+    async def process(self, chunk: Chunk, document: Document) -> Chunk:
+        self._extract(chunk)
+        return chunk
+
+    async def process_batch(self, chunks: list[Chunk], document: Document) -> list[Chunk]:
+        last_sec: float | None = None
+        for chunk in chunks:
+            if self._extract(chunk):
+                last_sec = chunk.payload.get('start_sec')
+            elif last_sec is not None:
+                chunk.payload['start_sec'] = last_sec
+        return chunks
+
+
 class MetadataProcessor(ChunkProcessor):
     """Копирует creator и created_at из Document в chunk.payload.
 

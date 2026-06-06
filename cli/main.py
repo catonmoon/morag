@@ -18,6 +18,7 @@ from qdrant_client import AsyncQdrantClient
 from morag.config import Config, DenseEmbedderConfig, PdfConfig, SparseEmbedderConfig, load_config
 from morag.indexing.bm25 import build_bm25_index
 from morag.indexing.chunker import (
+    BoundaryChunker,
     HybridChunker,
     LLMChunker,
     PassthroughChunker,
@@ -47,6 +48,7 @@ from morag.indexing.processors import (
     MetadataProcessor,
     PageMarkerProcessor,
     SparseEmbeddingProcessor,
+    TimestampProcessor,
 )
 from morag.indexing.token_counter import HuggingFaceTokenCounter, TiktokenCounter
 from morag.llm.client import GenerationParams, LLMClient
@@ -441,6 +443,13 @@ async def cmd_index(
             halving_retries=config.indexing.chunker.halving_retries,
             fallback_enabled=config.indexing.chunker.fallback,
         )
+    elif chunker_mode == 'boundary':
+        chunker_llm = llm_clients[role_mapping.name_for('chunker')]
+        chunker = BoundaryChunker(
+            chunker_llm,
+            token_counter=llm_counter,
+            max_tokens=config.indexing.chunker.max_tokens,
+        )
     elif chunker_mode in ('hybrid', 'section'):
         oversized_cfg = config.indexing.chunker.oversized
         oversized_strategies = {
@@ -518,6 +527,7 @@ async def cmd_index(
 
     chunk_processors = [
         PageMarkerProcessor(),
+        TimestampProcessor(),
         MetadataProcessor(),
         DenseEmbeddingProcessor(embedder),
         SparseEmbeddingProcessor(
@@ -530,7 +540,7 @@ async def cmd_index(
     # В LLM-режиме блок + ответ LLM должны влезть в контекстное окно.
     # Ответ ≈ такого же размера как вход, поэтому безопасный лимит: (context_window - overhead) / 2.
     _LLM_PROMPT_OVERHEAD = 512  # токенов на системный промпт + запас
-    skip_presplit = chunker_mode in ('semantic', 'hybrid', 'section')
+    skip_presplit = chunker_mode in ('semantic', 'hybrid', 'section', 'boundary')
     if chunker_mode == 'llm':
         chunker_llm_inst = config.llm_by_name(role_mapping.name_for('chunker'))
         llm_safe_limit = (chunker_llm_inst.context_window - _LLM_PROMPT_OVERHEAD) // 2

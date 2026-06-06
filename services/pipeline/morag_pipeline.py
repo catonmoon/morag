@@ -1492,13 +1492,23 @@ class Pipeline:
         documents: list[str] = []
         metadata_list: list[dict[str, Any]] = []
         for c in chunks:
-            documents.append(_render_chunk_html(c.get('text', '')))
+            text = c.get('text', '')
+            # Аудио-чанки: deep-link на секунду в оригинале (Media Fragments `#t=СЕК`)
+            # + видимая метка [MM:SS]. Ветвимся по наличию start_sec, не по source_type.
+            chunk_url = url
+            start_sec = c.get('start_sec')
+            if start_sec is not None:
+                label = _fmt_mmss(start_sec)
+                text = f'[{label}] {text}'
+                if url:
+                    chunk_url = f'{url}#t={int(start_sec)}'
+            documents.append(_render_chunk_html(text))
             meta: dict[str, Any] = {
                 'source': source_id or name, 'name': name,
                 'html': True,
             }
-            if url:
-                meta['url'] = url
+            if chunk_url:
+                meta['url'] = chunk_url
             if number is not None:
                 meta['citation_number'] = number
             if 'order' in c:
@@ -1652,6 +1662,14 @@ _CITATION_MAX_CHUNKS = 5  # макс чанков на один citation event (
 # Бюджет: 5 чанков × 800 chars × 6 bytes/char (JSON-escape кириллицы) ≈ 24KB
 # per citation event. Безопасно для aiohttp (default line limit ~64KB).
 # Агент получает полный текст через tool_result — обрезка только для UI.
+
+
+def _fmt_mmss(seconds: float) -> str:
+    """Секунды → `M:SS` или `H:MM:SS` для подписи цитаты."""
+    s = int(seconds)
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f'{h}:{m:02d}:{sec:02d}' if h else f'{m}:{sec:02d}'
 
 
 def _render_chunk_html(chunk_text: str) -> str:
