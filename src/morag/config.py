@@ -452,6 +452,10 @@ class RetrievalSearchConfig(BaseModel):
     unique_docs_cap: int = 10
     sections_limit: int = 5
     max_iterations: int = 9
+    # find_section-мандат: True (дефолт) — агент ОБЯЗАН звать find_section перед search
+    # (иерархичный корпус, Confluence). False — find_section опционален (плоский корпус:
+    # подкаст/собрания) → агент может идти в search/каталог напрямую.
+    require_find_section: bool = True
     answer_max_tokens: int = 0
     # HNSW search-time `ef` для dense-канала. 0 = не переопределять (Qdrant default).
     # Поднимать при росте корпуса если ANN recall просел (релевантный чанк есть,
@@ -471,6 +475,7 @@ class RetrievalFeaturesConfig(BaseModel):
 
 class RetrievalPromptsConfig(BaseModel):
     admin_instructions: str = ''
+    corpus_description: str = ''  # доменная «роль» агента — заменяет дефолт «ассистент по документации»
 
 
 class RetrievalGlossaryConfig(BaseModel):
@@ -498,6 +503,72 @@ class RetrievalGlossaryConfig(BaseModel):
         return self
 
 
+class RetrievalCatalogConfig(BaseModel):
+    """Подключаемый tool `catalog()` — полный СТРУКТУРНЫЙ каталог всех документов
+    корпуса (по строке на документ с выбранными полями payload). Закрывает дыру
+    контентного RAG на запросах, требующих обойти ВЕСЬ корпус, а не найти top-k:
+    «перечисли всех X», «сколько документов с Y», «где не было Z», «самый частый W».
+
+    Агент получает таблицу целиком и сам считает/резолвит имена/группирует — для
+    небольших корпусов это надёжнее и проще фильтр-движка (см. ADR/обсуждение).
+
+    `fields` — какие поля payload включать в строку (напр. season/episode/date/
+    speakers/title). `description` — фраза в system prompt про смысл корпуса (кто
+    ведущие vs гости и т.п.), по ней агент различает роли при агрегации.
+
+    `enabled=True` без `fields` — tool не добавляется (нечего показывать).
+    """
+    enabled: bool = False
+    fields: list[str] = Field(default_factory=list)
+    description: str = ''
+    in_prompt: bool = False  # эксперимент: каталог-таблица в system prompt вместо KM (тогда tool не нужен)
+
+
+class _RetrievalToolBase(BaseModel):
+    """Общие поля инстанса агентского тула (запись списка `retrieval.tools`)."""
+    enabled: bool = True
+    # Имя функции для агента; '' = дефолт типа. Нужно при ≥2 инстансах одного типа.
+    name: str = ''
+    # Доменное описание/триггер: вставляется в описание тула и секцию system prompt
+    # (для core-тулов непустое — полная замена дефолтного описания).
+    description: str = ''
+
+
+class RetrievalCoreToolConfig(_RetrievalToolBase):
+    """Core-тулы (search/find_section/get_doc): нельзя выключить/удалить,
+    description тюнится. `required` — только для find_section (политика
+    «обязателен перед search»); None = взять search.require_find_section."""
+    type: Literal['search', 'find_section', 'get_doc']
+    required: bool | None = None
+
+    @model_validator(mode='after')
+    def _core_always_enabled(self):
+        self.enabled = True  # core нельзя выключить — игнорируем enabled из конфига
+        return self
+
+
+class RetrievalLookupToolConfig(_RetrievalToolBase):
+    """`lookup` — точечное обращение к справочным страницам (бывш. glossary).
+    `trigger: abbreviations` — выверенный протокол аббревиатур (как прежний
+    глоссарий); '' — generic-режим, триггер задаёт description."""
+    type: Literal['lookup'] = 'lookup'
+    doc_ids: list[str] = Field(default_factory=list)
+    trigger: Literal['', 'abbreviations'] = ''
+
+
+class RetrievalCatalogToolConfig(_RetrievalToolBase):
+    """`catalog` — структурный каталог корпуса (см. RetrievalCatalogConfig —
+    legacy-блок; новый способ объявления — записью в `tools`)."""
+    type: Literal['catalog'] = 'catalog'
+    fields: list[str] = Field(default_factory=list)
+
+
+RetrievalToolConfig = Annotated[
+    Union[RetrievalCoreToolConfig, RetrievalLookupToolConfig, RetrievalCatalogToolConfig],
+    Field(discriminator='type'),
+]
+
+
 class RetrievalConfig(BaseModel):
     """Настройки агентского RAG-pipeline. Используется services/pipeline.
 
@@ -519,8 +590,58 @@ class RetrievalConfig(BaseModel):
     search: RetrievalSearchConfig = RetrievalSearchConfig()
     features: RetrievalFeaturesConfig = RetrievalFeaturesConfig()
     prompts: RetrievalPromptsConfig = RetrievalPromptsConfig()
+    # Единый список агентских тулов (core + optional). Источник истины для
+    # pipeline; legacy-блоки glossary/catalog авто-мигрируются сюда валидатором.
+    tools: list[RetrievalToolConfig] = Field(default_factory=list)
+    # DEPRECATED: старая форма объявления глоссария/каталога. Читается только
+    # миграцией в `tools` (back-compat для существующих деплоев).
     glossary: RetrievalGlossaryConfig = RetrievalGlossaryConfig()
+    catalog: RetrievalCatalogConfig = RetrievalCatalogConfig()
     http_timeout: int = 300
+
+    @model_validator(mode='after')
+    def _migrate_legacy_tool_blocks(self):
+        """Legacy `glossary:`/`catalog:` блоки → записи `tools` (если тип ещё
+        не объявлен явно). Существующие конфиги (morag3 и пр.) продолжают
+        работать без правок; имя мигрированного глоссария — прежнее
+        `lookup_glossary` (промпт/поведение агента не меняются)."""
+        from morag.retrieval.tools.catalog import catalog_description
+        from morag.retrieval.tools.lookup import abbr_description
+        present = {t.type for t in self.tools}
+        if ('lookup' not in present and self.glossary.enabled and self.glossary.doc_ids):
+            # ОДНО полное описание: протокол аббревиатур + доменная шапка из старого note.
+            self.tools.append(RetrievalLookupToolConfig(
+                name='lookup_glossary',
+                description=abbr_description(self.glossary.description),
+                doc_ids=list(self.glossary.doc_ids),
+                trigger='abbreviations',
+            ))
+        if ('catalog' not in present and self.catalog.enabled and self.catalog.fields
+                and not self.catalog.in_prompt):
+            self.tools.append(RetrievalCatalogToolConfig(
+                description=catalog_description(list(self.catalog.fields), self.catalog.description),
+                fields=list(self.catalog.fields),
+            ))
+        return self
+
+    @model_validator(mode='after')
+    def _validate_tool_names(self):
+        """Имена тулов уникальны; core-типы — максимум по одной записи."""
+        seen: set[str] = set()
+        core_seen: set[str] = set()
+        for t in self.tools:
+            name = t.name or t.type
+            if name in seen:
+                raise ValueError(
+                    f'Duplicate tool name {name!r} в retrieval.tools — '
+                    f'у инстансов одного типа задайте разные name.'
+                )
+            seen.add(name)
+            if t.type in ('search', 'find_section', 'get_doc'):
+                if t.type in core_seen:
+                    raise ValueError(f'Core-тул {t.type!r} объявлен дважды в retrieval.tools.')
+                core_seen.add(t.type)
+        return self
 
 
 # ============================================================================

@@ -1,12 +1,11 @@
 """Retrieval-конфиг (секция config.local.yml.retrieval).
 
-Источник истины для pipeline (агентский RAG). Pipeline читает config.yml при
-старте контейнера; OWUI Valves остаются как override-механизм, но настройки
-по умолчанию приходят отсюда.
+Источник истины для pipeline (агентский RAG). OWUI Valves остаются как
+override-механизм, но настройки по умолчанию приходят отсюда.
 
-Изменения требуют `docker compose restart pipelines` — pipeline не перечитывает
-конфиг в runtime (см. CLAUDE.md). Console UI должен показывать соответствующий
-баннер после сохранения.
+Pipeline подхватывает retrieval-правки hot-reload'ом: следит за mtime
+config.yml + config.local.yml и пересобирает настройки/клиенты/тулы без рестарта
+(см. morag_pipeline._maybe_reload / CLAUDE.md). Рестарт контейнера не нужен.
 """
 from __future__ import annotations
 
@@ -19,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from morag.config import RetrievalConfig
+from morag.retrieval.tools import REGISTRY
 from services.console.config_io import read_layered, read_local, validate_merged, write_local
 
 router = APIRouter()
@@ -225,6 +225,7 @@ class FeaturesIn(BaseModel):
 
 class PromptsIn(BaseModel):
     admin_instructions: str = ''
+    corpus_description: str = ''
 
 
 class GlossaryIn(BaseModel):
@@ -240,13 +241,54 @@ class RetrievalIn(BaseModel):
     search: SearchIn = SearchIn()
     features: FeaturesIn = FeaturesIn()
     prompts: PromptsIn = PromptsIn()
+    # Единый список агентских тулов ({type, name, enabled, description, ...}).
+    # Схему записей валидирует validate_merged → RetrievalToolConfig union.
+    # Legacy-блок glossary оставлен для старых клиентов; при непустом tools
+    # glossary в payload игнорируется (см. put_retrieval).
+    tools: list[dict[str, Any]] = Field(default_factory=list)
     glossary: GlossaryIn = GlossaryIn()
     http_timeout: int | None = None
+
+
+class ToolPreviewIn(BaseModel):
+    """Конфиг ОДНОГО инстанса тула для расчёта «как видит агент»."""
+    type: str
+    name: str = ''
+    description: str = ''
+    required: bool | None = None
+    trigger: str = ''
+    fields: list[str] = Field(default_factory=list)
+    doc_ids: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+@router.post('/tool-preview')
+async def tool_preview(req: ToolPreviewIn) -> dict[str, Any]:
+    """Эффективные тексты тула из реестра типов (morag.retrieval.tools):
+    `description` (в schema, видит агент) и `prompt` (секция system prompt).
+    Без записи — для предпросмотра/редактирования в Console UI. Шаблоны живут
+    в Python, поэтому считаем здесь, а не дублируем в JS."""
+    spec = REGISTRY.get(req.type)
+    if spec is None:
+        return {'ok': False, 'error': f'неизвестный тип тула: {req.type}'}
+    cfg = req.model_dump()
+    try:
+        # default_description — то же, но с пустым description: дефолт типа,
+        # которым UI предзаполняет поле core-тула (и сравнивает на save).
+        return {
+            'ok': True,
+            'core': spec.core,
+            'default_name': spec.default_name,
+            'description': spec.describe(cfg),
+            'default_description': spec.describe({**cfg, 'description': ''}),
+            'prompt': spec.prompt_section(cfg).strip(),
+        }
+    except Exception as e:  # noqa: BLE001 — отдаём ошибку в UI, не 500
+        return {'ok': False, 'error': str(e)}
+
 
 @router.get('/config')
 async def get_retrieval(request: Request) -> dict[str, Any]:
@@ -312,10 +354,17 @@ async def put_retrieval(req: RetrievalIn, request: Request) -> dict[str, Any]:
     отбрасываем — в local попадает только то, что юзер реально изменил
     относительно baseline. Если дельта пуста — удаляем ключ retrieval из local.
 
-    Возвращает {'ok': True, 'restart_required': True}.
+    Возвращает {'ok': True, 'restart_required': False} — pipeline подхватывает
+    retrieval-правки hot-reload'ом по mtime конфига (см. morag_pipeline._maybe_reload),
+    рестарт контейнера не нужен.
     """
     cfg_path = request.app.state.config_path
     incoming = _strip_none(req.model_dump())
+    # Новый UI шлёт единый список tools — legacy glossary-блок тогда не пишем
+    # (Pydantic-миграция дублей не создаст, но конфиг с обеими формами
+    # двусмысленен для человека).
+    if incoming.get('tools'):
+        incoming.pop('glossary', None)
 
     # 1. Валидация: candidate-local = существующий local + наш retrieval-патч.
     #    Без существующего local validate_merged не увидит llms (которые юзер
@@ -344,7 +393,7 @@ async def put_retrieval(req: RetrievalIn, request: Request) -> dict[str, Any]:
         del current_local['retrieval']
     write_local(cfg_path, current_local)
 
-    return {'ok': True, 'restart_required': True}
+    return {'ok': True, 'restart_required': False}
 
 
 def _baseline_retrieval_effective(cfg_path: str | Path) -> dict[str, Any]:

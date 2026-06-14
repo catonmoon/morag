@@ -122,26 +122,37 @@ class HttpEmbedder(Embedder):
         else:
             yield
 
+    async def _with_empty_retry(self, fn, attempts: int = 8):
+        """OpenRouter иногда отдаёт HTTP 200 с битым/пустым телом embeddings → SDK-парсер кидает
+        ('No embedding data received' и т.п.). Это НЕ HTTP-ошибка, SDK-ретрай (429/5xx) её не ловит →
+        документ падает на пустом месте. Ретраим с backoff — следующий запрос обычно ок."""
+        for i in range(attempts):
+            try:
+                return await fn()
+            except Exception as e:  # noqa: BLE001 — транзиентный битый ответ провайдера
+                if i == attempts - 1:
+                    raise
+                logger.warning('embed retry %d/%d after %s', i + 1, attempts - 1, e)
+                await asyncio.sleep(1.0 * (i + 1))
+
     async def _do_call(self, text: str) -> list[float]:
-        if self._rate_limiter:
-            await self._rate_limiter.acquire()
-        async with self._inflight_cap():
-            resp = await self._client.embeddings.create(
-                model=self._model,
-                input=text,
-            )
-        return list(resp.data[0].embedding)
+        async def once():
+            if self._rate_limiter:
+                await self._rate_limiter.acquire()
+            async with self._inflight_cap():
+                resp = await self._client.embeddings.create(model=self._model, input=text)
+            return list(resp.data[0].embedding)
+        return await self._with_empty_retry(once)
 
     async def _do_call_batch(self, texts: list[str]) -> list[list[float]]:
-        if self._rate_limiter:
-            await self._rate_limiter.acquire()
-        async with self._inflight_cap():
-            resp = await self._client.embeddings.create(
-                model=self._model,
-                input=texts,
-            )
-        data = sorted(resp.data, key=lambda d: d.index)
-        return [list(d.embedding) for d in data]
+        async def once():
+            if self._rate_limiter:
+                await self._rate_limiter.acquire()
+            async with self._inflight_cap():
+                resp = await self._client.embeddings.create(model=self._model, input=texts)
+            data = sorted(resp.data, key=lambda d: d.index)
+            return [list(d.embedding) for d in data]
+        return await self._with_empty_retry(once)
 
     async def embed(self, text: str) -> list[float]:
         return await self._do_call(self._doc_tpl.format(text=text))

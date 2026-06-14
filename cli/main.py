@@ -24,6 +24,7 @@ from morag.indexing.chunker import (
     PassthroughChunker,
     SectionChunker,
     SemanticChunker,
+    TranscriptChunker,
 )
 from morag.indexing.context import LLMContextGenerator, NoopContextGenerator
 from morag.indexing.embedder import (
@@ -450,6 +451,15 @@ async def cmd_index(
             token_counter=llm_counter,
             max_tokens=config.indexing.chunker.max_tokens,
         )
+    elif chunker_mode == 'transcript':
+        # аудио-транскрипты: LLM-границы по репликам, не режет поперёк фразы, адаптивный сплит монолога,
+        # start_sec/end_sec/speakers в payload. Зафиксировано экспериментом (max_tokens≈900).
+        chunker_llm = llm_clients[role_mapping.name_for('chunker')]
+        chunker = TranscriptChunker(
+            chunker_llm,
+            token_counter=llm_counter,
+            max_tokens=config.indexing.chunker.max_tokens,
+        )
     elif chunker_mode in ('hybrid', 'section'):
         oversized_cfg = config.indexing.chunker.oversized
         oversized_strategies = {
@@ -540,7 +550,7 @@ async def cmd_index(
     # В LLM-режиме блок + ответ LLM должны влезть в контекстное окно.
     # Ответ ≈ такого же размера как вход, поэтому безопасный лимит: (context_window - overhead) / 2.
     _LLM_PROMPT_OVERHEAD = 512  # токенов на системный промпт + запас
-    skip_presplit = chunker_mode in ('semantic', 'hybrid', 'section', 'boundary')
+    skip_presplit = chunker_mode in ('semantic', 'hybrid', 'section', 'boundary', 'transcript')
     if chunker_mode == 'llm':
         chunker_llm_inst = config.llm_by_name(role_mapping.name_for('chunker'))
         llm_safe_limit = (chunker_llm_inst.context_window - _LLM_PROMPT_OVERHEAD) // 2

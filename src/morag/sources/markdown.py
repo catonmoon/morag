@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,21 +10,36 @@ from morag.sources.base import Document, Source
 _FRONTMATTER_RE = re.compile(r'^---\n(.*?)\n---\n?', re.DOTALL)
 
 
-def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
+def _coerce_value(v: str):
+    """Front-matter значение → типизированное: JSON-массив/объект (`["a","b"]`) → list/dict;
+    целое → int; иначе строка (обрамляющие кавычки снимаются)."""
+    if v[:1] in ('[', '{'):
+        try:
+            return json.loads(v)
+        except ValueError:
+            pass
+    if len(v) >= 2 and v[0] == v[-1] and v[0] in '"\'':  # снять обрамляющие кавычки
+        return v[1:-1]
+    if v.lstrip('-').isdigit():
+        return int(v)
+    return v
+
+
+def _parse_frontmatter(text: str) -> tuple[dict, str]:
     """Извлечь YAML-front-matter (простые `key: value`) и тело без него.
 
-    Поддерживается минимальный subset: плоские строки `key: value` в блоке `---...---`
-    в начале файла. Достаточно для `title`/`url` аудио-транскриптов. Без front-matter —
-    возвращает ({}, text).
+    Минимальный subset: плоские `key: value` в блоке `---...---`. Значения коэрсятся
+    (`_coerce_value`): JSON-списки/объекты → list/dict, целые → int, иначе строка. ЛЮБОЙ ключ едет
+    дальше generic — ядро не знает про доменные поля (`season`/`speakers`/…). Без front-matter — ({}, text).
     """
     m = _FRONTMATTER_RE.match(text)
     if not m:
         return {}, text
-    meta: dict[str, str] = {}
+    meta: dict = {}
     for line in m.group(1).splitlines():
         if ':' in line:
             key, _, val = line.partition(':')
-            meta[key.strip()] = val.strip()
+            meta[key.strip()] = _coerce_value(val.strip())
     return meta, text[m.end():]
 
 
@@ -116,7 +132,13 @@ class MarkdownSource(Source):
                 # нужно для deep-link цитат на источник.
                 url=meta.get('url', path.as_uri()),
                 parent_doc_ids=self._parent_doc_ids(path),
-                payload={'source_name': self._name, 'source_kind': self._kind},
+                # ВЕСЬ front-matter (кроме title/url → поля Document) едет в payload GENERIC:
+                # date/duration_sec/season/episode/speakers + любые будущие доменные поля. Типы уже
+                # коэрснуты в _parse_frontmatter. Ядро НЕ знает про конкретные поля (см. ADR/CLAUDE.md).
+                payload={'source_name': self._name, 'source_kind': self._kind,
+                         **{k: v for k, v in meta.items()
+                            if k not in ('title', 'url', 'source_name', 'source_kind')
+                            and v not in (None, '')}},
             )
         except OSError:
             return None
