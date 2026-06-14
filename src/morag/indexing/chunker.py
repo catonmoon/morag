@@ -433,6 +433,8 @@ class BoundaryChunker(Chunker):
     1 retry с указанием ошибки; иначе fallback на склейку по token-бюджету (max_tokens).
     """
 
+    _boundary_prompt = _BOUNDARY_PROMPT  # переопределяется в наследниках (TranscriptChunker)
+
     def __init__(
         self,
         client,
@@ -477,7 +479,7 @@ class BoundaryChunker(Chunker):
     async def _get_boundaries(self, units: list[str]) -> list[tuple[int, int]] | None:
         numbered = '\n'.join(f'[{i + 1}] {u}' for i, u in enumerate(units))
         messages = [
-            {'role': 'system', 'content': _BOUNDARY_PROMPT},
+            {'role': 'system', 'content': self._boundary_prompt},
             {'role': 'user', 'content': numbered},
         ]
         n = len(units)
@@ -764,6 +766,157 @@ class ChunkResult:
     text: str
     pages: list[int] = dataclasses.field(default_factory=list)
     char_offset: int = 0  # позиция начала чанка в оригинальном тексте документа
+    # транскрипт-метаданные (TranscriptChunker): аудио-оффсеты + спикеры чанка
+    start_sec: float | None = None
+    end_sec: float | None = None
+    speakers: list[str] = dataclasses.field(default_factory=list)
+
+
+# Промпт зафиксирован экспериментом (adventures/experiments/transcript_chunking_20260609.md): по-новостной
+# («лента новостей»), сегмент = одна новость/тема. С max_tokens≈900 даёт retrieval recall@1 90-100%.
+_TRANSCRIPT_PROMPT = """\
+Ты сегментируешь ТРАНСКРИПТ подкаста/беседы про технологии на тематические чанки для RAG-поиска.
+Вход — пронумерованные юниты (реплики спикеров или их части): `[N] [Спикер] текст`.
+
+Разговор идёт КАК ЛЕНТА НОВОСТЕЙ/ТЕЗИСОВ: ведущие переходят «следующая новость», «перейдём к», «а ещё».
+ПРАВИЛО: каждая ОТДЕЛЬНАЯ новость / тема / законченный тезис = ОТДЕЛЬНЫЙ сегмент.
+- НЕ склеивай разные новости/темы в один сегмент, даже если каждая короткая.
+- Реплики РАЗНЫХ спикеров про ОДНУ тему — ОДИН сегмент (дели по смене ТЕМЫ, не по смене спикера).
+- Длинный монолог, где спикер перешёл к другой подтеме, — РАЗНЫЕ сегменты.
+- Сегмент понятен сам по себе. Сомневаешься «одна тема или две» — ДЕЛИ (дробнее лучше, чем смешать).
+
+Верни ТОЛЬКО границы по НОМЕРАМ юнитов (НЕ переписывай текст): каждый сегмент {start, end, topic},
+покрой ВСЕ юниты подряд без пропусков/нахлёстов (первый start=1, последний end=<число юнитов>,
+каждый следующий start = предыдущий end + 1; topic — 3-7 слов).
+Верни строго JSON: {"segments": [{"start": 1, "end": 4, "topic": "..."}, ...]}.
+"""
+
+_TURN_RE = re.compile(
+    r'^\[(?P<speaker>[^\]]+)\]\s*(?:<!--\s*t:(?P<t>[\d.]+)\s*-->)?\s*(?P<text>.*)$', re.S)
+
+
+@dataclasses.dataclass
+class _Unit:
+    """Юнит транскрипт-чанкинга: реплика целиком или её часть (предложения длинного монолога)."""
+    text: str
+    speaker: str
+    start: float | None
+    end: float | None
+    char_offset: int
+
+
+class TranscriptChunker(BoundaryChunker):
+    """Транскрипт-специализация BoundaryChunker (`mode: transcript`).
+
+    Юниты = реплики `[Имя] <!-- t:сек --> текст`; длинная реплика режется на суб-юниты по предложениям
+    (≤`unit_max_tokens`) с ИНТЕРПОЛЯЦИЕЙ таймкода → LLM может ставить границу ВНУТРИ монолога на смене
+    темы (а не только на стыке реплик). Материализация переприписывает `[Имя]` чанку, начавшемуся в
+    середине реплики (спикер/тайминг не теряются), и отдаёт `start_sec`/`end_sec`/`speakers`/`char_offset`.
+    Размерный пост-пасс (`_cap_by_size`) добивает затянувшийся монолог одной темы по `max_tokens`.
+    Таймкод внутри реплики интерполируется (TODO про тонкий тайминг — adventures/podlodka-asr/CLAUDE.md).
+    """
+
+    _boundary_prompt = _TRANSCRIPT_PROMPT
+
+    def __init__(self, client, token_counter: TokenCounter, max_tokens: int = 900,
+                 max_retries: int = 1, unit_max_tokens: int = 400) -> None:
+        super().__init__(client, token_counter, max_tokens, max_retries)
+        self._unit_max = unit_max_tokens
+
+    async def chunk_with_metadata(self, text: str, *, paged: bool = False) -> list[ChunkResult]:
+        turns = self._parse_turns(text)
+        if not turns:
+            return []
+        units = self._build_units(turns)
+        if not units:
+            return []
+        if len(units) == 1:
+            return [self._materialize(units)]
+        segments = await self._get_boundaries([f'[{u.speaker}] {u.text}' for u in units])
+        if segments is None:
+            segments = self._fallback_segments([u.text for u in units])
+        segments = self._cap_by_size(units, segments)
+        return [self._materialize(units[s - 1:e]) for s, e in segments]
+
+    def _parse_turns(self, text: str) -> list[dict]:
+        turns, pos = [], 0
+        for para in re.split(r'\n\s*\n', text):
+            stripped = para.strip()
+            if not stripped:
+                continue
+            off = text.find(stripped, pos)
+            pos = off + len(stripped) if off >= 0 else pos
+            m = _TURN_RE.match(stripped)
+            if m and m['text'].strip():
+                turns.append({'speaker': m['speaker'].strip(),
+                              'start': float(m['t']) if m['t'] else None,
+                              'text': m['text'].strip(), 'char_offset': max(off, 0)})
+        # end реплики = start следующей (с таймкодом); у последней — оценка по словам (~2.5 сл/с)
+        for i, t in enumerate(turns):
+            nxt = next((turns[j]['start'] for j in range(i + 1, len(turns))
+                        if turns[j]['start'] is not None), None)
+            t['end'] = nxt if nxt is not None else (
+                t['start'] + len(t['text'].split()) / 2.5 if t['start'] is not None else None)
+        return turns
+
+    def _build_units(self, turns: list[dict]) -> list[_Unit]:
+        units: list[_Unit] = []
+        for t in turns:
+            if self._counter.count(t['text']) <= self._unit_max:
+                units.append(_Unit(t['text'], t['speaker'], t['start'], t['end'], t['char_offset']))
+            else:
+                units.extend(self._split_turn(t))
+        return units
+
+    def _split_turn(self, t: dict) -> list[_Unit]:
+        """Длинную реплику → суб-юниты по предложениям ≤unit_max, таймкод интерполируется по позиции."""
+        groups, cur, cur_tok = [], [], 0
+        for s in split_sentences(t['text']):
+            st = self._counter.count(s)
+            if cur and cur_tok + st > self._unit_max:
+                groups.append(' '.join(cur)); cur, cur_tok = [], 0
+            cur.append(s); cur_tok += st
+        if cur:
+            groups.append(' '.join(cur))
+        length = max(1, len(t['text']))
+        t0, t1 = t['start'], t['end']
+        out, cpos = [], 0
+        for g in groups:
+            start = (t0 + (cpos / length) * (t1 - t0)) if (t0 is not None and t1 is not None) else t0
+            out.append(_Unit(g, t['speaker'], round(start, 1) if start is not None else None,
+                             None, t['char_offset'] + cpos))
+            cpos += len(g) + 1
+        for i, u in enumerate(out):
+            u.end = out[i + 1].start if i + 1 < len(out) else t1
+        return out
+
+    def _cap_by_size(self, units: list[_Unit], segments: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        """Затянувшийся сегмент одной темы (> max_tokens) добиваем по юнитам, не дробя юнит."""
+        out: list[tuple[int, int]] = []
+        for s, e in segments:
+            start, tok = s, 0
+            for idx in range(s, e + 1):
+                ut = self._counter.count(units[idx - 1].text)
+                if idx > start and tok + ut > self._max_tokens:
+                    out.append((start, idx - 1)); start, tok = idx, 0
+                tok += ut
+            out.append((start, e))
+        return out
+
+    @staticmethod
+    def _materialize(seg_units: list[_Unit]) -> ChunkResult:
+        lines, prev = [], None
+        for u in seg_units:                      # склейка: новая `[Имя]` при смене спикера
+            if u.speaker != prev:
+                lines.append(f'[{u.speaker}] {u.text}'); prev = u.speaker
+            else:
+                lines[-1] += ' ' + u.text
+        starts = [u.start for u in seg_units if u.start is not None]
+        ends = [u.end for u in seg_units if u.end is not None]
+        return ChunkResult(
+            text='\n\n'.join(lines), char_offset=seg_units[0].char_offset,
+            start_sec=starts[0] if starts else None, end_sec=ends[-1] if ends else None,
+            speakers=list(dict.fromkeys(u.speaker for u in seg_units)))
 
 
 class HybridChunker(Chunker):

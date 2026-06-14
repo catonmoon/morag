@@ -535,13 +535,20 @@ class IndexingPipeline:
             chunk.payload['char_offset'] = cr.char_offset
             if cr.pages:
                 chunk.payload['pages'] = cr.pages
-            # Пропагандируем source_kind/source_name из документа в payload чанка —
-            # нужно для retrieval-фильтров по kind на коллекции chunks. Без этого
-            # фильтр `must_not source_kind=X` молча матчит ноль точек (см.
-            # memory/chunks-payload-source-kind.md).
-            for k in ('source_kind', 'source_name'):
-                if k in document.payload:
-                    chunk.payload[k] = document.payload[k]
+            # TranscriptChunker: аудио-оффсеты + спикеры чанка → payload (deep-link #t=, фильтры)
+            if cr.start_sec is not None:
+                chunk.payload['start_sec'] = cr.start_sec
+            if cr.end_sec is not None:
+                chunk.payload['end_sec'] = cr.end_sec
+            if cr.speakers:
+                chunk.payload['speakers'] = cr.speakers
+            # GENERIC: весь doc.payload → chunk.payload. source_kind/source_name — для retrieval-фильтров
+            # по kind (без них `must_not source_kind=X` молча матчит ноль точек, см.
+            # memory/chunks-payload-source-kind.md); date/duration_sec/season/episode и ЛЮБЫЕ доменные
+            # front-matter-поля — для фильтров/метадата-запросов. Ядро не знает про конкретные поля.
+            # setdefault: чанк-уровневые (start_sec/end_sec/speakers/char_offset/pages) уже стоят → целы.
+            for k, v in document.payload.items():
+                chunk.payload.setdefault(k, v)
             # Stamp run-versioning + fingerprint (наследуем version от документа)
             self._stamp_payload(chunk.payload, version=doc_version)
             chunks.append(chunk)

@@ -6,7 +6,6 @@ version: 0.1.0
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -28,6 +27,11 @@ from morag.retrieval import (
     HybridSearcher,
     LLMReranker,
     find_section,
+)
+from morag.retrieval.tools import REGISTRY, build_tool_schema
+from morag.retrieval.tools.core import (
+    FIND_SECTION_OPTIONAL_POLICY,
+    FIND_SECTION_REQUIRED_POLICY,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,141 +86,20 @@ def _try_load_config() -> Config | None:
         return None
 
 
-# ── Tool definitions (OpenAI function calling) ───────────────────────────────
+# Схемы тулов (core search/find_section/get_doc + lookup/catalog) живут в
+# пакете morag.retrieval.tools — по модулю на тип (ToolSpec). Здесь только
+# сборка инстансов из config.retrieval.tools (см. Pipeline.__init__).
 
-_GLOSSARY_TOOL: dict = {
-    'type': 'function',
-    'function': {
-        'name': 'lookup_glossary',
-        'description': '',  # подменяется в Pipeline.__init__ описанием из config
-        'parameters': {
-            'type': 'object',
-            'properties': {
-                'query': {
-                    'type': 'string',
-                    'description': (
-                        'Термин/аббревиатура, расшифровку которой ищешь, '
-                        'на русском (можно несколько через пробел).'
-                    ),
-                },
-            },
-            'required': ['query'],
-        },
-    },
-}
-
-
-_TOOLS = [
-    {
-        'type': 'function',
-        'function': {
-            'name': 'search',
-            'description': (
-                'Поиск по базе знаний документации. '
-                'Возвращает релевантные чанки с текстом, контекстом и путём документа.'
-            ),
-            'parameters': {
-                'type': 'object',
-                'properties': {
-                    'query': {
-                        'type': 'string',
-                        'description': 'Поисковый запрос на русском языке. Ключевые термины, без лишних слов.',
-                    },
-                    'section_ids': {
-                        'type': 'array',
-                        'items': {'type': 'string'},
-                        'description': (
-                            'Опционально: id разделов для РЕКУРСИВНОГО поиска — раздел И все его подразделы/страницы. '
-                            'Для широких тем, когда ответ может быть в любой подстранице раздела.'
-                        ),
-                    },
-                    'doc_ids': {
-                        'type': 'array',
-                        'items': {'type': 'string'},
-                        'description': (
-                            'Опционально: id конкретных страниц для ТОЧЕЧНОГО поиска — только эти страницы, БЕЗ их потомков. '
-                            'Для узких запросов, когда известно что ответ на конкретной странице-разделе '
-                            '(например, страница «Люди» сама перечисляет отделы, без захода в её подпапки).'
-                        ),
-                    },
-                },
-                'required': ['query'],
-            },
-        },
-    },
-    {
-        'type': 'function',
-        'function': {
-            'name': 'find_section',
-            'description': (
-                'ОБЯЗАТЕЛЬНЫЙ ПЕРВЫЙ ШАГ. Найти релевантные РАЗДЕЛЫ документации по запросу. '
-                'Работает через doc-level эмбеддинги (полный текст каждого документа) с агрегацией '
-                'по родительскому разделу — возвращает готовые section_ids для последующего search. '
-                'ВСЕГДА вызывай перед search(). Без этого шага search бьёт по всему корпусу и выдаёт шум.'
-            ),
-            'parameters': {
-                'type': 'object',
-                'properties': {
-                    'query': {
-                        'type': 'string',
-                        'description': 'Поисковый запрос на русском языке.',
-                    },
-                },
-                'required': ['query'],
-            },
-        },
-    },
-    {
-        'type': 'function',
-        'function': {
-            'name': 'get_doc',
-            'description': (
-                'Глубокое чтение одного документа: тянет все его чанки, реранкер '
-                'выбирает релевантные query. Используй когда: (а) после search ты '
-                'понимаешь что нужный документ найден, но один-два чанка из выдачи '
-                'не дают полной картины; (б) нужно проверить все части большого '
-                'документа на релевантность query (search мог пропустить '
-                'релевантный фрагмент в хвосте документа).'
-            ),
-            'parameters': {
-                'type': 'object',
-                'properties': {
-                    'doc_id': {
-                        'type': 'string',
-                        'description': (
-                            'ID документа из результатов find_section/search '
-                            '(полный prefixed id вида `<kind>:<name>:<external_id>`).'
-                        ),
-                    },
-                    'query': {
-                        'type': 'string',
-                        'description': (
-                            'Какую информацию ищешь в этом документе (на русском, '
-                            'словами пользователя из последнего вопроса).'
-                        ),
-                    },
-                },
-                'required': ['doc_id', 'query'],
-            },
-        },
-    },
-]
+# Доменная «роль» в начале _SYSTEM_PROMPT — заменяется на retrieval.prompts.corpus_description
+# (если задан), чтобы один промпт обслуживал и документацию, и подкаст, и любой корпус.
+_DEFAULT_ROLE_LINE = 'Ты — ассистент по внутренней документации компании.'
 
 _SYSTEM_PROMPT = (
     'Ты — ассистент по внутренней документации компании. '
     'Отвечай только на русском языке.\n\n'
     'У тебя есть доступ к базе знаний через инструменты (tools). '
     'Используй их для поиска информации.\n\n'
-    '## ГЛАВНОЕ ПРАВИЛО\n'
-    'ЗАПРЕЩЕНО отвечать без поиска. И ЗАПРЕЩЕНО делать search() без предварительного find_section(). '
-    'Твой ПЕРВЫЙ ход — ВСЕГДА `find_section(query)`, затем `search(query, section_ids=[...])` '
-    'с section_ids ИЗ результата find_section. Без исключений, даже если вопрос кажется простым.\n\n'
-    'Почему так: find_section работает по doc-level эмбеддингам полного текста каждого документа '
-    'и агрегирует результаты по родительскому разделу. Без него search бьёт по всему корпусу — '
-    'выдача шумная, из 10+ разных документов. С ним search прицельный и релевантный.\n\n'
-    '## Алгоритм работы: Find → Execute → Verify\n\n'
-    '### 1. FIND SECTION (обязательный шаг)\n'
-    'Первый ход — ВСЕГДА `find_section(query)` со словами пользователя из вопроса. '
+    '{find_section_policy}'
     'СОХРАНЯЙ имена, фамилии, названия, ID, специфические термины — это самые сильные '
     'различающие сигналы и их нельзя обобщать.\n'
     'Второй find_section вызывай ТОЛЬКО если первый не дал релевантных секций '
@@ -224,33 +107,33 @@ _SYSTEM_PROMPT = (
     'варьируй УГОЛ вопроса (другой аспект, переставленные слова, синонимы тех же '
     'терминов), НО не подменяй конкретные сущности на категории-абстракции.\n'
     'ЗАПРЕЩЕНО:\n'
-    '  - «Евгений Чуканов» → «сотрудник Евгений» (выбросил фамилию, добавил категорию)\n'
-    '  - «MODP-12345» → «задача разработки» (выбросил конкретный ID)\n'
-    '  - «Express» → «JavaScript-фреймворк» (добавил категорию из общей эрудиции)\n'
+    '  - «Иван Петров» → «сотрудник Иван» (выбросил фамилию, добавил категорию)\n'
+    '  - «TASK-123» → «задача разработки» (выбросил конкретный ID)\n'
+    '  - «конкретное название» → «общая категория» (добавил категорию из общей эрудиции)\n'
     '⚠️ Если делал несколько find_section — **ОБЪЕДИНЯЙ** результаты, не замещай. '
     'В search передавай union section_ids и doc_ids от всех вызовов.\n\n'
     '### 2. ВЫПОЛНЕНИЕ\n'
     '- Ищи тщательно. Старайся покрыть вопрос с разных сторон — делай несколько search\'ей '
     'под РАЗНЫЕ грани (процесс vs инструменты vs ответственные), не повторяя один запрос в переформулировках.\n'
     '- ⚠️ ЯЗЫК ЗАПРОСА: сохраняй ключевые русские слова из исходного вопроса. '
-    'Документация на русском — поиск на английском не сработает. '
+    'Корпус на русском — поиск на английском не сработает. '
     'Если в вопросе «доверие к сервису распознавания» — так и пиши в search, не переводи на «trust recognition service». '
     'Синонимы/переформулировки допустимы, но на русском.\n'
     '- 🎯 СЛОВАРЬ ЗАПРОСА: формулируй query словами пользователя из ПОСЛЕДНЕГО вопроса. '
-    'Не добавляй термины «общей эрудиции» (npm, Python, Kafka и т.п.) пока корпус сам не показал что они применимы. '
-    'Корпус — внутренняя документация, термины могут иметь специфичное значение. '
-    'Пример: «Как установить Express?» → search: «установка Express». '
+    'Не добавляй термины из общей эрудиции, пока корпус сам не показал что они применимы. '
+    'Корпус может использовать термины в специфичном значении. '
+    'Пример: «Как оформить отпуск?» → search: «оформление отпуска». '
     'Расширять/менять формулировку — только если буквальный поиск ничего релевантного не нашёл. '
     'При расширении используй близкие синонимы и переформулировки тех же терминов '
-    '(«установка» → «инструкция», «как настроить», «гайд»), не подменяй имена '
-    'технологий/инструментов (npm, Node.js, Python и т.п.) — если их не было в '
+    '(«установка» → «инструкция», «как настроить», «гайд»), не подменяй '
+    'специфические названия — если их не было в '
     'исходном вопросе, их нет и в корпусе.\n'
     '- 🔄 МНОГОХОДОВЫЙ ДИАЛОГ: помни предыдущие вопросы, но в search идут слова из ПОСЛЕДНЕГО. '
     'Подставляй контекст из прошлого хода только если последний вопрос ссылается на него '
     '(местоимения, эллипсис: «а как его установить?» → подставь предмет из прошлого вопроса).\n'
     '- `section_ids` — рекурсивный поиск (раздел + все его подстраницы). Для широких тем.\n'
     '- `doc_ids` — точечный поиск (только указанные страницы, БЕЗ потомков). Для случаев когда ответ '
-    'прямо на странице-разделе (например, страница «Люди» сама перечисляет отделы — её подстраницы не нужны).\n'
+    'прямо на странице-указателе (например, страница, которая сама перечисляет разделы — её подстраницы не нужны).\n'
     '- find_section подскажет что использовать: «раздел рекурсивно» → section_ids; «страница точечно» → doc_ids.\n'
     '- Если для разных аспектов релевантны разные секции — дополнительно вызови find_section под аспект.\n'
     '- Используй get_doc(doc_id, query) для ГЛУБОКОГО ЧТЕНИЯ одного документа '
@@ -285,6 +168,7 @@ _SYSTEM_PROMPT = (
     '(ориентируйся на поле «Обновлён» в результатах поиска). '
     'Если старый и новый документ противоречат — доверяй новому.\n'
 )
+
 
 def _init_valves_from_env() -> dict:
     """Bootstrap-инициализация Valves из env. Существующие OWUI-инсталляции
@@ -372,7 +256,17 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
     prompts = retr.prompts if retr else None
     # getattr — back-compat: старый morag.config (на деплоях, которые ещё не
     # обновили src/morag/config.py) не знает поле glossary.
-    glossary = getattr(retr, 'glossary', None) if retr else None
+    # Единый список тулов. Legacy-блоки glossary/catalog уже мигрированы в tools
+    # Pydantic-валидатором RetrievalConfig; getattr — back-compat со старым
+    # morag.config без поля tools.
+    tools_cfg = list(getattr(retr, 'tools', []) or []) if retr else []
+    # find_section-политика: запись тула в tools (required) перебивает
+    # search.require_find_section (legacy-ручка).
+    _fs_entry = next((t for t in tools_cfg if t.type == 'find_section'), None)
+    _fs_required = (
+        _fs_entry.required if (_fs_entry is not None and _fs_entry.required is not None)
+        else (getattr(search, 'require_find_section', True) if search else True)
+    )
 
     # Резолв agent LLM-инстанса из llms-pool
     agent_llm = cfg.llm_by_name(agent_role.llm) if (agent_role and cfg) else None
@@ -514,6 +408,7 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
         'max_iterations': _int_or(
             v.MAX_ITERATIONS, search.max_iterations if search else None, default=9,
         ),
+        'require_find_section': _fs_required,
         'enable_diversity_nudge': _bool_or(
             v.ENABLE_DIVERSITY_NUDGE,
             features.enable_diversity_nudge if features else None,
@@ -533,20 +428,22 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
                 'по всей базе знаний.'
             ),
         ),
+        'corpus_description': (
+            getattr(prompts, 'corpus_description', '') if prompts else ''
+        ),
 
-        # Глоссарий (optional tool, через Console UI). doc_ids — список;
-        # старые конфиги с одиночным `doc_id` мигрированы Pydantic-валидатором.
-        'glossary_enabled': (glossary.enabled if glossary else False),
-        'glossary_doc_ids': (list(glossary.doc_ids) if glossary else []),
-        'glossary_description': (glossary.description if glossary else ''),
+        # Инстансы агентских тулов (model_dump — handler'ы/билдеры работают с dict).
+        'tools': [t.model_dump() for t in tools_cfg],
     }
     return s
 
 
 class Pipeline:
     """OWUI Pipelines class. Конфигурация source-of-truth — `config.yml` в
-    bind-mount'е `/app/conf/`. Pipeline читает его в `__init__` и больше не
-    перечитывает (изменения требуют `docker compose restart pipelines`).
+    bind-mount'е `/app/conf/`. Pipeline читает его в `__init__` и **hot-reload'ит**
+    при изменении на диске (mtime config.yml + config.local.yml) — пересобирает
+    config-производное состояние без рестарта контейнера (см. _maybe_reload /
+    _build_from_config).
 
     Valves остаются как override-механизм для админа через OWUI UI: пустые/
     нулевые значения = «использовать config», непустые = override этого поля.
@@ -614,38 +511,92 @@ class Pipeline:
             for name in ('morag_pipeline', 'morag.retrieval'):
                 logging.getLogger(name).setLevel(log_level)
 
-        # 1. Прочитать config (fail-soft) и инициализировать Valves из env (back-compat)
-        self._config: Config | None = _try_load_config()
+        # 1. Valves из env (back-compat) — задаются ОДИН раз. Hot-reload их НЕ
+        #    трогает: OWUI может править Valves через admin UI, перезатирать из env нельзя.
         self.valves = self.Valves(**_init_valves_from_env())
 
-        # 2. Резолв всех настроек: Valve если задан, иначе config, иначе hardcoded fallback.
-        s = _resolve_settings(self.valves, self._config)
-
-        # 3. Persistent event loop — pipe() синхронный, async-вызовы через self._run().
+        # 2. Persistent event loop — pipe() синхронный, async-вызовы через self._run().
         # OWUI Pipelines может обрабатывать запросы параллельно (worker thread per request).
         # Persistent self._loop ОДИН на инстанс Pipeline, и run_until_complete не выносит
         # повторный заход пока loop ещё работает (бывший баг «this event loop is already
         # running»). Lock сериализует доступ — N запросов выстраиваются в очередь.
         # Цена: при двух параллельных вопросах второй ждёт первого. Допустимо: пайплайн
         # тяжёлый (LLM-вызовы), параллель в пределах одного инстанса не выигрывает.
+        # ВАЖНО: hot-reload (_build_from_config) этот loop НЕ пересоздаёт — к нему
+        # привязаны async-клиенты (AsyncOpenAI/httpx биндятся к running loop).
         import threading
         self._loop = asyncio.new_event_loop()
         self._loop_lock = threading.Lock()
 
-        # 4. Два LLMClient: agent (tool calls + final stream) и reranker.
-        #    enable_thinking=None — НЕ слать reasoning-флаги в extra_body
-        #    (xAI Grok реджектит unknown body fields). True/False — слать явные.
-        #    Если agent_url пустой после полного резолва (нет ни в config, ни в Valves)
-        #    — pipeline технически жив, но при первом вызове ответит юзеру понятной
-        #    ошибкой (см. _ensure_agent_ready в pipe()).
-        self._llm_agent = LLMClient(
+        # 3. Hot-reload config-производного состояния без рестарта контейнера.
+        #    Следим за mtime config.yml + config.local.yml (overlay пишет Console UI);
+        #    при правке пересобираем настройки/LLM-клиенты/searcher/тулы. Детали —
+        #    _maybe_reload (дёргается в начале pipe()) и _build_from_config.
+        #    Мотивация: в retrieval.agent много тюнинг-ручек, рестарт после каждой правки неудобен.
+        self._cfg_path = os.getenv('MORAG_CONFIG_PATH', '/app/conf/config.yml')
+        self._reload_lock = threading.Lock()
+        self._config: Config | None = None  # реальное значение ставит _build_from_config
+        self._build_from_config()
+        self._cfg_mtime = self._config_mtime()
+
+    def _config_mtime(self) -> float:
+        """max(mtime) основного конфига и overlay `config.local.yml`. 0.0 если файлов нет.
+        По нему _maybe_reload решает, изменился ли конфиг на диске."""
+        from pathlib import Path
+        mt = 0.0
+        for p in (self._cfg_path, str(Path(self._cfg_path).with_name('config.local.yml'))):
+            try:
+                mt = max(mt, os.path.getmtime(p))
+            except OSError:
+                pass
+        return mt
+
+    def _maybe_reload(self) -> None:
+        """Если config.yml/overlay изменились на диске — пересобрать config-производное
+        состояние без рестарта. Дёргается в начале pipe(): дешёвый stat на каждый запрос,
+        реальная пересборка только по факту правки (Console «Сохранить» → новый mtime).
+        Fail-soft: битый/частичный конфиг → остаёмся на прежнем состоянии + лог."""
+        mtime = self._config_mtime()
+        if mtime <= self._cfg_mtime:
+            return
+        with self._reload_lock:
+            if mtime <= self._cfg_mtime:  # другой worker-тред успел перезагрузить
+                return
+            try:
+                self._build_from_config()
+                logger.info('Config changed on disk — pipeline hot-reloaded')
+            except Exception as exc:  # noqa: BLE001 — fail-soft, остаёмся на прежнем
+                logger.error('Config hot-reload failed, keeping previous state: %s', exc)
+            # mtime бампаем в любом случае: успех — синхронизировались; ошибка — не долбим
+            # битый конфиг каждый запрос (юзер пересохранит → новый mtime → ретрай).
+            self._cfg_mtime = mtime
+
+    def _build_from_config(self) -> None:
+        """Собрать (или пересобрать) всё config-производное состояние: resolved settings,
+        LLM-клиенты (agent/rerank), embedders, qdrant, searcher, рерэнкеры, тулы.
+        Строим в ЛОКАЛЬНЫХ переменных и присваиваем self.* в конце — атомарный свап,
+        чтобы сбой посреди пересборки не оставил инстанс полусобранным. Persistent
+        event loop и valves НЕ трогаем (см. __init__)."""
+        cfg = _try_load_config()
+        # Не «понижаем» рабочий пайплайн до env-only из-за битого/частичного чтения:
+        # если раньше был валидный конфиг, а сейчас None — это сбой чтения, оставляем старое.
+        if cfg is None and self._config is not None:
+            raise RuntimeError('config reload вернул None — оставляю прежнее состояние')
+
+        s = _resolve_settings(self.valves, cfg)
+
+        # LLMClient: agent (tool calls + final stream) и reranker.
+        #   enable_thinking=None — НЕ слать reasoning-флаги (xAI Grok реджектит unknown
+        #   body fields). True/False — слать явные. Пустой agent_url после резолва →
+        #   pipeline жив, но при первом вызове отвечает понятной ошибкой (см. pipe()).
+        llm_agent = LLMClient(
             base_url=s['agent_url'] or 'http://invalid', model=s['agent_model'] or 'invalid',
             api_key=s['agent_api_key'] or 'invalid',
             timeout=s['http_timeout'], max_retries=3,
             enable_thinking=s['agent_enable_thinking'],
             context_window=s.get('agent_context_window') or 32768,
         )
-        self._llm_rerank = LLMClient(
+        llm_rerank = LLMClient(
             base_url=s['rerank_url'] or 'http://invalid', model=s['rerank_model'] or 'invalid',
             api_key=s['rerank_api_key'] or 'invalid',
             timeout=s['http_timeout'], max_retries=3,
@@ -653,20 +604,20 @@ class Pipeline:
             context_window=s.get('rerank_context_window') or 32768,
         )
 
-        # 5. Embedders: те же async-классы что в indexing — гарантия совпадения
-        #    query_template для dense-канала.
-        self._dense_embedder = HttpEmbedder(
+        # Embedders: те же async-классы что в indexing — гарантия совпадения
+        # query_template для dense-канала.
+        dense_embedder = HttpEmbedder(
             base_url=s['dense_url'], model=s['dense_model'], dim=s['dense_dim'],
             api_key=s['dense_api_key'],
             query_template=s['query_template'], timeout=s['http_timeout'],
         )
-        self._sparse_embedder = HttpGteSparseEmbedder(
+        sparse_embedder = HttpGteSparseEmbedder(
             base_url=s['sparse_url'], timeout=s['http_timeout'],
         )
-        self._qdrant = AsyncQdrantClient(url=s['qdrant_url'], timeout=s['http_timeout'])
-        self._searcher = HybridSearcher(
-            qdrant=self._qdrant,
-            dense_embedder=self._dense_embedder, sparse_embedder=self._sparse_embedder,
+        qdrant = AsyncQdrantClient(url=s['qdrant_url'], timeout=s['http_timeout'])
+        searcher = HybridSearcher(
+            qdrant=qdrant,
+            dense_embedder=dense_embedder, sparse_embedder=sparse_embedder,
             chunks_collection=s['chunks_collection'],
             docs_collection=s['docs_collection'],
             knowledge_map_collection=s['knowledge_map_collection'],
@@ -674,19 +625,19 @@ class Pipeline:
             source_roles=s['source_roles'],
             source_kinds=s['source_kinds'],
         )
-        # Реранкеры (search и get_doc) — оба используют rerank-LLM + TiktokenCounter
-        # для подсчёта токенов. Бюджет input'а считается по `llm.context_window`.
+        # Реранкеры (search и get_doc) — оба на rerank-LLM + TiktokenCounter.
+        # Бюджет input'а считается по `llm.context_window`.
         from morag.indexing.token_counter import TiktokenCounter
         from morag.retrieval import DocReranker
-        self._reranker = LLMReranker(
-            self._llm_rerank,
+        reranker = LLMReranker(
+            llm_rerank,
             token_counter=TiktokenCounter(),
             max_tokens=s['rerank_max_tokens'] or 100,
             enable_thinking=s['rerank_enable_thinking'],
             max_input_tokens=s.get('search_rerank_max_tokens', 0),
         )
-        self._doc_reranker = DocReranker(
-            self._llm_rerank,
+        doc_reranker = DocReranker(
+            llm_rerank,
             token_counter=TiktokenCounter(),
             max_tokens=s['rerank_max_tokens'] or 200,
             enable_thinking=s['rerank_enable_thinking'],
@@ -694,8 +645,8 @@ class Pipeline:
         )
         # DocRepository — для get_doc tool (читает full doc metadata).
         from morag.storage.repository import DocRepository
-        self._doc_repo = DocRepository(self._qdrant, s['docs_collection'])
-        self._find_section_config = FindSectionConfig(
+        doc_repo = DocRepository(qdrant, s['docs_collection'])
+        find_section_config = FindSectionConfig(
             sections_limit=s['sections_limit'],
             doc_pool=s['find_section_doc_pool'],
             descent_threshold=s['find_section_descent_threshold'],
@@ -703,32 +654,74 @@ class Pipeline:
             chunk_peek_limit=s['find_section_chunk_peek_limit'],
             chunk_peek_docs=s['find_section_chunk_peek_docs'],
         )
+        tools, tool_instances = self._build_tools(s)
 
-        # 6. Сохранить merged settings — pipe() читает их вместо self.valves
-        #    (там sentinel-defaults, fully resolved тут).
+        # Атомарный свап: всё собрано без исключений — присваиваем self.* разом.
+        # NB: присваивания поатрибутны, поэтому теоретически параллельный pipe()
+        # может на микросекунду увидеть микс старых/новых объектов. Допустимо: тяжёлая
+        # async-работа сериализована _loop_lock, окно — присваивания атрибутов, эффект
+        # самозалечивается следующим запросом.
+        self._config = cfg
         self._s = s
-
-        # 7. Tool-list (динамический — глоссарий-tool опциональный, через config).
-        self._tools = list(_TOOLS)
-        if s['glossary_enabled'] and s['glossary_doc_ids']:
-            tool = json.loads(json.dumps(_GLOSSARY_TOOL))  # deep copy
-            desc = s.get('glossary_description') or 'базе глоссария'
-            tool['function']['description'] = (
-                f'Расшифровка аббревиатур и терминов: {desc}. '
-                'ОБЯЗАТЕЛЬНО вызывай ПЕРВЫМ (до find_section/search) если в вопросе '
-                'есть хотя бы одно сокращение из 2+ заглавных букв (API, SSO, IAM и т.п.) '
-                'или необычный термин — глоссарий вернёт расшифровку, без которой '
-                'последующий поиск по самой аббревиатуре даст шум вместо результата.'
-            )
-            self._tools.append(tool)
+        self._llm_agent = llm_agent
+        self._llm_rerank = llm_rerank
+        self._dense_embedder = dense_embedder
+        self._sparse_embedder = sparse_embedder
+        self._qdrant = qdrant
+        self._searcher = searcher
+        self._reranker = reranker
+        self._doc_reranker = doc_reranker
+        self._doc_repo = doc_repo
+        self._find_section_config = find_section_config
+        self._tools = tools
+        self._tool_instances = tool_instances
         logger.info(
-            'Pipeline initialized: agent=%s/%s, rerank=%s/%s, qdrant=%s, '
-            'config_loaded=%s, tools=%d, glossary=%s',
+            'Pipeline (re)built from config: agent=%s/%s, rerank=%s/%s, qdrant=%s, '
+            'config_loaded=%s, tools=%s',
             s['agent_url'], s['agent_model'],
             s['rerank_url'], s['rerank_model'], s['qdrant_url'],
-            self._config is not None, len(self._tools),
-            f'{len(s["glossary_doc_ids"])} doc(s)' if s['glossary_enabled'] else 'off',
+            cfg is not None,
+            ','.join(t['function']['name'] for t in tools),
         )
+
+    def _build_tools(self, s: dict) -> tuple[list[dict], dict[str, tuple]]:
+        """Tool-list из config.retrieval.tools через реестр типов morag.retrieval.tools.
+        Core (search/find_section/get_doc) — всегда; optional (lookup/catalog/...) — по
+        enabled + полноте параметров. tool_instances: имя функции → (ToolSpec, cfg-dict
+        инстанса); cfg идёт в handler/status/prompt, поэтому у каждого инстанса СВОИ параметры."""
+        tools: list[dict] = []
+        tool_instances: dict[str, tuple] = {}
+        core_overrides = {
+            t['type']: t for t in s['tools']
+            if t['type'] in ('search', 'find_section', 'get_doc')
+        }
+        for ctype in ('search', 'find_section', 'get_doc'):
+            spec = REGISTRY[ctype]
+            cfg = dict(core_overrides.get(ctype) or {'type': ctype})
+            if ctype == 'find_section':
+                cfg['required'] = s['require_find_section']
+            tool = build_tool_schema(spec, cfg)
+            tool['function']['name'] = spec.default_name  # core: имя фиксировано
+            tools.append(tool)
+            tool_instances[spec.default_name] = (spec, cfg)
+        for t in s['tools']:
+            spec = REGISTRY.get(t['type'])
+            if spec is None:
+                logger.warning('Unknown tool type %r in retrieval.tools — skipped', t['type'])
+                continue
+            if spec.core or not t.get('enabled', True):
+                continue
+            if t['type'] == 'lookup' and not t.get('doc_ids'):
+                logger.warning('lookup tool %r без doc_ids — skipped', t.get('name') or 'lookup')
+                continue
+            if t['type'] == 'catalog' and not t.get('fields'):
+                logger.warning('catalog tool без fields — skipped')
+                continue
+            tool = build_tool_schema(spec, t)
+            name = tool['function']['name']
+            tools.append(tool)
+            tool_instances[name] = (spec, t)
+        return tools, tool_instances
 
     def _run(self, coro: Coroutine[Any, Any, _T]) -> _T:
         """Выполнить async-корутину в нашем persistent event loop. Sync-обёртка для pipe().
@@ -752,54 +745,41 @@ class Pipeline:
         if last_content.startswith('### Task:'):
             return
 
+        # 0.1 Hot-reload: если config.yml/overlay изменились на диске — пересобрать
+        # настройки/клиенты/тулы без рестарта (правки retrieval.agent применяются сразу).
+        self._maybe_reload()
+
         # 0.5 Sanity-check agent LLM. Если конфиг неполный (нет retrieval.agent
         # и Valves пусты) — отвечаем понятным сообщением вместо HTTP-падения.
         if not self._s.get('agent_url') or not self._s.get('agent_model'):
             yield (
                 '⚠️ Pipeline не сконфигурирован. Зайдите в Console UI '
                 '(http://localhost:8000) → Retrieval → выберите agent.llm и '
-                'reranker.llm из пула, нажмите «Сохранить retrieval-настройки», '
-                'затем выполните `docker compose restart pipelines`.'
+                'reranker.llm из пула, нажмите «Сохранить retrieval-настройки» — '
+                'настройки подхватятся автоматически, рестарт не нужен.'
             )
             return
 
         # 1. Подтянуть карту документации
         knowledge_map = self._fetch_knowledge_map()
 
-        # 2. Собрать system prompt
-        system_content = _SYSTEM_PROMPT
-        if self._s['glossary_enabled'] and self._s['glossary_doc_ids']:
-            desc = self._s.get('glossary_description') or (
-                'глоссарий с расшифровками аббревиатур и специальных терминов'
+        # 2. Собрать system prompt.
+        #    - find_section-политика (required/optional) — по retrieval.search.require_find_section;
+        #    - доменную «роль» заменяем на corpus_description (если задан) — корпус может быть
+        #      НЕ документацией (напр. подкаст);
+        #    - секции тулов — из реестра (prompt_section инстансов; у core они пустые).
+        policy = (
+            FIND_SECTION_REQUIRED_POLICY if self._s['require_find_section']
+            else FIND_SECTION_OPTIONAL_POLICY
+        )
+        system_content = _SYSTEM_PROMPT.replace('{find_section_policy}', policy)
+        corpus_description = self._s.get('corpus_description') or ''
+        if corpus_description:
+            system_content = system_content.replace(
+                _DEFAULT_ROLE_LINE, corpus_description, 1,
             )
-            system_content += (
-                '\n\n## Глоссарий — ОБЯЗАТЕЛЬНЫЙ ПЕРВЫЙ ШАГ при сокращениях\n'
-                f'`lookup_glossary(query)` — {desc}.\n\n'
-                '🛑 ЕСЛИ в вопросе пользователя ЕСТЬ ХОТЯ БЫ ОДНО сокращение/аббревиатура '
-                '(2+ заглавных буквы подряд, например: API, SSO, VPN, SLA, IAM; '
-                'или необычный термин с большой буквы) — ОБЯЗАТЕЛЬНО **ПЕРВЫМ ШАГОМ**, '
-                'ДО find_section, вызови `lookup_glossary(query="<все аббревиатуры через пробел>")`.\n\n'
-                'Зачем: без расшифровки ты будешь искать по самой аббревиатуре, а в '
-                'документах она часто пишется развёрнуто. Расшифровка даёт правильные '
-                'ключевые слова для последующего find_section/search.\n\n'
-                '🎯 ФОРМАТ ЗАПРОСА ПОСЛЕ ГЛОССАРИЯ: в последующих find_section/search '
-                'ОБЯЗАТЕЛЬНО включай **И полное название, И аббревиатуру** в формате '
-                '`Полное название (АББР)`. В документации термин может быть написан '
-                'и так, и так — без обоих вариантов поиск пропустит половину упоминаний.\n\n'
-                'Пример последовательности (две аббревиатуры):\n'
-                '  Вопрос: «Как настраивается SSO через IAM?»\n'
-                '  1. `lookup_glossary(query="SSO IAM")` →\n'
-                '     - SSO = Single Sign-On\n'
-                '     - IAM = Identity and Access Management\n'
-                '  2. `find_section(query="настройка Single Sign-On (SSO) через Identity and Access Management (IAM)")`\n'
-                '  3. `search(query="настройка SSO через IAM", section_ids=[...])`\n\n'
-                'Если для одной аббревиатуры глоссарий вернул НЕСКОЛЬКО значений — '
-                'выбери то, что лучше подходит по контексту вопроса; если непонятно — '
-                'спроси у пользователя.\n\n'
-                'Можно вызывать `lookup_glossary` несколько раз в одном диалоге — но '
-                'на ОДИН термин достаточно одного вызова (повторный — пустая трата токенов). '
-                'Если в вопросе НЕТ сокращений — пропускай этот шаг, иди сразу в find_section.'
-            )
+        for _name, (spec, cfg) in self._tool_instances.items():
+            system_content += spec.prompt_section(cfg)
         if self._s['admin_instructions']:
             system_content += (
                 '\n\n## Обязательные инструкции администратора\n'
@@ -822,6 +802,7 @@ class Pipeline:
         all_chunks: dict[str, dict] = {}  # chunk_id → chunk (дедупликация)
         tool_call_count = 0
         search_count = 0
+        catalog_used = False
         searched_section_ids: set[str] = set()
         diversity_nudge_sent = False
         glossary_nudge_sent = False  # после первого lookup_glossary инжектим
@@ -878,9 +859,14 @@ class Pipeline:
                     continue
 
                 doc_count = len(unique_docs)
-                yield self._emit_status(
-                    '✅', f'Найдено {_plural(doc_count, "документ", "документа", "документов")} за {_plural(tool_call_count, "шаг", "шага", "шагов")}', True,
-                )
+                if doc_count == 0 and catalog_used:
+                    summary = 'Ответ по каталогу корпуса'
+                else:
+                    summary = (
+                        f'Найдено {_plural(doc_count, "документ", "документа", "документов")} '
+                        f'за {_plural(tool_call_count, "шаг", "шага", "шагов")}'
+                    )
+                yield self._emit_status('✅', summary, True)
                 logger.info(
                     '[agent] DONE: %d unique docs, %d tool calls, %d iters; by source_type=%s',
                     doc_count, tool_call_count, iteration + 1,
@@ -913,22 +899,27 @@ class Pipeline:
                     json.dumps(fn_args, ensure_ascii=False)[:200],
                 )
 
+                inst = self._tool_instances.get(fn_name)
+                inst_type = inst[0].type if inst else ''
                 if fn_name == 'search':
                     search_count += 1
                     for sid in (fn_args.get('section_ids') or []):
                         searched_section_ids.add(sid)
+                elif inst_type == 'catalog':
+                    catalog_used = True
 
                 # Аккумулируем query для подсветки в citation-чанках.
                 query = fn_args.get('query')
                 if isinstance(query, str) and query.strip():
                     agent_queries.append(query)
 
-                # Выполнение + статус
-                status_text = _format_tool_status(fn_name, fn_args, resolve_title=self._get_doc_title)
-                icon = {
-                    'search': '🔍', 'find_section': '🗺️', 'get_doc': '📄',
-                    'lookup_glossary': '📖',
-                }.get(fn_name, '🛠️')
+                # Выполнение + статус (формат и иконка — из ToolSpec инстанса)
+                if inst is not None and inst[0].status is not None:
+                    status_text = inst[0].status(inst[1], fn_args, self._get_doc_title)
+                    icon = inst[0].icon
+                else:
+                    status_text = _format_tool_status(fn_name, fn_args)
+                    icon = '🛠️'
                 yield self._emit_status(icon, status_text, False)
 
                 result, chunks = self._execute_tool(fn_name, fn_args)
@@ -943,6 +934,8 @@ class Pipeline:
                     if len(doc_names) > 2:
                         preview += f' и ещё {len(doc_names) - 2}'
                     yield self._emit_status('→', f'{_plural(len(doc_names), "документ", "документа", "документов")}: {preview}', False)
+                elif inst_type == 'catalog' and result:
+                    yield self._emit_status('→', result.split('.', 1)[0], False)
 
                 # Собрать чанки
                 for c in chunks:
@@ -955,11 +948,13 @@ class Pipeline:
                     'content': result,
                 })
 
-                # После первого lookup_glossary инжектим напоминание о формате
-                # «Полное название (АББР)» — sysprompt не выдерживает (Vision LLM
-                # игнорирует правило в хвосте). Свежий user-message рядом с
-                # tool_result LLM держит охотнее.
-                if fn_name == 'lookup_glossary' and not glossary_nudge_sent:
+                # После первого abbreviations-lookup'а (глоссарий) инжектим
+                # напоминание о формате «Полное название (АББР)» — sysprompt не
+                # выдерживает (Vision LLM игнорирует правило в хвосте). Свежий
+                # user-message рядом с tool_result LLM держит охотнее.
+                if (inst_type == 'lookup'
+                        and inst[1].get('trigger') == 'abbreviations'
+                        and not glossary_nudge_sent):
                     glossary_nudge_sent = True
                     agent_messages.append({
                         'role': 'user',
@@ -1054,16 +1049,19 @@ class Pipeline:
             return self._tool_find_section(args['query'])
         elif name == 'get_doc':
             return self._tool_get_doc(args['doc_id'], args['query'])
-        elif name == 'lookup_glossary':
-            return self._tool_glossary(args['query'])
+        # Инстанс-тулы из реестра (lookup/catalog/…) — handler из ToolSpec,
+        # cfg инстанса передаётся в handler (у каждого lookup — свои doc_ids).
+        inst = self._tool_instances.get(name)
+        if inst is not None and inst[0].handler is not None:
+            spec, cfg = inst
+            return spec.handler(self, cfg, args)
         return f'Неизвестный инструмент: {name}', []
 
-    def _tool_glossary(self, query: str) -> tuple[str, list[dict]]:
-        """Зовём `_tool_get_doc` для каждого настроенного doc_id глоссария,
-        мерджим результаты. Для одного doc_id — тождественно `_tool_get_doc`."""
-        doc_ids = self._s['glossary_doc_ids']
+    def _tool_lookup(self, doc_ids: list[str], query: str) -> tuple[str, list[dict]]:
+        """`lookup`-тип: `_tool_get_doc` для каждого doc_id инстанса, мерджим
+        результаты. Для одного doc_id — тождественно `_tool_get_doc`."""
         if not doc_ids:
-            return 'Глоссарий не настроен.', []
+            return 'Справочный инструмент не настроен (нет страниц).', []
         if len(doc_ids) == 1:
             return self._tool_get_doc(doc_ids[0], query)
         # Multi-doc: rerank каждый документ независимо, склеиваем top'ы.
@@ -1076,10 +1074,68 @@ class Pipeline:
                 all_chunks.extend(chunks)
         if not all_chunks:
             return (
-                f'В глоссариях ({len(doc_ids)} док.) нет релевантных терминов '
+                f'В справочных страницах ({len(doc_ids)} док.) нет релевантного '
                 f'для запроса «{query}». Попробуй переформулировать.'
             ), []
         return '\n\n---\n\n'.join(text_parts), all_chunks
+
+    def _tool_catalog(self, fields: list[str]) -> tuple[str, list[dict]]:
+        """`catalog`-тип: полный структурный каталог документов корпуса. Агент сам
+        считает агрегации по таблице — закрывает дыру RAG на «перечисли / сколько /
+        где не было / самый частый». Чанков не возвращает (цитировать нечего).
+        Доменный контекст (кто ведущие vs гости) живёт в ОПИСАНИИ тула, не в шапке."""
+        rows = self._run(self._fetch_catalog_rows(fields))
+        if not rows:
+            return 'Каталог пуст (нет документов с метаданными).', []
+
+        # Сортировка по конфигурируемым полям (в их порядке): числа — численно,
+        # строки — лексикографически, None — в конец. Без доменных допущений.
+        def _norm(v: Any) -> tuple:
+            if v is None:
+                return (2, 0, '')
+            if isinstance(v, (int, float)):
+                return (0, v, '')
+            return (1, 0, str(v))
+
+        rows.sort(key=lambda r: tuple(_norm(r.get(f)) for f in fields))
+
+        def _fmt(field: str, v: Any) -> str:
+            if v is None:
+                return ''
+            if isinstance(v, list):
+                return ', '.join(str(x) for x in v)
+            if field == 'date' and isinstance(v, str):
+                return v[:10]  # ISO timestamp → YYYY-MM-DD
+            return str(v)
+
+        lines = [' | '.join(fields), ' | '.join('---' for _ in fields)]
+        for r in rows:
+            lines.append(' | '.join(_fmt(f, r.get(f)) for f in fields))
+        head = f'Каталог корпуса — {len(rows)} записей.'
+        return head + '\n\n' + '\n'.join(lines), []
+
+    async def _fetch_catalog_rows(self, fields: list[str]) -> list[dict]:
+        """Скан docs-коллекции → по строке (выбранные поля) на каждый
+        НЕструктурный документ. Структурные folder-узлы пропускаем.
+
+        with_payload — ТОЛЬКО нужные поля (+structural): полный payload включает
+        text документа, на большом корпусе это сотни МБ на один вызов каталога."""
+        rows: list[dict] = []
+        offset = None
+        while True:
+            pts, offset = await self._qdrant.scroll(
+                collection_name=self._s['docs_collection'],
+                limit=256, offset=offset,
+                with_payload=[*fields, 'structural'], with_vectors=False,
+            )
+            for p in pts:
+                pl = p.payload or {}
+                if pl.get('structural'):
+                    continue
+                rows.append({f: pl.get(f) for f in fields})
+            if offset is None:
+                break
+        return rows
 
     def _tool_search(
         self,
@@ -1717,30 +1773,9 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
     return f'{n} {many}'
 
 
-def _format_tool_status(fn_name: str, fn_args: dict, resolve_title=None) -> str:
-    _title = resolve_title or (lambda x: x)
-    if fn_name == 'find_section':
-        query = fn_args.get('query', '')
-        return f'[{query}] поиск раздела'
-    if fn_name == 'search':
-        query = fn_args.get('query', '')
-        section_ids = fn_args.get('section_ids') or []
-        doc_ids = fn_args.get('doc_ids') or []
-        scope: list[str] = []
-        if section_ids:
-            scope.append('в разделах: ' + ', '.join(_title(sid) for sid in section_ids))
-        if doc_ids:
-            scope.append('на страницах: ' + ', '.join(_title(did) for did in doc_ids))
-        suffix = '; '.join(scope) if scope else 'по всей базе'
-        return f'[{query}] {suffix}'
-    if fn_name == 'get_doc':
-        doc_id = fn_args.get('doc_id', '')
-        query = fn_args.get('query', '')
-        title = _title(doc_id)
-        return f'[{query}] глубокое чтение документа: {title}'
-    if fn_name == 'lookup_glossary':
-        query = fn_args.get('query', '')
-        return f'[{query}] поиск определения'
+def _format_tool_status(fn_name: str, fn_args: dict) -> str:
+    """Fallback-статус для тула без `ToolSpec.status` (статусы известных типов
+    живут в morag.retrieval.tools)."""
     return f'{fn_name}({json.dumps(fn_args, ensure_ascii=False)})'
 
 

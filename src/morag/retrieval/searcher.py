@@ -12,6 +12,7 @@ CLI-скрипты, тесты.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from qdrant_client import AsyncQdrantClient
@@ -97,6 +98,7 @@ class HybridSearcher:
         hnsw_ef: int = 0,
         source_roles: dict[str, str] | None = None,
         source_kinds: dict[str, str] | None = None,
+        cache_ttl_seconds: float = 300.0,
     ) -> None:
         self._qdrant = qdrant
         self._dense = dense_embedder
@@ -120,6 +122,30 @@ class HybridSearcher:
         self._doc_titles: dict[str, str] = {}
         self._cluster_membership: dict[str, list[str]] | None = None
         self._knowledge_map: str | None = None
+        # TTL корпус-снапшот кэшей (KM/doc_tree/membership/titles). Без него
+        # долгоживущий pipelines-процесс месяцами отвечает по KM и дереву
+        # документов с момента своего старта, игнорируя cron-переиндексации
+        # (реальный кейс: prod держал KM двухнедельной давности). 0 = кэш вечный.
+        self._cache_ttl = cache_ttl_seconds
+        self._cache_expires_at = 0.0
+
+    def _maybe_expire_caches(self) -> None:
+        """Сбросить корпус-снапшот кэши по TTL — следующий доступ перечитает из Qdrant.
+
+        Зовётся из ленивых fetch'ей; fetch_knowledge_map выполняется на каждый
+        pipe() → протухание проверяется на каждом запросе агента."""
+        if self._cache_ttl <= 0:
+            return
+        now = time.monotonic()
+        if now < self._cache_expires_at:
+            return
+        self._cache_expires_at = now + self._cache_ttl
+        self._knowledge_map = None
+        self._cluster_membership = None
+        self._doc_tree = None
+        self._indexed_doc_ids = None
+        self._doc_titles.clear()
+        self._sparse_vector_names_cache.clear()
 
     # ── Schema helpers ────────────────────────────────────────────────────────
 
@@ -469,7 +495,8 @@ class HybridSearcher:
         return summaries
 
     async def build_doc_tree(self) -> tuple[dict[str, list[str]], set[str]]:
-        """Parent→children дерево + set всех indexed doc_id. Кешируется при первом вызове."""
+        """Parent→children дерево + set всех indexed doc_id. Кеш с TTL."""
+        self._maybe_expire_caches()
         if self._doc_tree is not None and self._indexed_doc_ids is not None:
             return self._doc_tree, self._indexed_doc_ids
         tree: dict[str, list[str]] = {}
@@ -536,7 +563,8 @@ class HybridSearcher:
         return result
 
     async def fetch_knowledge_map(self) -> str:
-        """Текст Knowledge Map (system prompt) из knowledge_map collection. Кеш."""
+        """Текст Knowledge Map (system prompt) из knowledge_map collection. Кеш с TTL."""
+        self._maybe_expire_caches()
         if self._knowledge_map is not None:
             return self._knowledge_map
         try:
@@ -556,7 +584,8 @@ class HybridSearcher:
         return self._knowledge_map
 
     async def fetch_cluster_membership(self) -> dict[str, list[str]]:
-        """cluster_membership из knowledge_map collection (для flat_topics). Кеш."""
+        """cluster_membership из knowledge_map collection (для flat_topics). Кеш с TTL."""
+        self._maybe_expire_caches()
         if self._cluster_membership is not None:
             return self._cluster_membership
         try:

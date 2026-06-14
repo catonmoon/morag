@@ -1449,15 +1449,14 @@
         <div class="help" style="margin-bottom:0.85rem">
           Настройки агентского RAG-пайплайна — LLM-роли, поиск, system prompt.
           Хранятся в <code>config.local.yml → retrieval</code>.
-          <b>Изменения применяются после <code>docker compose restart pipelines</code></b>
-          — pipeline-контейнер читает config один раз при старте.
+          <b>Изменения подхватываются автоматически</b> — pipeline следит за mtime
+          конфига и пересобирается без рестарта (применится при следующем вопросе).
           OWUI Valves остаются как override (пустое значение в Valve → берётся из config).
         </div>
 
-        <div x-show="setup.retrieval.restart_pending"
-             style="margin-bottom:1rem; padding:0.75rem 0.9rem; border:1px solid var(--warn); background:var(--warn-banner-bg); color:var(--warn-banner-fg); border-radius:5px">
-          ⚠ Сохранено. Чтобы изменения вступили в силу, выполните в терминале:<br>
-          <code style="display:inline-block; margin-top:0.4rem; padding:0.2rem 0.5rem; background:var(--code-bg); border-radius:3px">docker compose restart pipelines</code>
+        <div x-show="setup.retrieval.applied_note"
+             style="margin-bottom:1rem; padding:0.75rem 0.9rem; border:1px solid var(--accent); background:var(--code-bg); border-radius:5px">
+          ✓ Сохранено — настройки подхватятся автоматически (hot-reload), рестарт не нужен.
         </div>
 
         <h3 style="margin-top:0.5rem; margin-bottom:0.4rem; font-size:0.95rem">Agent — function-calling LLM</h3>
@@ -1609,88 +1608,140 @@
           </div>
         </div>
 
-        <h3 style="margin-top:1.2rem; margin-bottom:0.4rem; font-size:0.95rem">Глоссарий (опциональный tool)</h3>
+        <h3 style="margin-top:1.2rem; margin-bottom:0.4rem; font-size:0.95rem">Инструменты агента</h3>
         <div class="help" style="margin-bottom:0.6rem">
-          Если включён — агент получит дополнительный tool
-          <code>lookup_glossary(query)</code> для расшифровки аббревиатур и
-          терминов из указанного документа. Применяется когда вопрос содержит
-          непонятные сокращения или специальные термины.
+          Какие инструменты доступны агенту. <b>core</b>-инструменты (поиск, навигация,
+          чтение документа) отключить нельзя — но описание можно переопределить под корпус.
+          Дополнительные (справочные страницы, каталог) добавляются и настраиваются здесь.
         </div>
-        <div style="margin-bottom:0.6rem">
-          <label style="display:flex; align-items:center; gap:0.5rem; margin:0">
-            <input type="checkbox"
-                   :checked="setup.retrieval.glossary.enabled"
-                   @change="setup.retrieval.glossary.enabled = $event.target.checked">
-            <span>Подключить глоссарий</span>
-          </label>
-        </div>
-        <div x-show="setup.retrieval.glossary.enabled" style="margin-top:0.5rem">
-          <label>Документы-глоссарии (можно несколько; doc_id, URL страницы или просто pageId)</label>
-          <div class="chip-list">
-            <template x-for="(chip, idx) in (setup.retrieval.glossary.doc_chips || [])" :key="chip.id + ':' + idx">
-              <span :class="'chip' +
-                            (chip.status === 'loading' ? ' loading' : '') +
-                            (chip.status === 'error' ? ' error' : '')"
-                    :title="chip.url || chip.error || chip.id">
-                <span class="chip-badge" @click="toggleChipPath(chipCtxGlossary(), chip)"
-                      :title="chip.path ? 'Показать/скрыть путь' : ''" x-text="chipBadge(chip)"></span>
-                <template x-if="chip.status === 'loading'">
-                  <span><span class="chip-sep">·</span>загрузка…</span>
-                </template>
-                <template x-if="chip.status === 'error'">
-                  <span><span class="chip-sep">·</span>⚠ <span x-text="chip.error || 'не найден'"></span></span>
-                </template>
-                <template x-if="chip.status === 'ok'">
-                  <span>
-                    <span class="chip-sep">·</span>
-                    <template x-if="chip.url">
-                      <a :href="chip.url" target="_blank" rel="noopener"
-                         style="color:inherit; text-decoration:none" x-text="chip.title || chip.id"></a>
+        <template x-for="(tool, ti) in setup.retrieval.tools" :key="'tool' + ti">
+          <div style="border:1px solid var(--border); border-radius:8px; padding:0.7rem 0.9rem; margin-bottom:0.6rem">
+            <div style="display:flex; align-items:center; gap:0.6rem">
+              <span x-text="toolIcon(tool.type)"></span>
+              <b x-text="toolTitle(tool)"></b>
+              <code x-text="tool.type" style="font-size:0.75rem; opacity:0.65"></code>
+              <span x-show="toolIsCore(tool)"
+                    style="font-size:0.7rem; background:var(--code-bg); color:var(--muted); border-radius:4px; padding:0 6px">core</span>
+              <span style="flex:1"></span>
+              <label x-show="!toolIsCore(tool)"
+                     style="display:flex; align-items:center; gap:0.4rem; margin:0; font-size:0.85rem">
+                <input type="checkbox" :checked="tool.enabled"
+                       @change="tool.enabled = $event.target.checked"> вкл
+              </label>
+              <button x-show="!toolIsCore(tool)" type="button" class="chip-rm" title="Удалить"
+                      @click="setup.retrieval.tools.splice(ti, 1)">×</button>
+            </div>
+            <div x-show="toolIsCore(tool) || tool.enabled" style="margin-top:0.5rem">
+              <label x-show="tool.type === 'find_section'"
+                     style="display:flex; align-items:center; gap:0.5rem; margin:0 0 0.5rem">
+                <input type="checkbox" :checked="tool.required"
+                       @change="tool.required = $event.target.checked; _syncToolDefault(ti)">
+                <span>Обязателен перед search (иерархичный корпус; для плоского — выключить)</span>
+              </label>
+              <template x-if="tool.type === 'lookup'">
+                <div>
+                  <div class="grid2">
+                    <div>
+                      <label>Имя функции (для агента)</label>
+                      <input type="text" x-model="tool.name" placeholder="lookup" @blur="_syncToolDefault(ti)">
+                    </div>
+                    <div>
+                      <label>Режим</label>
+                      <select x-model="tool.trigger" @change="_syncToolDefault(ti)">
+                        <option value="">обычный (триггер из описания)</option>
+                        <option value="abbreviations">глоссарий аббревиатур</option>
+                      </select>
+                    </div>
+                  </div>
+                  <label>Справочные страницы (doc_id, URL или pageId; можно несколько)</label>
+                  <div class="chip-list">
+                    <template x-for="(chip, idx) in (tool.doc_chips || [])" :key="chip.id + ':' + idx">
+                      <span :class="'chip' +
+                                    (chip.status === 'loading' ? ' loading' : '') +
+                                    (chip.status === 'error' ? ' error' : '')"
+                            :title="chip.url || chip.error || chip.id">
+                        <span class="chip-badge" @click="toggleChipPath(chipCtxTool(ti), chip)"
+                              :title="chip.path ? 'Показать/скрыть путь' : ''" x-text="chipBadge(chip)"></span>
+                        <template x-if="chip.status === 'loading'">
+                          <span><span class="chip-sep">·</span>загрузка…</span>
+                        </template>
+                        <template x-if="chip.status === 'error'">
+                          <span><span class="chip-sep">·</span>⚠ <span x-text="chip.error || 'не найден'"></span></span>
+                        </template>
+                        <template x-if="chip.status === 'ok'">
+                          <span>
+                            <span class="chip-sep">·</span>
+                            <template x-if="chip.url">
+                              <a :href="chip.url" target="_blank" rel="noopener"
+                                 style="color:inherit; text-decoration:none" x-text="chip.title || chip.id"></a>
+                            </template>
+                            <template x-if="!chip.url">
+                              <span x-text="chip.title || chip.id"></span>
+                            </template>
+                            <template x-if="chip._expanded && chip.path">
+                              <span><span class="chip-sep">·</span><span class="chip-path" x-text="chip.path"></span></span>
+                            </template>
+                          </span>
+                        </template>
+                        <button type="button" class="chip-rm"
+                                @click="removeChipAt(chipCtxTool(ti), idx)"
+                                title="Удалить">×</button>
+                      </span>
                     </template>
-                    <template x-if="!chip.url">
-                      <span x-text="chip.title || chip.id"></span>
-                    </template>
-                    <template x-if="chip._expanded && chip.path">
-                      <span><span class="chip-sep">·</span><span class="chip-path" x-text="chip.path"></span></span>
-                    </template>
-                  </span>
-                </template>
-                <button type="button" class="chip-rm"
-                        @click="removeChipAt(chipCtxGlossary(), idx)"
-                        title="Удалить">×</button>
-              </span>
-            </template>
-            <input class="chip-input" type="text"
-                   :placeholder="(setup.retrieval.glossary.doc_chips || []).length ? '' : 'pageId / URL / confluence:virgo:… или название'"
-                   @keydown="onGlossaryChipKeydown($event)"
-                   @input="onChipSearchInput($event, chipCtxGlossary())"
-                   @paste="onGlossaryChipPaste($event)"
-                   @focus="onChipSearchInput($event, chipCtxGlossary())"
-                   @blur="onChipSearchBlur(); flushGlossaryChipInput($event)">
-          </div>
-          <template x-if="chipSearch.active && chipSearch.key === 'glossary'">
-            <div class="chip-search">
-              <template x-if="chipSearch.hint"><div class="chip-search-hint" x-text="chipSearch.hint"></div></template>
-              <template x-if="chipSearch.loading"><div class="chip-search-empty">поиск…</div></template>
-              <template x-if="!chipSearch.loading && !chipSearch.hint && !chipSearch.results.length">
-                <div class="chip-search-empty">ничего не найдено</div>
-              </template>
-              <template x-for="(sug, sidx) in chipSearch.results" :key="sug.id + ':' + sidx">
-                <div class="chip-search-item" @mousedown.prevent="pickChipSuggestion(chipCtxGlossary(), sug)">
-                  <span class="chip-badge" x-text="sug.badge || '🔗'"></span>
-                  <span class="s-title" x-text="sug.title"></span>
-                  <span class="s-path" x-text="sug.path"></span>
+                    <input class="chip-input" type="text"
+                           :placeholder="(tool.doc_chips || []).length ? '' : 'pageId / URL / doc_id или название'"
+                           @keydown="onToolChipKeydown($event, ti)"
+                           @input="onChipSearchInput($event, chipCtxTool(ti))"
+                           @paste="onToolChipPaste($event, ti)"
+                           @focus="onChipSearchInput($event, chipCtxTool(ti))"
+                           @blur="onChipSearchBlur(); flushToolChipInput($event, ti)">
+                  </div>
+                  <template x-if="chipSearch.active && chipSearch.key === 'tool:' + ti">
+                    <div class="chip-search">
+                      <template x-if="chipSearch.hint"><div class="chip-search-hint" x-text="chipSearch.hint"></div></template>
+                      <template x-if="chipSearch.loading"><div class="chip-search-empty">поиск…</div></template>
+                      <template x-if="!chipSearch.loading && !chipSearch.hint && !chipSearch.results.length">
+                        <div class="chip-search-empty">ничего не найдено</div>
+                      </template>
+                      <template x-for="(sug, sidx) in chipSearch.results" :key="sug.id + ':' + sidx">
+                        <div class="chip-search-item" @mousedown.prevent="pickChipSuggestion(chipCtxTool(ti), sug)">
+                          <span class="chip-badge" x-text="sug.badge || '🔗'"></span>
+                          <span class="s-title" x-text="sug.title"></span>
+                          <span class="s-path" x-text="sug.path"></span>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
                 </div>
               </template>
+              <template x-if="tool.type === 'catalog'">
+                <div>
+                  <label>Поля каталога (через запятую — поля payload документов)</label>
+                  <input type="text" x-model="tool.fields_text"
+                         placeholder="например: season, episode, date, speakers, title"
+                         @blur="_syncToolDefault(ti)">
+                </div>
+              </template>
+              <label style="margin-top:0.5rem">Описание — что видит агент (предзаполнено дефолтом; правь как нужно)</label>
+              <textarea x-model="tool.description" style="min-height:5rem; font-size:0.82rem"
+                        @blur="if (!tool.description.trim()) _syncToolDefault(ti)"></textarea>
+              <div class="help" style="margin-top:0.2rem">
+                Полный текст. Очисти поле, чтобы вернуть дефолт типа.
+                <span x-show="tool.description && tool.description !== tool._default" style="color:var(--accent)">· изменено относительно дефолта</span>
+              </div>
             </div>
-          </template>
-          <label style="margin-top:0.7rem">Описание глоссария (попадает в system prompt агента)</label>
-          <textarea x-model="setup.retrieval.glossary.description"
-                    placeholder="Например: «Содержит расшифровки внутренних аббревиатур и специальных терминов компании»."
-                    style="min-height:3.5rem"></textarea>
+          </div>
+        </template>
+        <div style="margin-bottom:0.8rem; display:flex; gap:0.5rem">
+          <button class="btn secondary" type="button" @click="addTool('lookup')">+ Справочные страницы</button>
+          <button class="btn secondary" type="button" @click="addTool('catalog')">+ Каталог корпуса</button>
         </div>
 
         <h3 style="margin-top:1.2rem; margin-bottom:0.4rem; font-size:0.95rem">System prompt</h3>
+        <label>Описание корпуса (роль агента — заменяет «ассистент по документации»)</label>
+        <textarea x-model="setup.retrieval.prompts.corpus_description"
+                  placeholder="Например: «Ты — ассистент по подкасту X (разговорный, НЕ документация). Указывай, кто из участников что сказал, пересказывай ход обсуждения»."
+                  style="min-height:4rem"></textarea>
         <label>Admin instructions (вклеиваются в system prompt)</label>
         <textarea x-model="setup.retrieval.prompts.admin_instructions"
                   placeholder="Например: «Если информация не найдена — обязательно сделай повторный поиск без section_ids»."
@@ -1790,14 +1841,14 @@
             },
             features: { enable_diversity_nudge: null },
             prompts: { admin_instructions: '' },
-            glossary: { enabled: false, doc_id: '', description: '', doc_chip: null },
+            tools: [],
             http_timeout: null,
             // UI state
             llms: [],                             // подгружаются с /api/retrieval/config
             loaded: false,
             busy: false,
             result: '', resultKind: '',
-            restart_pending: false,               // показывать ли баннер «перезапустите pipelines»
+            applied_note: false,                  // баннер «сохранено, подхватится автоматически (hot-reload)»
           },
           schedule: { enabled: false, cron: '0 */6 * * *', result: '', resultKind: '', busy: false },
         },
@@ -2303,15 +2354,17 @@
           };
         },
 
-        chipCtxGlossary() {
+        chipCtxTool(ti) {
+          // ctx-адаптер чипов для lookup-тула №ti (см. CLAUDE.md «Единый chip-компонент»).
           const self = this;
+          const tool = () => self.setup.retrieval.tools[ti] || {};
           return {
-            key: 'glossary',
+            key: 'tool:' + ti,
             kind: 'glossary',
-            getList: () => self.setup.retrieval.glossary.doc_chips || [],
-            setList: (l) => { self.setup.retrieval.glossary.doc_chips = [...l]; self._syncGlossaryDocIds(); },
+            getList: () => tool().doc_chips || [],
+            setList: (l) => { tool().doc_chips = [...l]; self._syncToolDocIds(ti); },
             canSearch: () => true,
-            // Глоссарий: по уже проиндексированным докам (Qdrant), без known-spaces.
+            // Поиск по уже проиндексированным докам (Qdrant), без known-spaces.
             search: async (query) => {
               const data = await self.fetchJson(`/api/retrieval/doc-search?q=${encodeURIComponent(query)}`);
               return { results: (data.results || []).map(r => ({
@@ -2319,11 +2372,70 @@
               })) };
             },
             add: (chip) => {
-              const l = self.setup.retrieval.glossary.doc_chips || [];
+              const l = tool().doc_chips || [];
               if (l.some(c => c.id === chip.id)) return;
-              l.push(chip); self.setup.retrieval.glossary.doc_chips = [...l]; self._syncGlossaryDocIds();
+              l.push(chip); tool().doc_chips = [...l]; self._syncToolDocIds(ti);
             },
           };
+        },
+
+        // ─── Тул-карточки (retrieval.tools) ───
+        toolIsCore(tool) {
+          return ['search', 'find_section', 'get_doc'].includes(tool.type);
+        },
+        toolIcon(type) {
+          return { search: '🔍', find_section: '🗺️', get_doc: '📄',
+                   lookup: '📖', catalog: '📋' }[type] || '🛠️';
+        },
+        toolTitle(tool) {
+          const base = { search: 'Поиск по чанкам', find_section: 'Поиск раздела',
+                         get_doc: 'Чтение документа', lookup: 'Справочные страницы',
+                         catalog: 'Каталог корпуса' }[tool.type] || tool.type;
+          return tool.name ? `${base} · ${tool.name}` : base;
+        },
+        toolDescPlaceholder(tool) {
+          if (this.toolIsCore(tool)) return 'пусто = дефолтное описание инструмента';
+          if (tool.type === 'lookup') {
+            return tool.trigger === 'abbreviations'
+              ? 'Например: «Содержит расшифровки внутренних аббревиатур и специальных терминов»'
+              : 'Когда агенту сюда заглядывать. Например: «Страницы политик отдела — вызывай при вопросах о правилах»';
+          }
+          return 'Смысл корпуса для агрегаций. Например: «ведущие X и Y — не гости; остальные в speakers — гости»';
+        },
+        addTool(type) {
+          const tools = this.setup.retrieval.tools;
+          const sameType = tools.filter(t => t.type === type).length;
+          const entry = { type, name: sameType ? `${type}${sameType + 1}` : '',
+                          enabled: true, description: '', _default: '' };
+          if (type === 'lookup') { entry.trigger = ''; entry.doc_ids = []; entry.doc_chips = []; }
+          if (type === 'catalog') entry.fields_text = '';
+          tools.push(entry);
+          this._syncToolDefault(tools.length - 1);
+        },
+
+        // Дефолт описания тула (полный текст по типу/параметрам) — считает backend
+        // по реестру типов. Предзаполняем поле, если оно пустое ИЛИ совпадает с
+        // прежним дефолтом (юзер не редактировал, но дефолт сменился — напр. от
+        // required/trigger/fields). Свой текст не трогаем. Пустое поле = вернуть дефолт.
+        async _syncToolDefault(ti) {
+          const t = this.setup.retrieval.tools[ti];
+          if (!t) return;
+          try {
+            const r = await this.fetchJson('/api/retrieval/tool-preview', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                type: t.type, name: t.name || '', description: '',
+                required: t.required, trigger: t.trigger || '',
+                fields: (t.fields_text || '').split(',').map(s => s.trim()).filter(Boolean),
+                doc_ids: t.doc_ids || [],
+              }),
+            });
+            if (r.ok) {
+              const newDefault = r.default_description || r.description || '';
+              if (!t.description || t.description === t._default) t.description = newDefault;
+              t._default = newDefault;
+            }
+          } catch (e) { /* сеть недоступна — оставляем поле как есть */ }
         },
 
         chipBadge(chip) {
@@ -2855,25 +2967,45 @@
             };
             this.setup.retrieval.prompts = {
               admin_instructions: eff.prompts?.admin_instructions ?? '',
+              corpus_description: eff.prompts?.corpus_description ?? '',
             };
-            const gl = eff.glossary || {};
-            // Поддержка обоих форматов: новый doc_ids (list) и старый doc_id (single).
-            const ids = (gl.doc_ids && gl.doc_ids.length)
-              ? gl.doc_ids
-              : (gl.doc_id ? [gl.doc_id] : []);
-            this.setup.retrieval.glossary = {
-              enabled: !!gl.enabled,
-              doc_ids: [...ids],
-              description: gl.description || '',
-              doc_chips: ids.map(id => ({ id, status: 'loading' })),
-            };
+            // Тулы: core всегда первыми (description тюнится), потом optional из
+            // effective (legacy glossary/catalog уже мигрированы Pydantic'ом в tools).
+            const coreTypes = ['search', 'find_section', 'get_doc'];
+            const effTools = eff.tools || [];
+            const toolsUi = [];
+            for (const ct of coreTypes) {
+              const e = effTools.find(x => x.type === ct) || {};
+              toolsUi.push({
+                type: ct, name: '', enabled: true, _default: '',
+                description: e.description || '',
+                required: ct === 'find_section'
+                  ? (e.required ?? eff.search?.require_find_section ?? true)
+                  : null,
+              });
+            }
+            for (const e of effTools) {
+              if (coreTypes.includes(e.type)) continue;
+              const ui = { type: e.type, name: e.name || '', _default: '',
+                           enabled: e.enabled !== false, description: e.description || '' };
+              if (e.type === 'lookup') {
+                ui.trigger = e.trigger || '';
+                ui.doc_ids = [...(e.doc_ids || [])];
+                ui.doc_chips = ui.doc_ids.map(id => ({ id, status: 'loading' }));
+              }
+              if (e.type === 'catalog') ui.fields_text = (e.fields || []).join(', ');
+              toolsUi.push(ui);
+            }
+            this.setup.retrieval.tools = toolsUi;
             this.setup.retrieval.http_timeout = eff.http_timeout ?? null;
             this.setup.retrieval.loaded = true;
             this.setup.retrieval.result = '';
-            // Резолвим title для всех существующих chip'ов параллельно.
-            for (const chip of this.setup.retrieval.glossary.doc_chips) {
-              this._resolveGlossaryChipById(chip.id);
-            }
+            // Резолвим title для chip'ов lookup-тулов + подтягиваем дефолт описания
+            // в `_default` каждой карточки (для индикатора «изменено» и пустых полей).
+            toolsUi.forEach((t, ti) => {
+              (t.doc_chips || []).forEach(c => this._resolveToolChipById(ti, c.id));
+              this._syncToolDefault(ti);
+            });
           } catch (e) {
             this.setup.retrieval.result = '✗ Не удалось загрузить: ' + e.message;
             this.setup.retrieval.resultKind = 'error';
@@ -2904,25 +3036,10 @@
           return tokens;
         },
 
-        _addGlossaryChips(tokens) {
-          const list = this.setup.retrieval.glossary.doc_chips || [];
-          const existing = new Set(list.map(c => c.id));
-          const added = [];
-          for (const tok of tokens) {
-            if (existing.has(tok.id)) continue;
-            existing.add(tok.id);
-            list.push({ id: tok.id, status: 'loading', kind: tok.kind });
-            added.push(tok.id);
-          }
-          this.setup.retrieval.glossary.doc_chips = [...list];
-          for (const id of added) this._resolveGlossaryChipById(id);
-          return added;
-        },
-
-        async _resolveGlossaryChipById(rawId) {
-          // Найти chip с этим id (input) и резолвнуть через backend.
-          const find = () => (this.setup.retrieval.glossary.doc_chips || [])
-            .findIndex(c => c.id === rawId);
+        async _resolveToolChipById(ti, rawId) {
+          // Найти chip с этим id в lookup-туле №ti и резолвнуть через backend.
+          const tool = () => this.setup.retrieval.tools[ti] || {};
+          const find = () => (tool().doc_chips || []).findIndex(c => c.id === rawId);
           let idx = find();
           if (idx < 0) return;
           let r;
@@ -2931,7 +3048,7 @@
           } catch (e) {
             r = { ok: false, error: e.message };
           }
-          const list = this.setup.retrieval.glossary.doc_chips || [];
+          const list = tool().doc_chips || [];
           idx = find();  // могло сдвинуться, ищем снова
           if (idx < 0) return;
           if (r.ok) {
@@ -2940,52 +3057,71 @@
           } else {
             list[idx] = { ...list[idx], status: 'error', error: r.error };
           }
-          this.setup.retrieval.glossary.doc_chips = [...list];
-          this._syncGlossaryDocIds();
+          tool().doc_chips = [...list];
+          this._syncToolDocIds(ti);
         },
 
-        onGlossaryChipKeydown(event) {
+        _addToolChips(ti, tokens) {
+          const tool = this.setup.retrieval.tools[ti];
+          const list = tool.doc_chips || [];
+          const existing = new Set(list.map(c => c.id));
+          const added = [];
+          for (const tok of tokens) {
+            if (existing.has(tok.id)) continue;
+            existing.add(tok.id);
+            list.push({ id: tok.id, status: 'loading', kind: tok.kind });
+            added.push(tok.id);
+          }
+          tool.doc_chips = [...list];
+          for (const id of added) this._resolveToolChipById(ti, id);
+          return added;
+        },
+
+        onToolChipKeydown(event, ti) {
           if (event.key === 'Enter' || event.key === ',' || event.key === ' ' || event.key === 'Tab') {
             const text = event.target.value;
             const ids = this._parseGlossaryTokens(text);
             if (ids.length) {
               event.preventDefault();
               event.target.value = '';
-              this._addGlossaryChips(ids);
+              this._addToolChips(ti, ids);
             } else if (event.key === 'Enter') {
               event.preventDefault();
             }
           } else if (event.key === 'Backspace' && !event.target.value) {
-            const list = this.setup.retrieval.glossary.doc_chips || [];
+            const tool = this.setup.retrieval.tools[ti];
+            const list = tool.doc_chips || [];
             if (list.length) {
               list.pop();
-              this.setup.retrieval.glossary.doc_chips = [...list];
-              this._syncGlossaryDocIds();
+              tool.doc_chips = [...list];
+              this._syncToolDocIds(ti);
             }
           }
         },
 
-        onGlossaryChipPaste(event) {
+        onToolChipPaste(event, ti) {
           const text = (event.clipboardData || window.clipboardData).getData('text');
           const ids = this._parseGlossaryTokens(text);
           if (ids.length) {
             event.preventDefault();
-            this._addGlossaryChips(ids);
+            this._addToolChips(ti, ids);
           }
         },
 
-        flushGlossaryChipInput(event) {
+        flushToolChipInput(event, ti) {
           const text = event.target.value;
           const ids = this._parseGlossaryTokens(text);
           if (ids.length) {
             event.target.value = '';
-            this._addGlossaryChips(ids);
+            this._addToolChips(ti, ids);
           }
         },
 
-        _syncGlossaryDocIds() {
+        _syncToolDocIds(ti) {
           // doc_chips → doc_ids: оставляем только successfully resolved.
-          this.setup.retrieval.glossary.doc_ids = (this.setup.retrieval.glossary.doc_chips || [])
+          const tool = this.setup.retrieval.tools[ti];
+          if (!tool) return;
+          tool.doc_ids = (tool.doc_chips || [])
             .filter(c => c.status === 'ok')
             .map(c => c.id);
         },
@@ -2994,17 +3130,36 @@
           this.setup.retrieval.result = '';
           this.setup.retrieval.busy = true;
           try {
+            // tools: описание сохраняем ТОЛЬКО если оно отличается от дефолта
+            // (равно дефолту → не пишем, поле остаётся динамическим). core-записи
+            // пишем лишь при override (description; для find_section — required всегда).
+            const desc = t => (t.description && t.description !== t._default) ? t.description : '';
+            const tools = [];
+            for (const t of this.setup.retrieval.tools) {
+              if (this.toolIsCore(t)) {
+                const entry = { type: t.type };
+                const d = desc(t);
+                if (d) entry.description = d;
+                if (t.type === 'find_section') entry.required = !!t.required;
+                if (entry.description || t.type === 'find_section') tools.push(entry);
+              } else if (t.type === 'lookup') {
+                tools.push({ type: 'lookup', name: t.name || '', enabled: !!t.enabled,
+                             description: desc(t), trigger: t.trigger || '',
+                             doc_ids: t.doc_ids || [] });
+              } else if (t.type === 'catalog') {
+                tools.push({ type: 'catalog', name: t.name || '', enabled: !!t.enabled,
+                             description: desc(t),
+                             fields: (t.fields_text || '').split(',')
+                               .map(s => s.trim()).filter(Boolean) });
+              }
+            }
             const body = {
               agent: this.setup.retrieval.agent,
               reranker: this.setup.retrieval.reranker,
               search: this.setup.retrieval.search,
               features: this.setup.retrieval.features,
               prompts: this.setup.retrieval.prompts,
-              glossary: {
-                enabled: this.setup.retrieval.glossary.enabled,
-                doc_ids: this.setup.retrieval.glossary.doc_ids || [],
-                description: this.setup.retrieval.glossary.description,
-              },
+              tools,
               http_timeout: this.setup.retrieval.http_timeout,
             };
             const r = await this.fetchJson('/api/retrieval/config', {
@@ -3014,7 +3169,7 @@
             });
             this.setup.retrieval.result = '✓ Сохранено';
             this.setup.retrieval.resultKind = 'success';
-            this.setup.retrieval.restart_pending = !!r.restart_required;
+            this.setup.retrieval.applied_note = true;  // hot-reload: рестарт не нужен
             await this.refreshConfig();
           } catch (e) {
             this.setup.retrieval.result = '✗ ' + e.message;
