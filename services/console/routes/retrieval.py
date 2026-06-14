@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
 from morag.config import (
+    DEFAULT_ADMIN_INSTRUCTIONS,
     DEFAULT_ANSWER_STYLE,
     DEFAULT_CORPUS_DESCRIPTION,
     RetrievalConfig,
@@ -303,6 +304,7 @@ class PromptPreviewIn(BaseModel):
     answer_style: str = ''
     completeness_check: bool = True
     admin_instructions: str = ''
+    require_find_section: bool | None = None  # None = взять из сохранённого конфига
 
 
 @router.post('/prompt-preview')
@@ -313,28 +315,35 @@ async def prompt_preview(req: PromptPreviewIn, request: Request) -> dict[str, An
     правки), структурную find_section-политику — из сохранённого конфига. KM —
     нота-плейсхолдер (реальная карта подставляется в pipeline в рантайме)."""
     cfg_path = request.app.state.config_path
-    require_fs = True
-    try:
-        rc = RetrievalConfig.model_validate(read_layered(cfg_path).get('retrieval') or {})
-        fs = next((t for t in rc.tools if getattr(t, 'type', '') == 'find_section'), None)
-        if fs is not None and getattr(fs, 'required', None) is not None:
-            require_fs = bool(fs.required)
-        elif getattr(rc.search, 'require_find_section', None) is not None:
-            require_fs = bool(rc.search.require_find_section)
-    except Exception:  # noqa: BLE001 — превью best-effort, дефолт REQUIRED
-        pass
+    if req.require_find_section is not None:
+        require_fs = req.require_find_section  # из несохранённого редактора (live-тумблер)
+    else:
+        require_fs = True
+        try:
+            rc = RetrievalConfig.model_validate(read_layered(cfg_path).get('retrieval') or {})
+            fs = next((t for t in rc.tools if getattr(t, 'type', '') == 'find_section'), None)
+            if fs is not None and getattr(fs, 'required', None) is not None:
+                require_fs = bool(fs.required)
+            elif getattr(rc.search, 'require_find_section', None) is not None:
+                require_fs = bool(rc.search.require_find_section)
+        except Exception:  # noqa: BLE001 — превью best-effort, дефолт REQUIRED
+            pass
     sections = build_prompt_sections(
         corpus_description=req.corpus_description,
         require_find_section=require_fs,
         completeness_check=req.completeness_check,
         answer_style=req.answer_style,
-        admin_instructions=req.admin_instructions,
+        admin_instructions=req.admin_instructions or DEFAULT_ADMIN_INSTRUCTIONS,
         knowledge_map='[авто из корпуса — подставляется при запросе]',
+        editor=True,
     )
     return {
         'ok': True,
         'sections': [
-            {'label': s.label, 'kind': s.kind, 'field': s.field, 'text': s.text}
+            {
+                'label': s.label, 'kind': s.kind, 'field': s.field, 'text': s.text,
+                'edit_kind': s.edit_kind, 'description': s.description, 'enabled': s.enabled,
+            }
             for s in sections
         ],
     }
@@ -394,6 +403,8 @@ async def get_retrieval(request: Request) -> dict[str, Any]:
         'default_corpus_description': DEFAULT_CORPUS_DESCRIPTION,
         # дефолтные «Правила ответа»: тот же приём prefill+save-if-changed для answer_style.
         'default_answer_style': DEFAULT_ANSWER_STYLE,
+        # дефолтные «Инструкции администратора» — тот же приём prefill+save-if-changed.
+        'default_admin_instructions': DEFAULT_ADMIN_INSTRUCTIONS,
         'llms': [{'name': llm.get('name'), 'model': llm.get('model'),
                   'capabilities': llm.get('capabilities') or ['text']}
                  for llm in llms],

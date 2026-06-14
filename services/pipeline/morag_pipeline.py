@@ -19,7 +19,7 @@ from markdown_it import MarkdownIt
 # Импорт из installed morag-пакета (ставится через services/pipeline/Dockerfile).
 # Файл специально назван morag_pipeline.py (не morag.py) чтобы избежать коллизии с
 # пакетом в sys.modules — OWUI регистрирует файл по filename как имя модуля.
-from morag.config import Config, load_config
+from morag.config import DEFAULT_ADMIN_INSTRUCTIONS, Config, load_config
 from morag.llm.client import GenerationParams, LLMClient
 from morag.indexing.embedder import HttpEmbedder, HttpGteSparseEmbedder
 from morag.retrieval import (
@@ -345,12 +345,7 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
         'admin_instructions': _str_or(
             v.ADMIN_INSTRUCTIONS,
             prompts.admin_instructions if prompts else None,
-            default=(
-                'Если информация не была найдена в конкретном разделе знаний '
-                'или её недостаточно для полного ответа, ОБЯЗАТЕЛЬНО сделай '
-                'дополнительный поиск без указания раздела (section_ids) — '
-                'по всей базе знаний.'
-            ),
+            default=DEFAULT_ADMIN_INSTRUCTIONS,
         ),
         'corpus_description': (
             getattr(prompts, 'corpus_description', '') if prompts else ''

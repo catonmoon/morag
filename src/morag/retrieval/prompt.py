@@ -28,10 +28,13 @@ from morag.retrieval.tools.core import (
 
 @dataclass
 class PromptSection:
-    label: str          # человекочитаемое имя секции (для консоли)
-    kind: str           # 'fixed' | 'config' | 'tool' | 'km'
-    text: str           # резолвнутый текст секции (идёт в промпт как есть)
-    field: str = ''     # для kind='config' — имя ручки (corpus_description / answer_style / …)
+    label: str               # человекочитаемое имя секции (для консоли)
+    kind: str                # 'fixed' | 'config' | 'tool' | 'km'
+    text: str                # резолвнутый текст секции (идёт в промпт как есть)
+    field: str = ''          # для kind='config' — имя ручки (corpus_description / …)
+    edit_kind: str = 'readonly'  # как правится в консоли: 'text' | 'toggle' | 'readonly'
+    description: str = ''    # короткое пояснение для hover-тултипа (что это)
+    enabled: bool = True     # для editor-режима: выключенная секция (призрак, text='')
 
 
 # ── Зашитые куски между плейсхолдерами (перенесены из _SYSTEM_PROMPT дословно) ──
@@ -81,42 +84,67 @@ def build_prompt_sections(
     answer_style: str = '',
     admin_instructions: str = '',
     knowledge_map: str = '',
+    editor: bool = False,
 ) -> list[PromptSection]:
-    """Структура системного промпта (для сборки в pipeline и превью в консоли).
+    """Структура системного промпта (для сборки в pipeline и превью/редактора в консоли).
 
-    Настраиваемые секции (`kind='config'`) подставляют значение или дефолт;
-    `field` указывает ручку. Пустые/выключенные секции (completeness off, нет
-    admin/KM) просто не добавляются. `knowledge_map` — реальный текст карты
-    (pipeline) или короткая нота-плейсхолдер (превью).
+    Настраиваемые секции (`kind='config'`) подставляют значение или дефолт; `field`
+    указывает ручку, `edit_kind` — как правится (text/toggle/readonly), `description`
+    — пояснение для тултипа. Пустые секции (completeness off, нет admin/KM) обычно НЕ
+    добавляются — но при `editor=True` выключенный completeness отдаётся «призраком»
+    (`enabled=False`, `text=''`), чтобы консоль показала его и дала включить.
+    `knowledge_map` — реальный текст карты (pipeline) или нота-плейсхолдер (превью).
     """
     role = corpus_description or DEFAULT_CORPUS_DESCRIPTION
     policy = FIND_SECTION_REQUIRED_POLICY if require_find_section else FIND_SECTION_OPTIONAL_POLICY
     sections: list[PromptSection] = [
-        PromptSection('Роль агента', 'config', role + ' ', field='corpus_description'),
-        PromptSection('Язык и доступ к инструментам', 'fixed', _INTRO),
+        PromptSection(
+            'Роль агента', 'config', role + ' ', field='corpus_description', edit_kind='text',
+            description='Доменная роль агента: кто он и как отвечает. Заменяет дефолт.',
+        ),
+        PromptSection(
+            'Язык и доступ к инструментам', 'fixed', _INTRO,
+            description='Язык ответа и наличие инструментов — фиксированное ядро.',
+        ),
         PromptSection(
             'Политика find_section (' + ('обязателен' if require_find_section else 'опционален') + ')',
-            'config', policy, field='require_find_section',
+            'config', policy, field='require_find_section', edit_kind='toggle',
+            description='find_section обязателен (иерархичный корпус) или опционален '
+                        '(плоский корпус, агрегатные/точечные вопросы). Клик переключает.',
         ),
-        PromptSection('Сохранение сущностей', 'fixed', _ENTITY_PRESERVATION),
-        PromptSection('Методика тулов (### 2)', 'tool', tool_methodology),
+        PromptSection(
+            'Сохранение сущностей', 'fixed', _ENTITY_PRESERVATION,
+            description='Сохранять имена/ID/названия, не обобщать — фиксированное ядро.',
+        ),
+        PromptSection(
+            'Методика тулов (### 2)', 'tool', tool_methodology,
+            description='Как пользоваться инструментами: несколько search, section_ids/'
+                        'doc_ids, get_doc, шум. Живёт в слое тулов.',
+        ),
     ]
-    if completeness_check:
+    if completeness_check or editor:
         sections.append(PromptSection(
-            'Проверка полноты (### 3)', 'config', COMPLETENESS_CHECK_SECTION,
-            field='completeness_check',
+            'Проверка полноты (### 3)', 'config',
+            COMPLETENESS_CHECK_SECTION if completeness_check else '',
+            field='completeness_check', edit_kind='toggle', enabled=completeness_check,
+            description='Проверять, что ответ собран из разных разделов (+ runtime-подсказка). '
+                        'Для юристов/подкаста, где ответ из одного места норма, — выключи.',
         ))
     sections.append(PromptSection(
-        'Правила ответа', 'config', answer_style or DEFAULT_ANSWER_STYLE, field='answer_style',
+        'Правила ответа', 'config', answer_style or DEFAULT_ANSWER_STYLE,
+        field='answer_style', edit_kind='text',
+        description='Стиль и правила ответа: кратко, формат, анти-конфабуляция, свежесть.',
     ))
     if admin_instructions:
         sections.append(PromptSection(
             'Инструкции администратора', 'config', _ADMIN_HEADER + admin_instructions,
-            field='admin_instructions',
+            field='admin_instructions', edit_kind='text',
+            description='Произвольные инструкции администратора (вклеиваются в хвост промпта).',
         ))
     if knowledge_map:
         sections.append(PromptSection(
             'Knowledge Map', 'km', _KM_HEADER + knowledge_map,
+            description='Навигационная карта корпуса — авто, подставляется в рантайме.',
         ))
     return sections
 
