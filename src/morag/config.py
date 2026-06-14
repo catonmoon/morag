@@ -473,9 +473,17 @@ class RetrievalFeaturesConfig(BaseModel):
     enable_diversity_nudge: bool = True
 
 
+# Дефолтная доменная «роль» агента в начале system prompt. Единый источник истины:
+# pipeline вставляет её в _SYSTEM_PROMPT и заменяет на corpus_description (если задан),
+# console показывает её в инпуте «Описание корпуса» как текущее значение.
+DEFAULT_CORPUS_DESCRIPTION = 'Ты — ассистент по внутренней документации компании.'
+
+
 class RetrievalPromptsConfig(BaseModel):
     admin_instructions: str = ''
-    corpus_description: str = ''  # доменная «роль» агента — заменяет дефолт «ассистент по документации»
+    # доменная «роль» агента — заменяет дефолт DEFAULT_CORPUS_DESCRIPTION.
+    # Пусто = использовать дефолт (console преднаполняет инпут дефолтом).
+    corpus_description: str = ''
 
 
 class RetrievalGlossaryConfig(BaseModel):

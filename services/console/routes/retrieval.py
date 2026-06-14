@@ -17,7 +17,7 @@ import yaml
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from morag.config import RetrievalConfig
+from morag.config import DEFAULT_CORPUS_DESCRIPTION, RetrievalConfig
 from morag.retrieval.tools import REGISTRY
 from services.console.config_io import read_layered, read_local, validate_merged, write_local
 
@@ -339,6 +339,9 @@ async def get_retrieval(request: Request) -> dict[str, Any]:
     return {
         'retrieval': retrieval_raw,
         'effective': effective,
+        # дефолтная «роль» агента: console преднаполняет инпут «Описание корпуса»,
+        # если corpus_description не задан, и сохраняет только при отличии от дефолта.
+        'default_corpus_description': DEFAULT_CORPUS_DESCRIPTION,
         'llms': [{'name': llm.get('name'), 'model': llm.get('model'),
                   'capabilities': llm.get('capabilities') or ['text']}
                  for llm in llms],

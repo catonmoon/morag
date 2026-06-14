@@ -19,7 +19,7 @@ from markdown_it import MarkdownIt
 # Импорт из installed morag-пакета (ставится через services/pipeline/Dockerfile).
 # Файл специально назван morag_pipeline.py (не morag.py) чтобы избежать коллизии с
 # пакетом в sys.modules — OWUI регистрирует файл по filename как имя модуля.
-from morag.config import Config, load_config
+from morag.config import DEFAULT_CORPUS_DESCRIPTION, Config, load_config
 from morag.llm.client import GenerationParams, LLMClient
 from morag.indexing.embedder import HttpEmbedder, HttpGteSparseEmbedder
 from morag.retrieval import (
@@ -92,10 +92,11 @@ def _try_load_config() -> Config | None:
 
 # Доменная «роль» в начале _SYSTEM_PROMPT — заменяется на retrieval.prompts.corpus_description
 # (если задан), чтобы один промпт обслуживал и документацию, и подкаст, и любой корпус.
-_DEFAULT_ROLE_LINE = 'Ты — ассистент по внутренней документации компании.'
+# Единый источник дефолта — morag.config.DEFAULT_CORPUS_DESCRIPTION (его же показывает console).
+_DEFAULT_ROLE_LINE = DEFAULT_CORPUS_DESCRIPTION
 
 _SYSTEM_PROMPT = (
-    'Ты — ассистент по внутренней документации компании. '
+    f'{DEFAULT_CORPUS_DESCRIPTION} '
     'Отвечай только на русском языке.\n\n'
     'У тебя есть доступ к базе знаний через инструменты (tools). '
     'Используй их для поиска информации.\n\n'
@@ -1713,11 +1714,30 @@ _CHUNK_HTML_CSS = (
 )
 
 
-_CITATION_MAX_CHARS = 800  # на один чанк в citation: больше — обрезаем с «…».
-_CITATION_MAX_CHUNKS = 5  # макс чанков на один citation event (топ по релевантности).
-# Бюджет: 5 чанков × 800 chars × 6 bytes/char (JSON-escape кириллицы) ≈ 24KB
-# per citation event. Безопасно для aiohttp (default line limit ~64KB).
-# Агент получает полный текст через tool_result — обрезка только для UI.
+# Хард-лимит OWUI/aiohttp на ОДНУ SSE-строку (одно событие) = 131072 байта (128 KiB):
+# при превышении readuntil кидает «Chunk too big» (измерено эмпирически, aiohttp 3.12 —
+# OWUI читает upstream построчно `async for line in res`). Один citation event = ОДИН
+# чанк (см. _emit_grouped_sources), поэтому весь бюджет — одному чанку. Кириллица в
+# JSON-SSE эскейпится в \uXXXX = 6 байт/символ → бюджет ≈19K кир. символов.
+# Чанк показываем ПОЛНОСТЬЮ; режем ТОЛЬКО при реальном превышении бюджета (раньше был
+# фикс 800 — абсурдно мало при one-event-per-chunk). Агенту полный текст идёт через tool_result.
+_CITATION_MAX_SSE_BYTES = 120_000  # запас ~11KB под JSON-обёртку события + metadata
+_CITATION_MAX_CHUNKS = 5  # макс citation-events (=чанков) на документ — топ по релевантности
+
+
+def _sse_byte_cost(s: str) -> int:
+    """Сколько байт строка займёт в JSON-SSE (ensure_ascii): не-ASCII → \\uXXXX (6 байт)."""
+    return sum(1 if ord(c) < 128 else 6 for c in s)
+
+
+def _truncate_to_sse_budget(text: str, budget: int) -> str:
+    """Урезать text так, чтобы его JSON-SSE-вес (см. _sse_byte_cost) не превысил budget байт."""
+    acc = 0
+    for i, ch in enumerate(text):
+        acc += 1 if ord(ch) < 128 else 6
+        if acc > budget:
+            return text[:i].rstrip()
+    return text
 
 
 def _fmt_mmss(seconds: float) -> str:
@@ -1728,6 +1748,16 @@ def _fmt_mmss(seconds: float) -> str:
     return f'{h}:{m:02d}:{sec:02d}' if h else f'{m}:{sec:02d}'
 
 
+def _wrap_chunk_html(body: str) -> str:
+    """HTML-тело → standalone-документ с встроенным CSS (белый фон, чёрный текст)."""
+    return (
+        '<!DOCTYPE html>'
+        '<html lang="ru"><head><meta charset="utf-8">'
+        f'<style>{_CHUNK_HTML_CSS}</style></head>'
+        f'<body>{body}</body></html>'
+    )
+
+
 def _render_chunk_html(chunk_text: str) -> str:
     """Markdown-чанк → standalone HTML с встроенным CSS под белый фон.
 
@@ -1735,21 +1765,20 @@ def _render_chunk_html(chunk_text: str) -> str:
     поэтому наши стили не конфликтуют с темой OWUI. Цвета фиксированные —
     чёрный текст на белом фоне в любой теме (требование юристов).
 
-    Чанк обрезается до `_CITATION_MAX_CHARS`: большие юр-чанки (5-10K) ×
-    десяток в одном citation event делают SSE-строку слишком большой и
-    OWUI/aiohttp падает с «Chunk too big». Для агента полный текст всё
-    равно остаётся (он смотрит tool_result, не citation).
+    Чанк показывается ПОЛНОСТЬЮ. Режется ТОЛЬКО если итоговый HTML по SSE-весу
+    превышает `_CITATION_MAX_SSE_BYTES` — иначе одна SSE-строка перевалит хард-лимит
+    aiohttp 128 KiB и OWUI упадёт с «Chunk too big» (один event = один чанк).
+    Редкий путь: подавляющее большинство чанков мельче бюджета и идут как есть.
     """
     text = chunk_text or ''
-    if len(text) > _CITATION_MAX_CHARS:
-        text = text[:_CITATION_MAX_CHARS] + '\n\n_…[обрезано для отображения]_'
-    body = _MD.render(text)
-    return (
-        '<!DOCTYPE html>'
-        '<html lang="ru"><head><meta charset="utf-8">'
-        f'<style>{_CHUNK_HTML_CSS}</style></head>'
-        f'<body>{body}</body></html>'
-    )
+    html = _wrap_chunk_html(_MD.render(text))
+    if _sse_byte_cost(html) > _CITATION_MAX_SSE_BYTES:
+        # урезаем ИСХОДНЫЙ текст под бюджет (с запасом на markdown-разметку + обёртку)
+        # и пере-рендерим. Запас 8KB покрывает CSS-обёртку, теги (в т.ч. таблицы) и JSON-escape.
+        text = _truncate_to_sse_budget(text, _CITATION_MAX_SSE_BYTES - 8000)
+        text += '\n\n_…[обрезано для отображения]_'
+        html = _wrap_chunk_html(_MD.render(text))
+    return html
 
 
 def _count_by(items: list[dict], key: str) -> dict[str, int]:

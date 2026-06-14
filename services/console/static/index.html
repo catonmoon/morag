@@ -1740,8 +1740,12 @@
         <h3 style="margin-top:1.2rem; margin-bottom:0.4rem; font-size:0.95rem">System prompt</h3>
         <label>Описание корпуса (роль агента — заменяет «ассистент по документации»)</label>
         <textarea x-model="setup.retrieval.prompts.corpus_description"
+                  @blur="if (!(setup.retrieval.prompts.corpus_description || '').trim()) setup.retrieval.prompts.corpus_description = setup.retrieval._corpus_default"
                   placeholder="Например: «Ты — ассистент по подкасту X (разговорный, НЕ документация). Указывай, кто из участников что сказал, пересказывай ход обсуждения»."
                   style="min-height:4rem"></textarea>
+        <div class="help">Предзаполнено дефолтом — правь как нужно. Очисти поле, чтобы вернуть дефолт.
+          <span x-show="setup.retrieval.prompts.corpus_description && setup.retrieval.prompts.corpus_description !== setup.retrieval._corpus_default" style="color:var(--accent)">· изменено относительно дефолта</span>
+        </div>
         <label>Admin instructions (вклеиваются в system prompt)</label>
         <textarea x-model="setup.retrieval.prompts.admin_instructions"
                   placeholder="Например: «Если информация не найдена — обязательно сделай повторный поиск без section_ids»."
@@ -1840,10 +1844,11 @@
               find_section: { doc_pool: null, descent_threshold: null, top_docs: null },
             },
             features: { enable_diversity_nudge: null },
-            prompts: { admin_instructions: '' },
+            prompts: { admin_instructions: '', corpus_description: '' },
             tools: [],
             http_timeout: null,
             // UI state
+            _corpus_default: '',                  // дефолт «роли» агента (для prefill + save-if-changed)
             llms: [],                             // подгружаются с /api/retrieval/config
             loaded: false,
             busy: false,
@@ -2965,9 +2970,13 @@
             this.setup.retrieval.features = {
               enable_diversity_nudge: eff.features?.enable_diversity_nudge ?? true,
             };
+            // Описание корпуса: если не задано в конфиге — преднаполняем дефолтом
+            // («роль» агента по умолчанию), чтобы юзер видел текущее значение и мог
+            // править. Сохраняем потом только при отличии от дефолта (см. saveRetrieval).
+            this.setup.retrieval._corpus_default = r.default_corpus_description || '';
             this.setup.retrieval.prompts = {
               admin_instructions: eff.prompts?.admin_instructions ?? '',
-              corpus_description: eff.prompts?.corpus_description ?? '',
+              corpus_description: eff.prompts?.corpus_description || this.setup.retrieval._corpus_default,
             };
             // Тулы: core всегда первыми (description тюнится), потом optional из
             // effective (legacy glossary/catalog уже мигрированы Pydantic'ом в tools).
@@ -3153,12 +3162,18 @@
                                .map(s => s.trim()).filter(Boolean) });
               }
             }
+            // corpus_description: если равно дефолту — пишем '' (остаётся «не задано»,
+            // pipeline использует дефолт). Иначе — кастомный текст.
+            const cd = this.setup.retrieval.prompts.corpus_description || '';
             const body = {
               agent: this.setup.retrieval.agent,
               reranker: this.setup.retrieval.reranker,
               search: this.setup.retrieval.search,
               features: this.setup.retrieval.features,
-              prompts: this.setup.retrieval.prompts,
+              prompts: {
+                admin_instructions: this.setup.retrieval.prompts.admin_instructions || '',
+                corpus_description: cd === this.setup.retrieval._corpus_default ? '' : cd,
+              },
               tools,
               http_timeout: this.setup.retrieval.http_timeout,
             };
