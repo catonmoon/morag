@@ -1745,7 +1745,10 @@
                   @click="loadPromptPreview()" :disabled="promptPreview.busy">⟳ обновить</button>
           <span x-show="promptPreview.busy">⏳</span>
         </div>
-        <pre class="prompt-doc" style="white-space:pre-wrap; word-break:break-word; font-size:0.8rem; line-height:1.6; max-height:540px; overflow:auto; padding:0.8rem; border:1px solid var(--border,#444); border-radius:6px; background:var(--code-bg,#1a1a1a); margin:0"><template x-for="(s, si) in promptPreview.sections" :key="si"><span x-text="s.enabled === false ? ('  [ ' + s.label + ' — выключено · кликни чтобы включить ]  ') : s.text" :title="ppTitle(s)" :style="ppStyle(s)" @click="ppClick(s)"></span></template><span x-show="!promptPreview.sections.length" class="help">Загрузка превью…</span></pre>
+        <pre class="prompt-doc" style="white-space:pre-wrap; word-break:break-word; font-size:0.8rem; line-height:1.6; max-height:540px; overflow:auto; padding:0.8rem; border:1px solid var(--border,#444); border-radius:6px; background:var(--code-bg,#1a1a1a); margin:0"><template x-for="(s, si) in promptPreview.sections" :key="si"><span x-text="ppLead(s)"></span><span x-text="ppBody(s)" :style="ppStyle(s)" @click="ppClick(s)" @mouseenter="hoverTip = { show: true, text: ppTitle(s), x: $event.clientX, y: $event.clientY }" @mousemove="hoverTip.x = $event.clientX; hoverTip.y = $event.clientY" @mouseleave="hoverTip.show = false"></span><span x-text="ppTrail(s)"></span></template><span x-show="!promptPreview.sections.length" class="help">Загрузка превью…</span></pre>
+        <!-- Мгновенный тултип у курсора (вместо тормозящего title) -->
+        <div x-show="hoverTip.show" x-text="hoverTip.text"
+             :style="`position:fixed; left:${hoverTip.x + 14}px; top:${hoverTip.y + 16}px; max-width:360px; background:var(--card-bg,#222); color:var(--fg,#eee); border:1px solid var(--border,#555); border-radius:5px; padding:0.4rem 0.6rem; font-size:0.78rem; line-height:1.4; z-index:1100; pointer-events:none; box-shadow:0 4px 18px rgba(0,0,0,0.45)`"></div>
 
         <!-- Попап редактирования текстовой секции промпта -->
         <div x-show="promptEdit.open" class="modal-overlay" @click.self="closePromptEdit()"
@@ -1822,6 +1825,7 @@
         // попап-редактор текстовой секции.
         promptPreview: { sections: [], busy: false },
         promptEdit: { open: false, field: '', label: '', description: '', value: '', def: '' },
+        hoverTip: { show: false, text: '', x: 0, y: 0 },  // мгновенный тултип секции у курсора
 
         // Состояние выпадашки поиска страниц по названию (общее для всех chip-инпутов).
         // key = 'source:<field>' | 'glossary' — какому инпуту принадлежит активный поиск.
@@ -3004,6 +3008,21 @@
           else if (s.edit_kind === 'text') hint = ' · кликни чтобы изменить';
           else if (s.edit_kind === 'toggle') hint = ' · кликни чтобы переключить';
           return s.label + (s.description ? ' — ' + s.description : '') + hint;
+        },
+
+        // Ведущие/хвостовые переводы строк выносим из цветного спана (иначе фон
+        // красит «пустые строки» между секциями). Цвет — только на самом тексте.
+        ppLead(s) {
+          if (s.enabled === false) return ' ';
+          return ((s.text || '').match(/^\s*/) || [''])[0];
+        },
+        ppBody(s) {
+          if (s.enabled === false) return '[ ' + s.label + ' — выключено · кликни чтобы включить ]';
+          return (s.text || '').replace(/^\s+|\s+$/g, '');
+        },
+        ppTrail(s) {
+          if (s.enabled === false) return ' ';
+          return ((s.text || '').match(/\s*$/) || [''])[0];
         },
 
         ppClick(s) {
