@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Mac-native деплой asr-adaptor. Код на Маке: ~/diar-test/asr-adaptor; venv ~/diar-test/.venv-asr
+     (pip install /opt/morag/ + requirements). Аудио — loopback к локальным Mac-сервисам.
+     OR_KEY — реальный OpenRouter-ключ (как TRANSCRIBE_API_KEY у transcribe_backend). -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.podlodka.asr</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/chukanov_ai/diar-test/.venv-asr/bin/uvicorn</string>
+        <string>app:app</string>
+        <string>--host</string>
+        <string>0.0.0.0</string>
+        <string>--port</string>
+        <string>8082</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/chukanov_ai/diar-test/asr-adaptor</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>OR_KEY</key>
+        <string>REPLACE_WITH_OPENROUTER_KEY</string>
+        <key>ASR_DIARIZER_URL</key>
+        <string>http://127.0.0.1:8090/diarize</string>
+        <key>ASR_BACKEND_URL</key>
+        <string>http://127.0.0.1:8123/v1/audio/transcriptions</string>
+        <key>ASR_CAMPP_URL</key>
+        <string>http://127.0.0.1:8126/embed-centroids</string>
+        <key>ASR_REGISTRY_PATH</key>
+        <string>/Users/chukanov_ai/diar-test/speaker_registry.json</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/chukanov_ai/llm-stack/logs/asr-launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/chukanov_ai/llm-stack/logs/asr-launchd.log</string>
+</dict>
+</plist>
