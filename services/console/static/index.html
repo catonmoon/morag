@@ -1608,34 +1608,37 @@
           </div>
         </div>
 
-        <h3 style="margin-top:1.2rem; margin-bottom:0.4rem; font-size:0.95rem">Инструменты агента</h3>
+        <h3 id="tools-area" style="margin-top:1.2rem; margin-bottom:0.4rem; font-size:0.95rem">Инструменты агента</h3>
         <div class="help" style="margin-bottom:0.6rem">
           Какие инструменты доступны агенту. <b>core</b>-инструменты (поиск, навигация,
           чтение документа) отключить нельзя — но описание можно переопределить под корпус.
           Дополнительные (справочные страницы, каталог) добавляются и настраиваются здесь.
         </div>
         <template x-for="(tool, ti) in setup.retrieval.tools" :key="'tool' + ti">
-          <div style="border:1px solid var(--border); border-radius:8px; padding:0.7rem 0.9rem; margin-bottom:0.6rem">
-            <div style="display:flex; align-items:center; gap:0.6rem">
-              <span x-text="toolIcon(tool.type)"></span>
-              <b x-text="toolTitle(tool)"></b>
-              <code x-text="tool.type" style="font-size:0.75rem; opacity:0.65"></code>
-              <span x-show="toolIsCore(tool)"
-                    style="font-size:0.7rem; background:var(--code-bg); color:var(--muted); border-radius:4px; padding:0 6px">core</span>
-              <span style="flex:1"></span>
-              <label x-show="!toolIsCore(tool)"
-                     style="display:flex; align-items:center; gap:0.4rem; margin:0; font-size:0.85rem">
+          <div :id="'toolcard-' + ti" :style="'border:1px solid var(--border); border-radius:8px; padding:0.5rem 0.9rem; margin-bottom:0.5rem;' + (tool._expanded ? ' background:rgba(255,255,255,0.02)' : '')">
+            <div style="display:flex; align-items:center; gap:0.6rem; cursor:pointer" @click="tool._expanded = !tool._expanded">
+              <span x-text="tool._expanded ? '▾' : '▸'" style="opacity:0.55; width:0.8em; flex-shrink:0"></span>
+              <span x-text="toolIcon(tool.type)" style="flex-shrink:0"></span>
+              <b x-text="toolTitle(tool)" style="flex-shrink:0"></b>
+              <code x-text="tool.type" style="font-size:0.75rem; opacity:0.65; flex-shrink:0"></code>
+              <span x-show="toolIsCore(tool)" style="font-size:0.7rem; background:var(--code-bg); color:var(--muted); border-radius:4px; padding:0 6px; flex-shrink:0">core</span>
+              <span x-show="!tool._expanded" class="help"
+                    style="flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; opacity:0.6; font-size:0.78rem"
+                    x-text="(tool.description || tool._default || '').replace(/\s+/g, ' ').slice(0, 90)"></span>
+              <span x-show="tool._expanded" style="flex:1"></span>
+              <label x-show="!toolIsCore(tool)" @click.stop
+                     style="display:flex; align-items:center; gap:0.4rem; margin:0; font-size:0.85rem; flex-shrink:0">
                 <input type="checkbox" :checked="tool.enabled"
                        @change="tool.enabled = $event.target.checked"> вкл
               </label>
               <button x-show="!toolIsCore(tool)" type="button" class="chip-rm" title="Удалить"
-                      @click="setup.retrieval.tools.splice(ti, 1)">×</button>
+                      @click.stop="setup.retrieval.tools.splice(ti, 1)">×</button>
             </div>
-            <div x-show="toolIsCore(tool) || tool.enabled" style="margin-top:0.5rem">
+            <div x-show="tool._expanded" style="margin-top:0.5rem">
               <label x-show="tool.type === 'find_section'"
                      style="display:flex; align-items:center; gap:0.5rem; margin:0 0 0.5rem">
                 <input type="checkbox" :checked="tool.required"
-                       @change="tool.required = $event.target.checked; _syncToolDefault(ti)">
+                       @change="tool.required = $event.target.checked; _syncToolDefault(ti); loadPromptPreview()">
                 <span>Обязателен перед search (иерархичный корпус; для плоского — выключить)</span>
               </label>
               <template x-if="tool.type === 'lookup'">
@@ -2434,7 +2437,7 @@
           const tools = this.setup.retrieval.tools;
           const sameType = tools.filter(t => t.type === type).length;
           const entry = { type, name: sameType ? `${type}${sameType + 1}` : '',
-                          enabled: true, description: '', _default: '' };
+                          enabled: true, description: '', _default: '', _expanded: true };
           if (type === 'lookup') { entry.trigger = ''; entry.doc_ids = []; entry.doc_chips = []; }
           if (type === 'catalog') entry.fields_text = '';
           tools.push(entry);
@@ -3026,8 +3029,30 @@
         },
 
         ppClick(s) {
-          if (s.edit_kind === 'text') this.openPromptEdit(s);
-          else if (s.edit_kind === 'toggle') this.ppToggle(s);
+          // тул-секции ведут к карточке инструмента; остальное правится в документе
+          if (s.field === 'require_find_section') return this.scrollToTool('find_section');
+          if (s.kind === 'tool') return this.scrollToToolsArea();
+          if (s.edit_kind === 'text') return this.openPromptEdit(s);
+          if (s.edit_kind === 'toggle') return this.ppToggle(s);
+        },
+
+        scrollToTool(type) {
+          const ti = (this.setup.retrieval.tools || []).findIndex(t => t.type === type);
+          if (ti < 0) return this.scrollToToolsArea();
+          this.setup.retrieval.tools[ti]._expanded = true;
+          this.$nextTick(() => {
+            const el = document.getElementById('toolcard-' + ti);
+            if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); this._flashEl(el); }
+          });
+        },
+        scrollToToolsArea() {
+          const el = document.getElementById('tools-area');
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        },
+        _flashEl(el) {
+          el.style.transition = 'box-shadow 0.3s';
+          el.style.boxShadow = '0 0 0 2px var(--accent, #5aa0ff)';
+          setTimeout(() => { el.style.boxShadow = ''; }, 1200);
         },
 
         async ppToggle(s) {
@@ -3114,7 +3139,7 @@
             for (const ct of coreTypes) {
               const e = effTools.find(x => x.type === ct) || {};
               toolsUi.push({
-                type: ct, name: '', enabled: true, _default: '',
+                type: ct, name: '', enabled: true, _default: '', _expanded: false,
                 description: e.description || '',
                 required: ct === 'find_section'
                   ? (e.required ?? eff.search?.require_find_section ?? true)
@@ -3123,7 +3148,7 @@
             }
             for (const e of effTools) {
               if (coreTypes.includes(e.type)) continue;
-              const ui = { type: e.type, name: e.name || '', _default: '',
+              const ui = { type: e.type, name: e.name || '', _default: '', _expanded: false,
                            enabled: e.enabled !== false, description: e.description || '' };
               if (e.type === 'lookup') {
                 ui.trigger = e.trigger || '';
