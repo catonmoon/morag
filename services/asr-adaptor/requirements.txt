@@ -1,0 +1,7 @@
+# Сервис-специфичные зависимости. morag-core (openai, httpx, tiktoken, pydantic, numpy)
+# ставится отдельно через `pip install /opt/morag/` (Dockerfile) или в venv (Mac-native).
+fastapi==0.115.2
+uvicorn==0.30.6
+python-multipart>=0.0.9
+requests>=2.31
+transformers==4.53.0
