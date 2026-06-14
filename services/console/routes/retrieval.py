@@ -22,6 +22,7 @@ from morag.config import (
     DEFAULT_CORPUS_DESCRIPTION,
     RetrievalConfig,
 )
+from morag.retrieval.prompt import build_prompt_sections
 from morag.retrieval.tools import REGISTRY
 from services.console.config_io import read_layered, read_local, validate_merged, write_local
 
@@ -294,6 +295,49 @@ async def tool_preview(req: ToolPreviewIn) -> dict[str, Any]:
         }
     except Exception as e:  # noqa: BLE001 — отдаём ошибку в UI, не 500
         return {'ok': False, 'error': str(e)}
+
+
+class PromptPreviewIn(BaseModel):
+    """Редактируемые поля промпта (текущее состояние редактора) — для живого превью."""
+    corpus_description: str = ''
+    answer_style: str = ''
+    completeness_check: bool = True
+    admin_instructions: str = ''
+
+
+@router.post('/prompt-preview')
+async def prompt_preview(req: PromptPreviewIn, request: Request) -> dict[str, Any]:
+    """Структура собранного системного промпта (секции + подсветка настраиваемых
+    частей) — ровно то, что pipeline шлёт агенту (morag.retrieval.prompt — единый
+    источник). Редактируемые тексты берём из тела (живой предпросмотр по мере
+    правки), структурную find_section-политику — из сохранённого конфига. KM —
+    нота-плейсхолдер (реальная карта подставляется в pipeline в рантайме)."""
+    cfg_path = request.app.state.config_path
+    require_fs = True
+    try:
+        rc = RetrievalConfig.model_validate(read_layered(cfg_path).get('retrieval') or {})
+        fs = next((t for t in rc.tools if getattr(t, 'type', '') == 'find_section'), None)
+        if fs is not None and getattr(fs, 'required', None) is not None:
+            require_fs = bool(fs.required)
+        elif getattr(rc.search, 'require_find_section', None) is not None:
+            require_fs = bool(rc.search.require_find_section)
+    except Exception:  # noqa: BLE001 — превью best-effort, дефолт REQUIRED
+        pass
+    sections = build_prompt_sections(
+        corpus_description=req.corpus_description,
+        require_find_section=require_fs,
+        completeness_check=req.completeness_check,
+        answer_style=req.answer_style,
+        admin_instructions=req.admin_instructions,
+        knowledge_map='[авто из корпуса — подставляется при запросе]',
+    )
+    return {
+        'ok': True,
+        'sections': [
+            {'label': s.label, 'kind': s.kind, 'field': s.field, 'text': s.text}
+            for s in sections
+        ],
+    }
 
 
 @router.get('/config')

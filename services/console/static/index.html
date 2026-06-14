@@ -1767,6 +1767,22 @@
                   placeholder="Например: «Если информация не найдена — обязательно сделай повторный поиск без section_ids»."
                   style="min-height:6rem"></textarea>
 
+        <!-- Превью собранного системного промпта (как видит агент) -->
+        <div style="margin-top:1rem">
+          <button class="btn secondary" @click="togglePromptPreview()"
+                  x-text="promptPreview.open ? '▾ Скрыть собранный промпт' : '▸ Показать собранный системный промпт'"></button>
+          <div x-show="promptPreview.open" style="margin-top:0.6rem">
+            <div class="help" style="margin-bottom:0.4rem">
+              Полный system prompt, как его видит агент (учитывает несохранённые правки выше).
+              <span style="background:rgba(90,150,255,0.22); padding:0 4px; border-radius:3px">цветное</span> — настраиваемые секции,
+              <span style="background:rgba(150,120,255,0.18); padding:0 4px; border-radius:3px">методика тулов</span>,
+              <span style="opacity:0.6">серое — фиксированное ядро</span>.
+              <button class="btn secondary" style="padding:0.1rem 0.5rem; font-size:0.8rem" @click="loadPromptPreview()">⟳ обновить</button>
+            </div>
+            <pre style="white-space:pre-wrap; word-break:break-word; font-size:0.8rem; line-height:1.5; max-height:460px; overflow:auto; padding:0.7rem; border:1px solid var(--border, #444); border-radius:6px; background:var(--code-bg, #1a1a1a); margin:0"><template x-for="(s, si) in promptPreview.sections" :key="si"><span x-text="s.text" :title="s.label + (s.field ? ' · ручка: ' + s.field : '')" :style="ppStyle(s.kind)"></span></template><span x-show="!promptPreview.sections.length" class="help">Нажми «обновить» для сборки превью.</span></pre>
+          </div>
+        </div>
+
         <div class="actions" style="margin-top:1rem">
           <button class="btn"
                   :disabled="setup.retrieval.busy || !setup.retrieval.agent.llm || !setup.retrieval.reranker.llm"
@@ -1821,6 +1837,9 @@
         llmTestResults: {}, // { [llmName]: { msg, kind } } — для inline-результата кнопки Проверить
         quickstart: null,   // { ollama_available, models:[], can_apply, applying, refreshing, result, resultKind }
         embedderTestResult: '', embedderTestResultKind: '',  // для inline-результата кнопки Проверить у embedder
+
+        // Превью собранного системного промпта (секции из /api/retrieval/prompt-preview).
+        promptPreview: { open: false, sections: [], busy: false },
 
         // Состояние выпадашки поиска страниц по названию (общее для всех chip-инпутов).
         // key = 'source:<field>' | 'glossary' — какому инпуту принадлежит активный поиск.
@@ -2949,6 +2968,39 @@
         },
 
         // ─── Retrieval ───
+
+        // Превью собранного системного промпта (секции с подсветкой).
+        togglePromptPreview() {
+          this.promptPreview.open = !this.promptPreview.open;
+          if (this.promptPreview.open && !this.promptPreview.sections.length) this.loadPromptPreview();
+        },
+
+        async loadPromptPreview() {
+          this.promptPreview.busy = true;
+          try {
+            const p = this.setup.retrieval.prompts;
+            // равно дефолту → '' (pipeline возьмёт дефолт), как при сохранении
+            const r = await this.fetchJson('/api/retrieval/prompt-preview', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                corpus_description: (p.corpus_description === this.setup.retrieval._corpus_default) ? '' : (p.corpus_description || ''),
+                answer_style: (p.answer_style === this.setup.retrieval._answer_style_default) ? '' : (p.answer_style || ''),
+                completeness_check: p.completeness_check !== false,
+                admin_instructions: p.admin_instructions || '',
+              }),
+            });
+            if (r.ok) this.promptPreview.sections = r.sections || [];
+          } catch (e) { /* сеть недоступна — оставляем как было */ }
+          finally { this.promptPreview.busy = false; }
+        },
+
+        // Стиль секции в превью: config — акцент, tool — фиолетовый, fixed/km — приглушённо.
+        ppStyle(kind) {
+          if (kind === 'config') return 'background:rgba(90,150,255,0.22); border-radius:3px';
+          if (kind === 'tool') return 'background:rgba(150,120,255,0.18); border-radius:3px';
+          if (kind === 'km') return 'opacity:0.6; font-style:italic';
+          return 'opacity:0.6';
+        },
 
         async loadRetrieval() {
           // Подтянуть текущий retrieval-блок (raw + effective).

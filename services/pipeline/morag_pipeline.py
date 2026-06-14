@@ -19,7 +19,7 @@ from markdown_it import MarkdownIt
 # Импорт из installed morag-пакета (ставится через services/pipeline/Dockerfile).
 # Файл специально назван morag_pipeline.py (не morag.py) чтобы избежать коллизии с
 # пакетом в sys.modules — OWUI регистрирует файл по filename как имя модуля.
-from morag.config import DEFAULT_ANSWER_STYLE, DEFAULT_CORPUS_DESCRIPTION, Config, load_config
+from morag.config import Config, load_config
 from morag.llm.client import GenerationParams, LLMClient
 from morag.indexing.embedder import HttpEmbedder, HttpGteSparseEmbedder
 from morag.retrieval import (
@@ -29,11 +29,8 @@ from morag.retrieval import (
     find_section,
 )
 from morag.retrieval.tools import REGISTRY, build_tool_schema
-from morag.retrieval.tools.core import (
-    CORE_EXECUTION_METHODOLOGY,
-    FIND_SECTION_OPTIONAL_POLICY,
-    FIND_SECTION_REQUIRED_POLICY,
-)
+from morag.retrieval.prompt import build_system_prompt
+from morag.retrieval.tools.core import CORE_EXECUTION_METHODOLOGY
 
 logger = logging.getLogger(__name__)
 
@@ -91,48 +88,10 @@ def _try_load_config() -> Config | None:
 # пакете morag.retrieval.tools — по модулю на тип (ToolSpec). Здесь только
 # сборка инстансов из config.retrieval.tools (см. Pipeline.__init__).
 
-# Доменная «роль» в начале _SYSTEM_PROMPT — заменяется на retrieval.prompts.corpus_description
-# (если задан), чтобы один промпт обслуживал и документацию, и подкаст, и любой корпус.
-# Единый источник дефолта — morag.config.DEFAULT_CORPUS_DESCRIPTION (его же показывает console).
-_DEFAULT_ROLE_LINE = DEFAULT_CORPUS_DESCRIPTION
-
-_SYSTEM_PROMPT = (
-    f'{DEFAULT_CORPUS_DESCRIPTION} '
-    'Отвечай только на русском языке.\n\n'
-    'У тебя есть доступ к базе знаний через инструменты (tools). '
-    'Используй их для поиска информации.\n\n'
-    '{find_section_policy}'
-    'СОХРАНЯЙ имена, фамилии, названия, ID, специфические термины — это самые сильные '
-    'различающие сигналы и их нельзя обобщать.\n'
-    'Второй find_section вызывай ТОЛЬКО если первый не дал релевантных секций '
-    '(пустой результат, либо найденные разделы явно мимо темы). При втором — '
-    'варьируй УГОЛ вопроса (другой аспект, переставленные слова, синонимы тех же '
-    'терминов), НО не подменяй конкретные сущности на категории-абстракции.\n'
-    'ЗАПРЕЩЕНО:\n'
-    '  - «Иван Петров» → «сотрудник Иван» (выбросил фамилию, добавил категорию)\n'
-    '  - «TASK-123» → «задача разработки» (выбросил конкретный ID)\n'
-    '  - «конкретное название» → «общая категория» (добавил категорию из общей эрудиции)\n'
-    '⚠️ Если делал несколько find_section — **ОБЪЕДИНЯЙ** результаты, не замещай. '
-    'В search передавай union section_ids и doc_ids от всех вызовов.\n\n'
-    '{tool_methodology}'
-    '{completeness_check}'
-    '{answer_rules}'
-)
-
-
-# Блок «### 3. ПРОВЕРКА ПОЛНОТЫ» — вставляется в {completeness_check}, если
-# retrieval.prompts.completeness_check (дефолт on). Для корпусов где ответ из одного
-# места норма (юристы/подкаст) — выключается, тогда плейсхолдер → ''. Тот же тумблер
-# гейтит рантайм diversity-nudge. Завершается '\n\n' — стыкуется с {answer_rules}.
-_COMPLETENESS_CHECK_SECTION = (
-    '### 3. ПРОВЕРКА ПОЛНОТЫ\n'
-    'После поисков проверь:\n'
-    '- Найдена ли информация из РАЗНЫХ разделов/документов?\n'
-    '- ⚠️ КРАСНЫЙ ФЛАГ: если все результаты из одного раздела — '
-    'почти наверняка ты пропустил информацию в других местах. Ищи шире.\n'
-    '- Если какая-то грань вопроса не покрыта — ищи в оставшихся разделах.\n'
-    '- Делай несколько поисков. Качество важнее скорости.\n\n'
-)
+# Системный промпт собирается из именованных секций в morag.retrieval.prompt
+# (build_system_prompt / build_prompt_sections — единый источник для pipeline-сборки
+# и console-превью с подсветкой настраиваемых частей). Дефолты роли/стиля — в
+# morag.config; методика тулов и find_section-политики — в morag.retrieval.tools.core.
 
 
 def _init_valves_from_env() -> dict:
@@ -736,47 +695,21 @@ class Pipeline:
         # 1. Подтянуть карту документации
         knowledge_map = self._fetch_knowledge_map()
 
-        # 2. Собрать system prompt.
-        #    - find_section-политика (required/optional) — по retrieval.search.require_find_section;
-        #    - доменную «роль» заменяем на corpus_description (если задан) — корпус может быть
-        #      НЕ документацией (напр. подкаст);
-        #    - секции тулов — из реестра (prompt_section инстансов; у core они пустые).
-        policy = (
-            FIND_SECTION_REQUIRED_POLICY if self._s['require_find_section']
-            else FIND_SECTION_OPTIONAL_POLICY
-        )
-        system_content = _SYSTEM_PROMPT.replace('{find_section_policy}', policy)
-        corpus_description = self._s.get('corpus_description') or ''
-        if corpus_description:
-            system_content = system_content.replace(
-                _DEFAULT_ROLE_LINE, corpus_description, 1,
-            )
-        # {tool_methodology}: методика core-тулов (CORE_EXECUTION_METHODOLOGY,
-        # живёт в слое тулов) + секции optional-тулов (prompt_section, обычно '').
-        tool_sections = ''.join(
+        # 2. Собрать system prompt из именованных секций (morag.retrieval.prompt —
+        #    единый источник; console показывает ту же структуру в превью).
+        #    Методика тулов = core-методика + prompt_section optional-тулов (обычно '').
+        tool_methodology = CORE_EXECUTION_METHODOLOGY + ''.join(
             spec.prompt_section(cfg) for _n, (spec, cfg) in self._tool_instances.items()
         )
-        system_content = system_content.replace(
-            '{tool_methodology}', CORE_EXECUTION_METHODOLOGY + tool_sections,
+        system_content = build_system_prompt(
+            corpus_description=self._s.get('corpus_description') or '',
+            require_find_section=self._s['require_find_section'],
+            tool_methodology=tool_methodology,
+            completeness_check=self._s['completeness_check'],
+            answer_style=self._s.get('answer_style') or '',
+            admin_instructions=self._s['admin_instructions'] or '',
+            knowledge_map=knowledge_map or '',
         )
-        # {completeness_check}: блок «### 3. ПРОВЕРКА ПОЛНОТЫ» или '' (тумблер).
-        system_content = system_content.replace(
-            '{completeness_check}',
-            _COMPLETENESS_CHECK_SECTION if self._s['completeness_check'] else '',
-        )
-        # {answer_rules}: кастомный answer_style или дефолтные «Правила ответа».
-        system_content = system_content.replace(
-            '{answer_rules}', self._s.get('answer_style') or DEFAULT_ANSWER_STYLE,
-        )
-        if self._s['admin_instructions']:
-            system_content += (
-                '\n\n## Обязательные инструкции администратора\n'
-                + self._s['admin_instructions']
-            )
-        if knowledge_map:
-            system_content += (
-                '\n\nСтруктура базы знаний (используй для навигации):\n' + knowledge_map
-            )
 
         # 3. Собрать историю для LLM (только user/assistant из Open WebUI)
         agent_messages: list[dict] = [{'role': 'system', 'content': system_content}]
