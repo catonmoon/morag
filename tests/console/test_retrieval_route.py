@@ -61,7 +61,7 @@ class TestGetRetrieval:
         # effective содержит дефолты + первая LLM как placeholder для agent/reranker
         assert data['effective']['agent']['llm'] == 'main'
         assert data['effective']['reranker']['llm'] == 'main'
-        assert data['effective']['search']['limit'] == 50         # Pydantic default
+        assert data['effective']['search']['limit'] == 100        # Pydantic default
         assert data['effective']['search']['find_section']['doc_pool'] == 20
         assert data['effective']['features']['enable_diversity_nudge'] is True
         # llms-pool возвращается всегда — для UI dropdown'ов
@@ -102,7 +102,7 @@ class TestPutRetrieval:
         assert r.status_code == 200
         data = r.json()
         assert data['ok'] is True
-        assert data['restart_required'] is True
+        assert data['restart_required'] is False   # hot-reload: рестарт не нужен
 
         # Проверим что файл записан правильно
         local = workspace['tmp'] / 'config.local.yml'
@@ -147,18 +147,20 @@ class TestPutRetrieval:
         # Пустой find_section после strip_none — отсутствует
         assert 'find_section' not in loaded['retrieval']['search']
 
-    async def test_admin_instructions_preserved(self, client, workspace):
+    async def test_section_overrides_preserved(self, client, workspace):
+        # WYSIWYG: посекционные оверрайды промпта пишутся как section_overrides.
         body = {
             'agent': {'llm': 'main'},
             'reranker': {'llm': 'main'},
-            'prompts': {'admin_instructions': 'Тестовая инструкция'},
+            'prompts': {'section_overrides': {'admin': '\n\n## Хедер\nТестовая инструкция'}},
         }
         r = await client.put('/api/retrieval/config', json=body)
         assert r.status_code == 200
 
         local = workspace['tmp'] / 'config.local.yml'
         loaded = yaml.safe_load(local.read_text())
-        assert loaded['retrieval']['prompts']['admin_instructions'] == 'Тестовая инструкция'
+        ov = loaded['retrieval']['prompts']['section_overrides']
+        assert ov['admin'] == '\n\n## Хедер\nТестовая инструкция'
 
 
 class TestDiffWrite:

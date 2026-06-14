@@ -1742,8 +1742,9 @@
 
         <h3 style="margin-top:1.2rem; margin-bottom:0.4rem; font-size:0.95rem">Системный промпт</h3>
         <div class="help" style="margin-bottom:0.5rem">
-          Полный промпт, как его видит агент. <b>Кликни цветную секцию</b>, чтобы изменить
-          (наведи — что это и какая ручка); приглушённо-серое — фиксированное ядро.
+          Полный промпт, как его видит агент — <b>любую секцию можно отредактировать прямо здесь</b>.
+          Кликни цветной фрагмент (наведи — что это); подчёркнутые синим — уже изменены
+          относительно дефолта. Приглушённое серое — Knowledge Map (авто из корпуса).
           <button class="btn secondary" style="padding:0.1rem 0.5rem; font-size:0.78rem; margin-left:0.3rem"
                   @click="loadPromptPreview()" :disabled="promptPreview.busy">⟳ обновить</button>
           <span x-show="promptPreview.busy">⏳</span>
@@ -1753,14 +1754,38 @@
         <div x-show="hoverTip.show" x-text="hoverTip.text"
              :style="`position:fixed; left:${hoverTip.x + 14}px; top:${hoverTip.y + 16}px; max-width:360px; background:var(--card-bg,#222); color:var(--fg,#eee); border:1px solid var(--border,#555); border-radius:5px; padding:0.4rem 0.6rem; font-size:0.78rem; line-height:1.4; z-index:1100; pointer-events:none; box-shadow:0 4px 18px rgba(0,0,0,0.45)`"></div>
 
-        <!-- Попап редактирования текстовой секции промпта -->
+        <!-- Попап редактирования секции промпта (WYSIWYG) -->
         <div x-show="promptEdit.open" class="modal-overlay" @click.self="closePromptEdit()"
              style="position:fixed; inset:0; background:rgba(0,0,0,0.55); display:flex; align-items:center; justify-content:center; z-index:1000">
           <div @click.stop style="background:var(--card-bg,#222); border:1px solid var(--border,#444); border-radius:8px; padding:1rem 1.1rem; width:min(680px,92vw); max-height:85vh; overflow:auto; box-shadow:0 8px 40px rgba(0,0,0,0.5)">
             <h3 style="margin:0 0 0.2rem; font-size:1rem" x-text="promptEdit.label"></h3>
             <div class="help" style="margin-bottom:0.5rem" x-text="promptEdit.description"></div>
-            <textarea x-model="promptEdit.value" style="width:100%; min-height:240px; font-size:0.85rem; line-height:1.5"></textarea>
-            <div class="actions" style="margin-top:0.7rem; display:flex; gap:0.5rem; align-items:center">
+
+            <!-- find_section-политика: пресеты + флаг «обязателен» -->
+            <div x-show="promptEdit.edit_kind === 'policy'"
+                 style="margin:0 0 0.6rem; padding:0.5rem 0.6rem; border:1px solid var(--border,#444); border-radius:6px; background:rgba(235,165,45,0.07)">
+              <div class="help" style="margin-bottom:0.4rem">Готовые формулировки (заменят текст ниже):</div>
+              <div style="display:flex; gap:0.5rem; flex-wrap:wrap">
+                <button class="btn secondary" type="button" @click="applyPolicyPreset(true)">⛓ Обязателен (REQUIRED)</button>
+                <button class="btn secondary" type="button" @click="applyPolicyPreset(false)">↳ Опционален (OPTIONAL)</button>
+              </div>
+              <label style="display:flex; gap:0.4rem; align-items:center; margin-top:0.5rem; font-size:0.85rem">
+                <input type="checkbox" x-model="promptEdit.required">
+                find_section обязателен перед search (влияет на схему тула и поведение агента)
+              </label>
+            </div>
+
+            <!-- проверка полноты: тумблер вкл/выкл -->
+            <label x-show="promptEdit.edit_kind === 'toggle'"
+                   style="display:flex; gap:0.4rem; align-items:center; margin:0 0 0.6rem; font-size:0.9rem">
+              <input type="checkbox" x-model="promptEdit.completeness">
+              Включить секцию «Проверка полноты» (для юристов/подкаста можно выключить)
+            </label>
+
+            <textarea x-model="promptEdit.value"
+                      x-show="promptEdit.edit_kind !== 'toggle' || promptEdit.completeness"
+                      style="width:100%; min-height:240px; font-size:0.85rem; line-height:1.5"></textarea>
+            <div class="actions" style="margin-top:0.7rem; display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap">
               <button class="btn" @click="savePromptEdit()">✓ Применить</button>
               <button class="btn secondary" @click="promptEdit.value = promptEdit.def">↺ к дефолту</button>
               <button class="btn secondary" @click="closePromptEdit()">Отмена</button>
@@ -1827,7 +1852,10 @@
         // Интерактивный системный промпт: секции из /api/retrieval/prompt-preview +
         // попап-редактор текстовой секции.
         promptPreview: { sections: [], busy: false },
-        promptEdit: { open: false, field: '', label: '', description: '', value: '', def: '' },
+        // WYSIWYG-редактор секции: id/edit_kind + текст; required/completeness — для
+        // спец-секций (find_section-политика / проверка полноты).
+        promptEdit: { open: false, id: '', edit_kind: '', label: '', description: '',
+                      value: '', def: '', required: true, completeness: true },
         hoverTip: { show: false, text: '', x: 0, y: 0 },  // мгновенный тултип секции у курсора
 
         // Состояние выпадашки поиска страниц по названию (общее для всех chip-инпутов).
@@ -1868,13 +1896,12 @@
               find_section: { doc_pool: null, descent_threshold: null, top_docs: null },
             },
             features: { enable_diversity_nudge: null },
-            prompts: { admin_instructions: '', corpus_description: '', answer_style: '', completeness_check: true },
+            // WYSIWYG: посекционные оверрайды промпта (id → текст) + тумблер полноты.
+            // Только реально изменённые секции; правятся в попапе документа-промпта.
+            prompts: { section_overrides: {}, completeness_check: true },
             tools: [],
             http_timeout: null,
             // UI state
-            _corpus_default: '',                  // дефолт «роли» агента (для prefill + save-if-changed)
-            _answer_style_default: '',            // дефолт «правил ответа» (prefill + save-if-changed)
-            _admin_default: '',                   // дефолт admin-инструкций (prefill + save-if-changed)
             llms: [],                             // подгружаются с /api/retrieval/config
             loaded: false,
             busy: false,
@@ -2959,27 +2986,22 @@
 
         // ─── Retrieval ───
 
-        // ── Системный промпт: интерактивный документ (секции из /prompt-preview) ──
-        // Поле prompts.<field> → его дефолт в setup.retrieval._<field>_default.
-        _promptDefaultKey(field) {
-          return { corpus_description: '_corpus_default', answer_style: '_answer_style_default',
-                   admin_instructions: '_admin_default' }[field];
+        // ── Системный промпт: WYSIWYG-документ (секции из /prompt-preview) ──
+        // Источник истины — setup.retrieval.prompts.section_overrides (id → текст).
+        // Каждая секция документа редактируется на месте через попап.
+        _fsTool() {
+          return (this.setup.retrieval.tools || []).find(x => x.type === 'find_section');
         },
 
         async loadPromptPreview() {
           this.promptPreview.busy = true;
           try {
             const p = this.setup.retrieval.prompts;
-            const eqDef = (f) => p[f] === this.setup.retrieval[this._promptDefaultKey(f)];
-            // find_section-политика — из несохранённого тула (live-тумблер)
-            const fsTool = (this.setup.retrieval.tools || []).find(x => x.type === 'find_section');
-            // равно дефолту → '' (pipeline возьмёт дефолт), как при сохранении
+            const fsTool = this._fsTool();
             const r = await this.fetchJson('/api/retrieval/prompt-preview', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
-                corpus_description: eqDef('corpus_description') ? '' : (p.corpus_description || ''),
-                answer_style: eqDef('answer_style') ? '' : (p.answer_style || ''),
-                admin_instructions: eqDef('admin_instructions') ? '' : (p.admin_instructions || ''),
+                section_overrides: p.section_overrides || {},
                 completeness_check: p.completeness_check !== false,
                 require_find_section: fsTool ? (fsTool.required !== false) : null,
               }),
@@ -2989,28 +3011,29 @@
           finally { this.promptPreview.busy = false; }
         },
 
-        // Цвет/стиль секции: своя подсветка на каждую ручку; tool — фиолетовый;
-        // fixed/km — приглушённо; выключенная (призрак) — пунктир.
+        // Цвет/стиль секции: своя подсветка на каждый id; km — приглушённо;
+        // выключенная (призрак) — пунктир; изменённая — синее подчёркивание.
         ppStyle(s) {
-          if (s.enabled === false) return 'opacity:0.5; font-style:italic; cursor:pointer; border:1px dashed var(--border,#666); border-radius:4px; padding:0 3px; background:rgba(255,255,255,0.03)';
-          if (s.kind === 'fixed' || s.kind === 'km') return 'opacity:0.55';
+          if (s.kind === 'km') return 'opacity:0.55';
+          if (s.enabled === false) return 'opacity:0.55; font-style:italic; cursor:pointer; border:1px dashed var(--border,#666); border-radius:4px; padding:0 3px; background:rgba(255,255,255,0.03)';
           const bg = {
-            corpus_description: 'rgba(40,190,140,0.28)',
-            require_find_section: 'rgba(235,165,45,0.28)',
-            completeness_check: 'rgba(70,190,205,0.26)',
-            answer_style: 'rgba(90,150,255,0.26)',
-            admin_instructions: 'rgba(235,110,180,0.26)',
-          }[s.field] || (s.kind === 'tool' ? 'rgba(150,120,255,0.20)' : 'transparent');
-          const editable = s.edit_kind && s.edit_kind !== 'readonly';
-          return `background:${bg}; border-radius:3px;` + (editable ? ' cursor:pointer;' : '');
+            role: 'rgba(40,190,140,0.28)',
+            intro: 'rgba(120,205,150,0.16)',
+            find_section_policy: 'rgba(235,165,45,0.28)',
+            tool_methodology: 'rgba(150,120,255,0.20)',
+            completeness: 'rgba(70,190,205,0.26)',
+            answer_rules: 'rgba(90,150,255,0.26)',
+            admin: 'rgba(235,110,180,0.26)',
+          }[s.id] || 'transparent';
+          const ovr = s.overridden ? ' box-shadow: inset 0 -2px 0 var(--accent,#5aa0ff);' : '';
+          return `background:${bg}; border-radius:3px; cursor:pointer;` + ovr;
         },
 
         ppTitle(s) {
-          let hint = '';
-          if (s.enabled === false) hint = ' · выключено, кликни чтобы включить';
-          else if (s.edit_kind === 'text') hint = ' · кликни чтобы изменить';
-          else if (s.edit_kind === 'toggle') hint = ' · кликни чтобы переключить';
-          return s.label + (s.description ? ' — ' + s.description : '') + hint;
+          if (s.kind === 'km') return s.label + (s.description ? ' — ' + s.description : '');
+          let hint = (s.enabled === false) ? ' · выключено, кликни чтобы настроить' : ' · кликни чтобы изменить';
+          const ovr = s.overridden ? ' · ИЗМЕНЕНО' : '';
+          return s.label + ovr + (s.description ? ' — ' + s.description : '') + hint;
         },
 
         // Ведущие/хвостовые переводы строк выносим из цветного спана (иначе фон
@@ -3020,7 +3043,7 @@
           return ((s.text || '').match(/^\s*/) || [''])[0];
         },
         ppBody(s) {
-          if (s.enabled === false) return '[ ' + s.label + ' — выключено · кликни чтобы включить ]';
+          if (s.enabled === false) return '[ ' + s.label + ' — выключено · кликни чтобы настроить ]';
           return (s.text || '').replace(/^\s+|\s+$/g, '');
         },
         ppTrail(s) {
@@ -3029,53 +3052,55 @@
         },
 
         ppClick(s) {
-          // тул-секции ведут к карточке инструмента; остальное правится в документе
-          if (s.field === 'require_find_section') return this.scrollToTool('find_section');
-          if (s.kind === 'tool') return this.scrollToToolsArea();
-          if (s.edit_kind === 'text') return this.openPromptEdit(s);
-          if (s.edit_kind === 'toggle') return this.ppToggle(s);
-        },
-
-        scrollToTool(type) {
-          const ti = (this.setup.retrieval.tools || []).findIndex(t => t.type === type);
-          if (ti < 0) return this.scrollToToolsArea();
-          this.setup.retrieval.tools[ti]._expanded = true;
-          this.$nextTick(() => {
-            const el = document.getElementById('toolcard-' + ti);
-            if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); this._flashEl(el); }
-          });
-        },
-        scrollToToolsArea() {
-          const el = document.getElementById('tools-area');
-          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        },
-        _flashEl(el) {
-          el.style.transition = 'box-shadow 0.3s';
-          el.style.boxShadow = '0 0 0 2px var(--accent, #5aa0ff)';
-          setTimeout(() => { el.style.boxShadow = ''; }, 1200);
-        },
-
-        async ppToggle(s) {
-          if (s.field === 'completeness_check') {
-            this.setup.retrieval.prompts.completeness_check = !(this.setup.retrieval.prompts.completeness_check !== false);
-          } else if (s.field === 'require_find_section') {
-            // find_section-политика живёт в required у find_section-тула
-            const t = (this.setup.retrieval.tools || []).find(x => x.type === 'find_section');
-            if (t) t.required = !t.required;
-          }
-          await this.loadPromptPreview();
+          if (s.edit_kind === 'readonly') return;   // km — не редактируется
+          this.openPromptEdit(s);
         },
 
         openPromptEdit(s) {
-          const f = s.field;
+          const ov = this.setup.retrieval.prompts.section_overrides || {};
+          const fsTool = this._fsTool();
           this.promptEdit = {
-            open: true, field: f, label: s.label, description: s.description,
-            value: this.setup.retrieval.prompts[f] || '',
-            def: this.setup.retrieval[this._promptDefaultKey(f)] || '',
+            open: true, id: s.id, edit_kind: s.edit_kind, label: s.label, description: s.description,
+            // стартуем с текущего эффективного текста (оверрайд или дефолт)
+            value: (s.id in ov) ? ov[s.id] : (s.default || ''),
+            def: s.default || '',
+            required: fsTool ? (fsTool.required !== false) : true,
+            completeness: this.setup.retrieval.prompts.completeness_check !== false,
           };
         },
+
+        // Пресет find_section-политики: ставит required и подгружает дефолтный текст
+        // соответствующей формулировки (REQUIRED/OPTIONAL) — он же становится новым def,
+        // так что Apply сбросит оверрайд (вернётся к дефолту выбранного режима).
+        async applyPolicyPreset(required) {
+          this.promptEdit.required = required;
+          try {
+            const r = await this.fetchJson('/api/retrieval/prompt-preview', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ section_overrides: {}, completeness_check: true,
+                                     require_find_section: required }),
+            });
+            const sec = (r.sections || []).find(x => x.id === 'find_section_policy');
+            if (sec) { this.promptEdit.value = sec.default; this.promptEdit.def = sec.default; }
+          } catch (e) { /* оставляем текущий текст */ }
+        },
+
         savePromptEdit() {
-          if (this.promptEdit.field) this.setup.retrieval.prompts[this.promptEdit.field] = this.promptEdit.value;
+          const pe = this.promptEdit;
+          const ov = { ...(this.setup.retrieval.prompts.section_overrides || {}) };
+          // спец-флаги отдельных секций
+          if (pe.edit_kind === 'policy') {
+            const t = this._fsTool();
+            if (t) t.required = pe.required;
+          }
+          if (pe.edit_kind === 'toggle') {
+            this.setup.retrieval.prompts.completeness_check = pe.completeness;
+          }
+          // оверрайд текста храним только если он отличается от дефолта (и секция включена);
+          // совпал/выключена → удаляем ключ (= «сброс к дефолту»).
+          const keepText = pe.value !== pe.def && !(pe.edit_kind === 'toggle' && !pe.completeness);
+          if (keepText) ov[pe.id] = pe.value; else delete ov[pe.id];
+          this.setup.retrieval.prompts.section_overrides = ov;
           this.promptEdit.open = false;
           this.loadPromptPreview();
         },
@@ -3118,17 +3143,12 @@
             this.setup.retrieval.features = {
               enable_diversity_nudge: eff.features?.enable_diversity_nudge ?? true,
             };
-            // Описание корпуса: если не задано в конфиге — преднаполняем дефолтом
-            // («роль» агента по умолчанию), чтобы юзер видел текущее значение и мог
-            // править. Сохраняем потом только при отличии от дефолта (см. saveRetrieval).
-            this.setup.retrieval._corpus_default = r.default_corpus_description || '';
-            this.setup.retrieval._answer_style_default = r.default_answer_style || '';
-            this.setup.retrieval._admin_default = r.default_admin_instructions || '';
+            // Промпт: посекционные оверрайды (id → текст) + тумблер полноты. Дефолты
+            // секций приходят пер-секционно из /prompt-preview (каждая секция несёт
+            // .default), здесь только текущие оверрайды. Legacy-поля (corpus_description
+            // и т.п.) уже смигрированы Pydantic'ом в section_overrides на стороне backend.
             this.setup.retrieval.prompts = {
-              // все три текста — prefill дефолтом, если не задано (правятся в попапе документа)
-              corpus_description: eff.prompts?.corpus_description || this.setup.retrieval._corpus_default,
-              answer_style: eff.prompts?.answer_style || this.setup.retrieval._answer_style_default,
-              admin_instructions: eff.prompts?.admin_instructions || this.setup.retrieval._admin_default,
+              section_overrides: { ...(eff.prompts?.section_overrides || {}) },
               completeness_check: eff.prompts?.completeness_check ?? true,
             };
             // Тулы: core всегда первыми (description тюнится), потом optional из
@@ -3317,22 +3337,17 @@
                                .map(s => s.trim()).filter(Boolean) });
               }
             }
-            // corpus_description: если равно дефолту — пишем '' (остаётся «не задано»,
-            // pipeline использует дефолт). Иначе — кастомный текст.
-            // corpus_description / answer_style: если равно дефолту — пишем '' (остаётся
-            // «не задано», pipeline берёт дефолт). Иначе — кастомный текст.
-            const cd = this.setup.retrieval.prompts.corpus_description || '';
-            const as_ = this.setup.retrieval.prompts.answer_style || '';
-            const ai = this.setup.retrieval.prompts.admin_instructions || '';
+            // Промпт: шлём только реально изменённые секции (section_overrides уже
+            // содержит лишь оверрайды; openPromptEdit/savePromptEdit дропают совпавшие
+            // с дефолтом). diff-against-baseline на backend ещё уберёт совпадения с
+            // config.yml. find_section-политика (required) уходит в tools, не в prompts.
             const body = {
               agent: this.setup.retrieval.agent,
               reranker: this.setup.retrieval.reranker,
               search: this.setup.retrieval.search,
               features: this.setup.retrieval.features,
               prompts: {
-                corpus_description: cd === this.setup.retrieval._corpus_default ? '' : cd,
-                answer_style: as_ === this.setup.retrieval._answer_style_default ? '' : as_,
-                admin_instructions: ai === this.setup.retrieval._admin_default ? '' : ai,
+                section_overrides: { ...(this.setup.retrieval.prompts.section_overrides || {}) },
                 completeness_check: this.setup.retrieval.prompts.completeness_check !== false,
               },
               tools,

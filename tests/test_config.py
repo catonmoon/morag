@@ -552,7 +552,7 @@ class TestRetrievalConfig:
         assert cfg.retrieval.agent.llm == 'main'
         assert cfg.retrieval.reranker.llm == 'cheap'
         # Defaults применились
-        assert cfg.retrieval.search.limit == 50
+        assert cfg.retrieval.search.limit == 100
         assert cfg.retrieval.search.find_section.doc_pool == 20
         assert cfg.retrieval.features.enable_diversity_nudge is True
         assert cfg.retrieval.prompts.admin_instructions == ''
@@ -639,7 +639,9 @@ class TestRetrievalConfig:
         assert cfg.retrieval.reranker.max_tokens == 50
 
     def test_admin_instructions_preserved(self):
-        from morag.config import Config
+        # Back-compat: legacy admin_instructions сохраняется И мигрируется в
+        # section_overrides['admin'] (обёрнут заголовком секции).
+        from morag.config import ADMIN_HEADER, Config
         text = 'Если ответа нет — обязательно повтори search без section_ids.'
         cfg = Config.model_validate({
             **self._BASE,
@@ -650,3 +652,22 @@ class TestRetrievalConfig:
             },
         })
         assert cfg.retrieval.prompts.admin_instructions == text
+        assert cfg.retrieval.prompts.section_overrides['admin'] == ADMIN_HEADER + text
+
+    def test_section_overrides_passthrough(self):
+        # Новый контракт: section_overrides пишутся как есть; новый ключ важнее legacy.
+        from morag.config import Config
+        cfg = Config.model_validate({
+            **self._BASE,
+            'retrieval': {
+                'agent': {'llm': 'main'},
+                'reranker': {'llm': 'main'},
+                'prompts': {
+                    'corpus_description': 'LEGACY',
+                    'section_overrides': {'role': 'НОВЫЙ', 'answer_rules': 'ПРАВ'},
+                },
+            },
+        })
+        # явный section_overrides.role перебивает legacy corpus_description
+        assert cfg.retrieval.prompts.section_overrides['role'] == 'НОВЫЙ'
+        assert cfg.retrieval.prompts.section_overrides['answer_rules'] == 'ПРАВ'

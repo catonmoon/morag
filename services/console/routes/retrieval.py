@@ -17,12 +17,7 @@ import yaml
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from morag.config import (
-    DEFAULT_ADMIN_INSTRUCTIONS,
-    DEFAULT_ANSWER_STYLE,
-    DEFAULT_CORPUS_DESCRIPTION,
-    RetrievalConfig,
-)
+from morag.config import RetrievalConfig
 from morag.retrieval.prompt import build_prompt_sections
 from morag.retrieval.tools import REGISTRY
 from services.console.config_io import read_layered, read_local, validate_merged, write_local
@@ -230,9 +225,10 @@ class FeaturesIn(BaseModel):
 
 
 class PromptsIn(BaseModel):
-    admin_instructions: str = ''
-    corpus_description: str = ''
-    answer_style: str = ''
+    # WYSIWYG: посекционные оверрайды промпта (id секции → полный текст).
+    # Ключи — см. morag.retrieval.prompt.SECTION_IDS. Только реально изменённые
+    # секции (frontend дропает те, что равны дефолту).
+    section_overrides: dict[str, str] = Field(default_factory=dict)
     completeness_check: bool = True
 
 
@@ -299,21 +295,20 @@ async def tool_preview(req: ToolPreviewIn) -> dict[str, Any]:
 
 
 class PromptPreviewIn(BaseModel):
-    """Редактируемые поля промпта (текущее состояние редактора) — для живого превью."""
-    corpus_description: str = ''
-    answer_style: str = ''
+    """Живое состояние WYSIWYG-редактора промпта — для предпросмотра по мере правки."""
+    section_overrides: dict[str, str] = Field(default_factory=dict)
     completeness_check: bool = True
-    admin_instructions: str = ''
     require_find_section: bool | None = None  # None = взять из сохранённого конфига
 
 
 @router.post('/prompt-preview')
 async def prompt_preview(req: PromptPreviewIn, request: Request) -> dict[str, Any]:
-    """Структура собранного системного промпта (секции + подсветка настраиваемых
-    частей) — ровно то, что pipeline шлёт агенту (morag.retrieval.prompt — единый
-    источник). Редактируемые тексты берём из тела (живой предпросмотр по мере
-    правки), структурную find_section-политику — из сохранённого конфига. KM —
-    нота-плейсхолдер (реальная карта подставляется в pipeline в рантайме)."""
+    """Структура собранного системного промпта (все секции с дефолтами + текущими
+    оверрайдами) — ровно то, что pipeline шлёт агенту (morag.retrieval.prompt —
+    единый источник). Каждая секция несёт `default` (для reset + индикатора «изменено»)
+    и `text` (оверрайд или дефолт). `require_find_section` влияет на ДЕФОЛТ секции
+    find_section_policy. KM — нота-плейсхолдер (реальная карта подставляется в
+    pipeline в рантайме)."""
     cfg_path = request.app.state.config_path
     if req.require_find_section is not None:
         require_fs = req.require_find_section  # из несохранённого редактора (live-тумблер)
@@ -329,20 +324,21 @@ async def prompt_preview(req: PromptPreviewIn, request: Request) -> dict[str, An
         except Exception:  # noqa: BLE001 — превью best-effort, дефолт REQUIRED
             pass
     sections = build_prompt_sections(
-        corpus_description=req.corpus_description,
+        section_overrides=req.section_overrides,
         require_find_section=require_fs,
         completeness_check=req.completeness_check,
-        answer_style=req.answer_style,
-        admin_instructions=req.admin_instructions or DEFAULT_ADMIN_INSTRUCTIONS,
         knowledge_map='[авто из корпуса — подставляется при запросе]',
         editor=True,
     )
     return {
         'ok': True,
+        'require_find_section': require_fs,
         'sections': [
             {
-                'label': s.label, 'kind': s.kind, 'field': s.field, 'text': s.text,
-                'edit_kind': s.edit_kind, 'description': s.description, 'enabled': s.enabled,
+                'id': s.id, 'label': s.label, 'kind': s.kind, 'text': s.text,
+                'default': s.default, 'edit_kind': s.edit_kind,
+                'description': s.description, 'enabled': s.enabled,
+                'overridden': s.id in req.section_overrides,
             }
             for s in sections
         ],
@@ -398,13 +394,8 @@ async def get_retrieval(request: Request) -> dict[str, Any]:
     return {
         'retrieval': retrieval_raw,
         'effective': effective,
-        # дефолтная «роль» агента: console преднаполняет инпут «Описание корпуса»,
-        # если corpus_description не задан, и сохраняет только при отличии от дефолта.
-        'default_corpus_description': DEFAULT_CORPUS_DESCRIPTION,
-        # дефолтные «Правила ответа»: тот же приём prefill+save-if-changed для answer_style.
-        'default_answer_style': DEFAULT_ANSWER_STYLE,
-        # дефолтные «Инструкции администратора» — тот же приём prefill+save-if-changed.
-        'default_admin_instructions': DEFAULT_ADMIN_INSTRUCTIONS,
+        # Дефолты секций промпта приходят пер-секционно из /prompt-preview
+        # (каждая секция несёт .default) — здесь больше не дублируем.
         'llms': [{'name': llm.get('name'), 'model': llm.get('model'),
                   'capabilities': llm.get('capabilities') or ['text']}
                  for llm in llms],

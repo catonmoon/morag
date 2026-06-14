@@ -19,7 +19,7 @@ from markdown_it import MarkdownIt
 # Импорт из installed morag-пакета (ставится через services/pipeline/Dockerfile).
 # Файл специально назван morag_pipeline.py (не morag.py) чтобы избежать коллизии с
 # пакетом в sys.modules — OWUI регистрирует файл по filename как имя модуля.
-from morag.config import DEFAULT_ADMIN_INSTRUCTIONS, Config, load_config
+from morag.config import ADMIN_HEADER, Config, load_config
 from morag.llm.client import GenerationParams, LLMClient
 from morag.indexing.embedder import HttpEmbedder, HttpGteSparseEmbedder
 from morag.retrieval import (
@@ -159,6 +159,20 @@ def _init_valves_from_env() -> dict:
         'HTTP_TIMEOUT': _ei('HTTP_TIMEOUT'),
         'ADMIN_INSTRUCTIONS': _e('ADMIN_INSTRUCTIONS'),
     }
+
+
+def _resolve_section_overrides(v: 'Pipeline.Valves', prompts) -> dict:
+    """Посекционные оверрайды промпта: config.prompts.section_overrides как база,
+    Valve ADMIN_INSTRUCTIONS (если непустой) перебивает секцию admin.
+
+    Valve отдаёт raw-текст инструкций — оборачиваем заголовком ADMIN_HEADER, чтобы
+    получился полный текст секции admin. Пустой Valve → секция из config/дефолта.
+    """
+    ov = dict(getattr(prompts, 'section_overrides', {}) or {}) if prompts else {}
+    valve_admin = (getattr(v, 'ADMIN_INSTRUCTIONS', '') or '').strip()
+    if valve_admin:
+        ov['admin'] = ADMIN_HEADER + valve_admin
+    return ov
 
 
 def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
@@ -342,17 +356,11 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
         'http_timeout': _int_or(
             v.HTTP_TIMEOUT, retr.http_timeout if retr else None, default=300,
         ),
-        'admin_instructions': _str_or(
-            v.ADMIN_INSTRUCTIONS,
-            prompts.admin_instructions if prompts else None,
-            default=DEFAULT_ADMIN_INSTRUCTIONS,
-        ),
-        'corpus_description': (
-            getattr(prompts, 'corpus_description', '') if prompts else ''
-        ),
-        'answer_style': (
-            getattr(prompts, 'answer_style', '') if prompts else ''
-        ),
+        # Посекционные оверрайды системного промпта (id секции → текст). Источник —
+        # config.prompts.section_overrides; Valve ADMIN_INSTRUCTIONS (если задан)
+        # перебивает секцию admin (raw-текст оборачивается заголовком). Отсутствие
+        # ключа = дефолт секции (build_system_prompt подставит сам).
+        'section_overrides': _resolve_section_overrides(v, prompts),
         # Тумблер «проверка полноты»: блок в промпте + рантайм diversity-nudge.
         # config-only (Valve нет): для юристов/подкаста ставится false.
         'completeness_check': (
@@ -697,12 +705,10 @@ class Pipeline:
             spec.prompt_section(cfg) for _n, (spec, cfg) in self._tool_instances.items()
         )
         system_content = build_system_prompt(
-            corpus_description=self._s.get('corpus_description') or '',
+            section_overrides=self._s['section_overrides'],
             require_find_section=self._s['require_find_section'],
             tool_methodology=tool_methodology,
             completeness_check=self._s['completeness_check'],
-            answer_style=self._s.get('answer_style') or '',
-            admin_instructions=self._s['admin_instructions'] or '',
             knowledge_map=knowledge_map or '',
         )
 

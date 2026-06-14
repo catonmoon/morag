@@ -501,8 +501,8 @@ DEFAULT_ANSWER_STYLE = (
 )
 
 # Дефолтные «Обязательные инструкции администратора» — добавляются в хвост промпта,
-# если retrieval.prompts.admin_instructions не задан. Единый источник (console
-# преднаполняет инпут, pipeline применяет тот же дефолт в _resolve_settings).
+# если секция admin не переопределена. Единый источник (console преднаполняет
+# редактор, pipeline применяет тот же дефолт в morag.retrieval.prompt).
 DEFAULT_ADMIN_INSTRUCTIONS = (
     'Если информация не была найдена в конкретном разделе знаний '
     'или её недостаточно для полного ответа, ОБЯЗАТЕЛЬНО сделай '
@@ -510,17 +510,46 @@ DEFAULT_ADMIN_INSTRUCTIONS = (
     'по всей базе знаний.'
 )
 
+# Заголовок секции «admin» в промпте — структурная обёртка вокруг текста инструкций.
+# Живёт здесь (а не в prompt.py), чтобы back-compat-миграция legacy `admin_instructions`
+# → section_overrides['admin'] могла обернуть raw-текст без циклического импорта.
+ADMIN_HEADER = '\n\n## Обязательные инструкции администратора\n'
+
 
 class RetrievalPromptsConfig(BaseModel):
-    admin_instructions: str = ''
-    # доменная «роль» агента — заменяет дефолт DEFAULT_CORPUS_DESCRIPTION.
-    # Пусто = использовать дефолт (console преднаполняет инпут дефолтом).
-    corpus_description: str = ''
-    # стиль/правила ответа — заменяет дефолт DEFAULT_ANSWER_STYLE. Пусто = дефолт.
-    answer_style: str = ''
+    """Настройка системного промпта агента (WYSIWYG-модель).
+
+    `section_overrides` — посекционные оверрайды промпта (id секции → полный текст
+    секции). Источник истины для редактора. Ключи: role / intro / find_section_policy /
+    tool_methodology / completeness / answer_rules / admin (см. `morag.retrieval.prompt`).
+    Отсутствие ключа = использовать дефолт секции («сброс» = удалить ключ).
+
+    Legacy-поля (`corpus_description` / `answer_style` / `admin_instructions`) —
+    back-compat: мигрируются в `section_overrides` Pydantic-валидатором на load
+    (старые деплои не ломаются). Новый ключ всегда перебивает legacy.
+    """
+    section_overrides: dict[str, str] = Field(default_factory=dict)
     # включать блок «### 3. ПРОВЕРКА ПОЛНОТЫ» (+ рантайм diversity-nudge). Для
     # юристов/подкаста, где ответ из одного места норма, — выключить (false).
     completeness_check: bool = True
+
+    # --- legacy-поля (deprecated): только для миграции старых config.yml ---
+    admin_instructions: str = ''
+    corpus_description: str = ''
+    answer_style: str = ''
+
+    @model_validator(mode='after')
+    def _migrate_legacy_prompt_fields(self):
+        """Старые отдельные поля → generic section_overrides. Новый ключ важнее."""
+        ov = dict(self.section_overrides)
+        if self.corpus_description and 'role' not in ov:
+            ov['role'] = self.corpus_description
+        if self.answer_style and 'answer_rules' not in ov:
+            ov['answer_rules'] = self.answer_style
+        if self.admin_instructions and 'admin' not in ov:
+            ov['admin'] = ADMIN_HEADER + self.admin_instructions
+        self.section_overrides = ov
+        return self
 
 
 class RetrievalGlossaryConfig(BaseModel):
