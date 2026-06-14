@@ -19,7 +19,7 @@ from markdown_it import MarkdownIt
 # Импорт из installed morag-пакета (ставится через services/pipeline/Dockerfile).
 # Файл специально назван morag_pipeline.py (не morag.py) чтобы избежать коллизии с
 # пакетом в sys.modules — OWUI регистрирует файл по filename как имя модуля.
-from morag.config import DEFAULT_CORPUS_DESCRIPTION, Config, load_config
+from morag.config import DEFAULT_ANSWER_STYLE, DEFAULT_CORPUS_DESCRIPTION, Config, load_config
 from morag.llm.client import GenerationParams, LLMClient
 from morag.indexing.embedder import HttpEmbedder, HttpGteSparseEmbedder
 from morag.retrieval import (
@@ -30,6 +30,7 @@ from morag.retrieval import (
 )
 from morag.retrieval.tools import REGISTRY, build_tool_schema
 from morag.retrieval.tools.core import (
+    CORE_EXECUTION_METHODOLOGY,
     FIND_SECTION_OPTIONAL_POLICY,
     FIND_SECTION_REQUIRED_POLICY,
 )
@@ -113,40 +114,17 @@ _SYSTEM_PROMPT = (
     '  - «конкретное название» → «общая категория» (добавил категорию из общей эрудиции)\n'
     '⚠️ Если делал несколько find_section — **ОБЪЕДИНЯЙ** результаты, не замещай. '
     'В search передавай union section_ids и doc_ids от всех вызовов.\n\n'
-    '### 2. ВЫПОЛНЕНИЕ\n'
-    '- Ищи тщательно. Старайся покрыть вопрос с разных сторон — делай несколько search\'ей '
-    'под РАЗНЫЕ грани (процесс vs инструменты vs ответственные), не повторяя один запрос в переформулировках.\n'
-    '- ⚠️ ЯЗЫК ЗАПРОСА: сохраняй ключевые русские слова из исходного вопроса. '
-    'Корпус на русском — поиск на английском не сработает. '
-    'Если в вопросе «доверие к сервису распознавания» — так и пиши в search, не переводи на «trust recognition service». '
-    'Синонимы/переформулировки допустимы, но на русском.\n'
-    '- 🎯 СЛОВАРЬ ЗАПРОСА: формулируй query словами пользователя из ПОСЛЕДНЕГО вопроса. '
-    'Не добавляй термины из общей эрудиции, пока корпус сам не показал что они применимы. '
-    'Корпус может использовать термины в специфичном значении. '
-    'Пример: «Как оформить отпуск?» → search: «оформление отпуска». '
-    'Расширять/менять формулировку — только если буквальный поиск ничего релевантного не нашёл. '
-    'При расширении используй близкие синонимы и переформулировки тех же терминов '
-    '(«установка» → «инструкция», «как настроить», «гайд»), не подменяй '
-    'специфические названия — если их не было в '
-    'исходном вопросе, их нет и в корпусе.\n'
-    '- 🔄 МНОГОХОДОВЫЙ ДИАЛОГ: помни предыдущие вопросы, но в search идут слова из ПОСЛЕДНЕГО. '
-    'Подставляй контекст из прошлого хода только если последний вопрос ссылается на него '
-    '(местоимения, эллипсис: «а как его установить?» → подставь предмет из прошлого вопроса).\n'
-    '- `section_ids` — рекурсивный поиск (раздел + все его подстраницы). Для широких тем.\n'
-    '- `doc_ids` — точечный поиск (только указанные страницы, БЕЗ потомков). Для случаев когда ответ '
-    'прямо на странице-указателе (например, страница, которая сама перечисляет разделы — её подстраницы не нужны).\n'
-    '- find_section подскажет что использовать: «раздел рекурсивно» → section_ids; «страница точечно» → doc_ids.\n'
-    '- Если для разных аспектов релевантны разные секции — дополнительно вызови find_section под аспект.\n'
-    '- Используй get_doc(doc_id, query) для ГЛУБОКОГО ЧТЕНИЯ одного документа '
-    'относительно вопроса — реранкер пройдётся по ВСЕМ его чанкам и вернёт '
-    'тематически релевантные. Полезно когда search нашёл нужный документ, '
-    'но один-два чанка не дают полной картины, или если документ большой '
-    'и search мог пропустить релевантный фрагмент в его хвосте.\n'
-    '- ⚠️ ШУМ ПРИ ШИРОКОМ ПОИСКЕ: если search вернул результаты из 10+ разных документов — '
-    'это сигнал что запрос слишком общий, выдача шумная. Сузь следующий шаг: '
-    'переформулируй запрос точнее (более специфичные термины) ИЛИ ограничь section_ids '
-    'двумя-тремя самыми релевантными разделами из карты. '
-    'Не пытайся «прочитать все 10» — выбери top-2-3 документа и углубляйся через get_doc().\n\n'
+    '{tool_methodology}'
+    '{completeness_check}'
+    '{answer_rules}'
+)
+
+
+# Блок «### 3. ПРОВЕРКА ПОЛНОТЫ» — вставляется в {completeness_check}, если
+# retrieval.prompts.completeness_check (дефолт on). Для корпусов где ответ из одного
+# места норма (юристы/подкаст) — выключается, тогда плейсхолдер → ''. Тот же тумблер
+# гейтит рантайм diversity-nudge. Завершается '\n\n' — стыкуется с {answer_rules}.
+_COMPLETENESS_CHECK_SECTION = (
     '### 3. ПРОВЕРКА ПОЛНОТЫ\n'
     'После поисков проверь:\n'
     '- Найдена ли информация из РАЗНЫХ разделов/документов?\n'
@@ -154,20 +132,6 @@ _SYSTEM_PROMPT = (
     'почти наверняка ты пропустил информацию в других местах. Ищи шире.\n'
     '- Если какая-то грань вопроса не покрыта — ищи в оставшихся разделах.\n'
     '- Делай несколько поисков. Качество важнее скорости.\n\n'
-    'Правила ответа:\n'
-    '- Отвечай КРАТКО и по существу. Не пересказывай всё найденное — '
-    'выбери только то, что прямо отвечает на вопрос.\n'
-    '- Отвечай ТОЛЬКО на основе найденной информации из базы знаний. '
-    'Не додумывай и не дополняй информацией из общих знаний.\n'
-    '- ЗАПРЕЩЕНО делать выводы о политиках, правилах и разрешениях компании, '
-    'если они НЕ прописаны явно в найденных документах. '
-    'Наличие инструкции (например, «как настроить Mac») '
-    'НЕ означает что это разрешено или рекомендовано. '
-    'Если политика не описана явно — скажи что информации нет.\n'
-    '- Если в базе нет ответа — честно сообщи об этом.\n'
-    '- При наличии нескольких источников предпочитай более свежие документы '
-    '(ориентируйся на поле «Обновлён» в результатах поиска). '
-    'Если старый и новый документ противоречат — доверяй новому.\n'
 )
 
 
@@ -431,6 +395,14 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
         ),
         'corpus_description': (
             getattr(prompts, 'corpus_description', '') if prompts else ''
+        ),
+        'answer_style': (
+            getattr(prompts, 'answer_style', '') if prompts else ''
+        ),
+        # Тумблер «проверка полноты»: блок в промпте + рантайм diversity-nudge.
+        # config-only (Valve нет): для юристов/подкаста ставится false.
+        'completeness_check': (
+            getattr(prompts, 'completeness_check', True) if prompts else True
         ),
 
         # Инстансы агентских тулов (model_dump — handler'ы/билдеры работают с dict).
@@ -779,8 +751,23 @@ class Pipeline:
             system_content = system_content.replace(
                 _DEFAULT_ROLE_LINE, corpus_description, 1,
             )
-        for _name, (spec, cfg) in self._tool_instances.items():
-            system_content += spec.prompt_section(cfg)
+        # {tool_methodology}: методика core-тулов (CORE_EXECUTION_METHODOLOGY,
+        # живёт в слое тулов) + секции optional-тулов (prompt_section, обычно '').
+        tool_sections = ''.join(
+            spec.prompt_section(cfg) for _n, (spec, cfg) in self._tool_instances.items()
+        )
+        system_content = system_content.replace(
+            '{tool_methodology}', CORE_EXECUTION_METHODOLOGY + tool_sections,
+        )
+        # {completeness_check}: блок «### 3. ПРОВЕРКА ПОЛНОТЫ» или '' (тумблер).
+        system_content = system_content.replace(
+            '{completeness_check}',
+            _COMPLETENESS_CHECK_SECTION if self._s['completeness_check'] else '',
+        )
+        # {answer_rules}: кастомный answer_style или дефолтные «Правила ответа».
+        system_content = system_content.replace(
+            '{answer_rules}', self._s.get('answer_style') or DEFAULT_ANSWER_STYLE,
+        )
         if self._s['admin_instructions']:
             system_content += (
                 '\n\n## Обязательные инструкции администратора\n'
@@ -842,7 +829,8 @@ class Pipeline:
                 # инжектим nudge и продолжаем цикл вместо ответа
                 unique_docs = {c['doc_id'] for c in all_chunks.values()}
                 if (
-                    self._s['enable_diversity_nudge']
+                    self._s['completeness_check']  # мастер-тумблер (с ним же блок в промпте)
+                    and self._s['enable_diversity_nudge']
                     and not diversity_nudge_sent
                     and search_count >= 2
                     and len(unique_docs) <= 1

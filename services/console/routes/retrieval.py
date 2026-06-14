@@ -17,7 +17,11 @@ import yaml
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from morag.config import DEFAULT_CORPUS_DESCRIPTION, RetrievalConfig
+from morag.config import (
+    DEFAULT_ANSWER_STYLE,
+    DEFAULT_CORPUS_DESCRIPTION,
+    RetrievalConfig,
+)
 from morag.retrieval.tools import REGISTRY
 from services.console.config_io import read_layered, read_local, validate_merged, write_local
 
@@ -226,6 +230,8 @@ class FeaturesIn(BaseModel):
 class PromptsIn(BaseModel):
     admin_instructions: str = ''
     corpus_description: str = ''
+    answer_style: str = ''
+    completeness_check: bool = True
 
 
 class GlossaryIn(BaseModel):
@@ -342,6 +348,8 @@ async def get_retrieval(request: Request) -> dict[str, Any]:
         # дефолтная «роль» агента: console преднаполняет инпут «Описание корпуса»,
         # если corpus_description не задан, и сохраняет только при отличии от дефолта.
         'default_corpus_description': DEFAULT_CORPUS_DESCRIPTION,
+        # дефолтные «Правила ответа»: тот же приём prefill+save-if-changed для answer_style.
+        'default_answer_style': DEFAULT_ANSWER_STYLE,
         'llms': [{'name': llm.get('name'), 'model': llm.get('model'),
                   'capabilities': llm.get('capabilities') or ['text']}
                  for llm in llms],

@@ -1746,6 +1746,22 @@
         <div class="help">Предзаполнено дефолтом — правь как нужно. Очисти поле, чтобы вернуть дефолт.
           <span x-show="setup.retrieval.prompts.corpus_description && setup.retrieval.prompts.corpus_description !== setup.retrieval._corpus_default" style="color:var(--accent)">· изменено относительно дефолта</span>
         </div>
+
+        <label>Правила / стиль ответа (заменяет блок «Правила ответа»)</label>
+        <textarea x-model="setup.retrieval.prompts.answer_style"
+                  @blur="if (!(setup.retrieval.prompts.answer_style || '').trim()) setup.retrieval.prompts.answer_style = setup.retrieval._answer_style_default"
+                  placeholder="Например (подкаст): «Отвечай разговорно, называй спикеров по имени, пересказывай ход обсуждения и мнения. Не цитируй сухими фактами»."
+                  style="min-height:6rem; font-size:0.85rem"></textarea>
+        <div class="help">Дизайн/стиль ответа (кратко/формат/анти-конфабуляция/свежесть). Предзаполнено дефолтом. Очисти поле, чтобы вернуть дефолт.
+          <span x-show="setup.retrieval.prompts.answer_style && setup.retrieval.prompts.answer_style !== setup.retrieval._answer_style_default" style="color:var(--accent)">· изменено относительно дефолта</span>
+        </div>
+
+        <label style="display:flex; align-items:center; gap:0.5rem; margin-top:0.6rem; cursor:pointer">
+          <input type="checkbox" x-model="setup.retrieval.prompts.completeness_check">
+          Проверка полноты (диверсификация по разделам)
+        </label>
+        <div class="help">Блок «проверь, что нашёл из разных разделов» + рантайм-подсказка при ответе из одного места. Для юристов/подкаста, где ответ из одного источника норма, — выключи.</div>
+
         <label>Admin instructions (вклеиваются в system prompt)</label>
         <textarea x-model="setup.retrieval.prompts.admin_instructions"
                   placeholder="Например: «Если информация не найдена — обязательно сделай повторный поиск без section_ids»."
@@ -1844,11 +1860,12 @@
               find_section: { doc_pool: null, descent_threshold: null, top_docs: null },
             },
             features: { enable_diversity_nudge: null },
-            prompts: { admin_instructions: '', corpus_description: '' },
+            prompts: { admin_instructions: '', corpus_description: '', answer_style: '', completeness_check: true },
             tools: [],
             http_timeout: null,
             // UI state
             _corpus_default: '',                  // дефолт «роли» агента (для prefill + save-if-changed)
+            _answer_style_default: '',            // дефолт «правил ответа» (prefill + save-if-changed)
             llms: [],                             // подгружаются с /api/retrieval/config
             loaded: false,
             busy: false,
@@ -2974,9 +2991,13 @@
             // («роль» агента по умолчанию), чтобы юзер видел текущее значение и мог
             // править. Сохраняем потом только при отличии от дефолта (см. saveRetrieval).
             this.setup.retrieval._corpus_default = r.default_corpus_description || '';
+            this.setup.retrieval._answer_style_default = r.default_answer_style || '';
             this.setup.retrieval.prompts = {
               admin_instructions: eff.prompts?.admin_instructions ?? '',
               corpus_description: eff.prompts?.corpus_description || this.setup.retrieval._corpus_default,
+              // правила/стиль ответа: prefill дефолтом, если не задано (как corpus_description)
+              answer_style: eff.prompts?.answer_style || this.setup.retrieval._answer_style_default,
+              completeness_check: eff.prompts?.completeness_check ?? true,
             };
             // Тулы: core всегда первыми (description тюнится), потом optional из
             // effective (legacy glossary/catalog уже мигрированы Pydantic'ом в tools).
@@ -3164,7 +3185,10 @@
             }
             // corpus_description: если равно дефолту — пишем '' (остаётся «не задано»,
             // pipeline использует дефолт). Иначе — кастомный текст.
+            // corpus_description / answer_style: если равно дефолту — пишем '' (остаётся
+            // «не задано», pipeline берёт дефолт). Иначе — кастомный текст.
             const cd = this.setup.retrieval.prompts.corpus_description || '';
+            const as_ = this.setup.retrieval.prompts.answer_style || '';
             const body = {
               agent: this.setup.retrieval.agent,
               reranker: this.setup.retrieval.reranker,
@@ -3173,6 +3197,8 @@
               prompts: {
                 admin_instructions: this.setup.retrieval.prompts.admin_instructions || '',
                 corpus_description: cd === this.setup.retrieval._corpus_default ? '' : cd,
+                answer_style: as_ === this.setup.retrieval._answer_style_default ? '' : as_,
+                completeness_check: this.setup.retrieval.prompts.completeness_check !== false,
               },
               tools,
               http_timeout: this.setup.retrieval.http_timeout,
