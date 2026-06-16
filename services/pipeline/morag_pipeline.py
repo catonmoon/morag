@@ -628,9 +628,9 @@ class Pipeline:
         tool_instances: dict[str, tuple] = {}
         core_overrides = {
             t['type']: t for t in s['tools']
-            if t['type'] in ('search', 'find_section', 'get_doc')
+            if t['type'] in ('search', 'find_section', 'get_doc', 'read_pages')
         }
-        for ctype in ('search', 'find_section', 'get_doc'):
+        for ctype in ('search', 'find_section', 'get_doc', 'read_pages'):
             spec = REGISTRY[ctype]
             cfg = dict(core_overrides.get(ctype) or {'type': ctype})
             if ctype == 'find_section':
@@ -741,11 +741,19 @@ class Pipeline:
         # search получит тот же номер что в первом. Решает проблему конфликтующих
         # цитат при многошаговом ретривале (ранее каждый tool_result начинал с [1]).
         self._doc_numbering: dict[str, int] = {}
+        # retrieval-результаты (search + get_doc) для RRF-бюджета контекста: на запись
+        # {tool_call_id, chunks(ранжированные)}. _budget_agent_context фьюзит их по RRF,
+        # дедупит и держит под agent_context_window целыми чанками. Сброс per-pipe().
+        self._retrieval_entries: list[dict] = []
 
         logger.info('=' * 70)
         logger.info('[agent] query: %r', last_content[:200])
 
         for iteration in range(self._s['max_iterations']):
+            # Удержать накопленные retrieval-результаты в окне агента (RRF-фьюз +
+            # дедуп + вытеснение целыми чанками). Перед каждым LLM-вызовом → и
+            # финальный ответ (идёт после) получает уже забюджетированный контекст.
+            self._budget_agent_context(agent_messages)
             # Вызов LLM с tools
             response = self._llm_call_with_tools(agent_messages)
             message = response['choices'][0]['message']
@@ -870,6 +878,10 @@ class Pipeline:
                     'tool_call_id': call_id,
                     'content': result,
                 })
+                # search / get_doc отдают релевантные чанки → в RRF-пул для бюджета
+                # контекста (дедуп + вытеснение целыми чанками на следующей итерации).
+                if inst_type in ('search', 'get_doc') and chunks:
+                    self._retrieval_entries.append({'tool_call_id': call_id, 'chunks': chunks})
 
                 # После первого abbreviations-lookup'а (глоссарий) инжектим
                 # напоминание о формате «Полное название (АББР)» — sysprompt не
@@ -972,6 +984,8 @@ class Pipeline:
             return self._tool_find_section(args['query'])
         elif name == 'get_doc':
             return self._tool_get_doc(args['doc_id'], args['query'])
+        elif name == 'read_pages':
+            return self._tool_read_pages(args.get('refs') or [])
         # Инстанс-тулы из реестра (lookup/catalog/…) — handler из ToolSpec,
         # cfg инстанса передаётся в handler (у каждого lookup — свои doc_ids).
         inst = self._tool_instances.get(name)
@@ -1143,13 +1157,24 @@ class Pipeline:
                     i, did, len(dcs), dcs[0].get('source_type'), max(c['score'] for c in dcs),
                 )
 
+        return self._render_chunks_block(chunks), chunks
+
+    def _render_chunks_block(self, chunks: list[dict], header: str | None = None) -> str:
+        """Рендер retrieval-результата из чанков: группировка по документу,
+        блок `[N] Документ:` + путь/мета + (контекст+текст) каждого чанка. Единый
+        формат для search/get_doc/read_pages и для пере-рендера при бюджет-проходе.
+        `header=None` → «Найдено N документов:»; явный header (в т.ч. '') перебивает.
+        `[N]` стабильна (`_global_doc_id`). Строки не режутся."""
+        by_doc: dict[str, list[dict]] = {}
+        for c in chunks:
+            by_doc.setdefault(c['doc_id'], []).append(c)
         parts = []
         for doc_id, doc_chunks in by_doc.items():
             n = self._global_doc_id(doc_id)
-            doc_chunks.sort(key=lambda x: x['order'])
-            path_display = ' | '.join(doc_chunks[0]['path']) if doc_chunks[0]['path'] else doc_id
-            doc_name = self._get_doc_title(doc_id)
-            lines = [f'[{n}] Документ: {doc_name}', f'Путь: {path_display}']
+            doc_chunks = sorted(doc_chunks, key=lambda x: x.get('order', 0))
+            path = doc_chunks[0].get('path')
+            path_display = ' | '.join(path) if path else doc_id
+            lines = [f'[{n}] Документ: {self._get_doc_title(doc_id)}', f'Путь: {path_display}']
             updated_at = doc_chunks[0].get('updated_at', '')
             if updated_at:
                 lines.append(f'Обновлён: {updated_at}')
@@ -1160,11 +1185,13 @@ class Pipeline:
             for c in doc_chunks:
                 if c.get('context'):
                     lines.append(f'Контекст: {c["context"]}')
-                lines.append(c['text'])
+                lines.append(c.get('text', ''))
                 lines.append('')
             parts.append('\n'.join(lines))
-
-        return f'Найдено {_plural(len(by_doc), "документ", "документа", "документов")}:\n\n' + '\n\n---\n\n'.join(parts), chunks
+        if header is None:
+            header = f'Найдено {_plural(len(by_doc), "документ", "документа", "документов")}:'
+        prefix = (header + '\n\n') if header else ''
+        return prefix + '\n\n---\n\n'.join(parts)
 
     # ── Section-level retrieval (find_section) ────────────────────────────────
 
@@ -1231,6 +1258,87 @@ class Pipeline:
 
     # ── Get-doc (один документ с rerank по чанкам) ────────────────────────────
 
+    def _count_tokens(self, text: str) -> int:
+        tc = getattr(self, '_token_counter', None)
+        if tc is None:
+            from morag.indexing.token_counter import TiktokenCounter
+            tc = self._token_counter = TiktokenCounter()
+        return tc.count(text or '')
+
+    def _budget_agent_context(self, agent_messages: list[dict]) -> None:
+        """Удержать накопленные retrieval-результаты (search + get_doc) в окне агента.
+
+        RRF-фьюз чанков по всем поискам (`score = Σ 1/(K+rank)`), дедуп по `chunk_id`
+        (чанк владеется ПЕРВЫМ поиском, где появился — текст показывается один раз),
+        набор ЦЕЛЫМИ чанками по убыванию fused-score под бюджет, пере-рендер
+        retrieval tool-сообщений из выживших. Строки НЕ режутся (как reranker._fit_to_budget).
+        Свежесть как фактор — отложена (TODO «избирательная свежесть»)."""
+        entries = self._retrieval_entries
+        if not entries:
+            return
+        ctx = self._s.get('agent_context_window') or 32768
+        output_reserve = max(
+            self._s.get('agent_max_tokens') or 0,
+            self._s.get('agent_answer_max_tokens') or 0,
+            4096,
+        )
+        safety = 3000  # citation-таблица + финальная инструкция + chat-overhead
+
+        # 1) RRF-пул + ownership (первый поиск владеет чанком — дедуп)
+        K = 60
+        pool: dict[str, dict] = {}
+        for ei, entry in enumerate(entries):
+            for rank, c in enumerate(entry['chunks']):
+                cid = c.get('chunk_id') or f'_nocid:{ei}:{rank}'
+                p = pool.get(cid)
+                if p is None:
+                    p = pool[cid] = {'chunk': c, 'score': 0.0, 'owner': ei}
+                p['score'] += 1.0 / (K + rank)
+
+        # 2) бюджет на retrieval-контент = окно − (не-retrieval сообщения) − ответ − safety
+        entry_ids = {e['tool_call_id'] for e in entries}
+        nonretrieval = sum(
+            self._count_tokens(m.get('content') or '')
+            for m in agent_messages
+            if not (m.get('role') == 'tool' and m.get('tool_call_id') in entry_ids)
+        )
+        budget = ctx - nonretrieval - output_reserve - safety
+
+        # 3) набор целыми чанками по убыванию fused-score
+        survivors: dict[int, list[dict]] = {}
+        used = 0
+        for p in sorted(pool.values(), key=lambda x: x['score'], reverse=True):
+            c = p['chunk']
+            cost = self._count_tokens((c.get('context') or '') + '\n' + (c.get('text') or '')) + 60
+            if survivors and used + cost > budget:
+                continue  # целый чанк не лезет — пропускаем (но ≥1 чанк всегда оставляем)
+            survivors.setdefault(p['owner'], []).append(c)
+            used += cost
+
+        # 4) пере-рендер каждого retrieval tool-сообщения из выживших owned-чанков
+        id_to_msg = {
+            m.get('tool_call_id'): m for m in agent_messages if m.get('role') == 'tool'
+        }
+        dropped = 0
+        for ei, entry in enumerate(entries):
+            msg = id_to_msg.get(entry['tool_call_id'])
+            if msg is None:
+                continue
+            surv = survivors.get(ei, [])
+            dropped += len(entry['chunks']) - len(surv)
+            if surv:
+                msg['content'] = self._render_chunks_block(surv)
+            else:
+                msg['content'] = (
+                    '(результаты этого поиска вытеснены как менее релевантные — '
+                    'более релевантные документы см. в других результатах поиска)'
+                )
+        if dropped:
+            logger.info(
+                '[ctx-budget] pool=%d chunks, kept=%d, dropped=%d (budget=%d, used=%d tokens)',
+                len(pool), len(pool) - dropped, dropped, budget, used,
+            )
+
     def _tool_get_doc(self, doc_id: str, query: str) -> tuple[str, list[dict]]:
         """Получить релевантные фрагменты одного документа.
 
@@ -1289,6 +1397,125 @@ class Pipeline:
             lines.append(c.get('text', ''))
             lines.append('')
         return '\n'.join(lines), full_chunks
+
+    def _source_host_map(self) -> dict:
+        """host (из `url` источника) → (kind, name) для confluence/jira источников.
+        Резолв URL → инстанс по хосту (надёжнее угадывания имени; multi-instance-safe)."""
+        from urllib.parse import urlparse
+        out: dict[str, tuple[str, str]] = {}
+        for s in (self._config.sources if self._config else []):
+            kind = getattr(s, 'kind', '')
+            url = getattr(s, 'url', None)
+            if kind in ('confluence', 'jira') and url:
+                host = urlparse(url if '://' in url else 'https://' + url).netloc
+                if host:
+                    out[host] = (kind, getattr(s, 'name', ''))
+        return out
+
+    def _resolve_ref(self, ref: str) -> str | None:
+        """Ссылка/ID → `doc_id` (`kind:name:external_id`) или None если не наш/не распознан.
+
+        Поддержка: готовый doc_id; полный URL (хост матчится против `url` источников
+        конфига → инстанс, pageId из query/пути); голый числовой ID (только при ровно
+        одном confluence-источнике — иначе неоднозначно)."""
+        ref = (ref or '').strip()
+        if not ref:
+            return None
+        parts = ref.split(':')
+        if len(parts) >= 3 and parts[0] in ('confluence', 'jira', 'local'):
+            return ref  # уже doc_id
+        if '/' in ref or '://' in ref:
+            from urllib.parse import urlparse
+            u = urlparse(ref if '://' in ref else 'https://' + ref)
+            inst = self._source_host_map().get(u.netloc)
+            if inst is None:
+                return None  # не наш хост
+            m = re.search(r'pageId=(\d+)', ref) or re.search(r'/(\d{4,})(?:[/?#]|$)', ref)
+            if not m:
+                return None
+            return f'{inst[0]}:{inst[1]}:{m.group(1)}'
+        if ref.isdigit():
+            confs = [s for s in (self._config.sources if self._config else [])
+                     if getattr(s, 'kind', '') == 'confluence']
+            if len(confs) == 1:
+                return f'confluence:{getattr(confs[0], "name", "")}:{ref}'
+        return None
+
+    def _tool_read_pages(self, refs: list[str]) -> tuple[str, list[dict]]:
+        """Загрузить указанные страницы ЦЕЛИКОМ (по URL/ID), чанки по `order`.
+
+        Фаза 1: только из индекса (URL → doc_id по хосту источника → все чанки дока).
+        Контент PINNED — НЕ кладём в `_retrieval_entries`, поэтому бюджет-проход его не
+        вытесняет (считается фиксированным overhead). Кап (option A): грузим целые
+        документы пока влезает в ~60% окна, не поместившиеся честно перечисляем."""
+        # grok иногда шлёт массив как JSON-СТРОКУ ("[\"url\", ...]") или одну ссылку
+        # строкой/через перенос — нормализуем в list[str], иначе итерируем по символам.
+        if isinstance(refs, str):
+            try:
+                parsed = json.loads(refs)
+                refs = parsed if isinstance(parsed, list) else [refs]
+            except Exception:  # noqa: BLE001
+                refs = [r.strip() for r in re.split(r'[\s,]+', refs) if r.strip()]
+        refs = [str(r).strip() for r in (refs or []) if str(r).strip()]
+        if not refs:
+            return 'Не передано ни одной ссылки.', []
+        read_budget = int((self._s.get('agent_context_window') or 32768) * 0.6)
+        fitted_chunks: list[dict] = []
+        loaded: list[str] = []
+        not_resolved: list[str] = []
+        not_indexed: list[str] = []
+        not_fit: list[str] = []
+        used = 0
+        for ref in refs:
+            doc_id = self._resolve_ref(ref)
+            if doc_id is None:
+                not_resolved.append(ref)
+                continue
+            doc = self._run(self._doc_repo.get_by_id(doc_id))
+            if doc is None:
+                not_indexed.append(ref)  # Фаза 2: живая выкачка если источник в конфиге
+                continue
+            lite = self._run(self._searcher.fetch_doc_chunks_lite(doc_id))
+            orders = [c['order'] for c in lite]
+            chunks = (self._run(self._searcher.fetch_chunks_by_orders(doc_id, orders))
+                      if orders else [])
+            if not chunks:
+                not_indexed.append(ref)
+                continue
+            cost = self._count_tokens(self._render_chunks_block(chunks, header=''))
+            if fitted_chunks and used + cost > read_budget:
+                not_fit.append(self._get_doc_title(doc_id) or doc_id)
+                continue
+            fitted_chunks.extend(chunks)
+            used += cost
+            loaded.append(self._get_doc_title(doc_id) or doc_id)
+
+        if not fitted_chunks:
+            note = 'Не удалось загрузить ни одной страницы.'
+            if not_resolved:
+                note += f' Не распознаны / не наш хост: {len(not_resolved)}.'
+            if not_indexed:
+                note += f' Нет в индексе: {len(not_indexed)} (живую выкачку пока не делаем).'
+            return note, []
+
+        body = (
+            f'Загружены указанные страницы целиком ({len(loaded)}), по порядку — '
+            'анализируй/группируй ИМЕННО по этому набору:\n\n'
+            + self._render_chunks_block(fitted_chunks, header='')
+        )
+        notes = []
+        if not_fit:
+            notes.append(
+                f'⚠️ Не поместились в контекст ({len(not_fit)}): ' + ', '.join(not_fit)
+                + '. Обработаны первые; для полного охвата разбей набор на части.'
+            )
+        if not_indexed:
+            notes.append(f'⚠️ Нет в индексе ({len(not_indexed)}) — живую выкачку пока не делаем.')
+        if not_resolved:
+            notes.append(f'⚠️ Не распознаны или не наш хост ({len(not_resolved)}).')
+        if notes:
+            body += '\n\n---\n' + '\n'.join(notes)
+        return body, fitted_chunks
 
     # ── Reranker ──────────────────────────────────────────────────────────────
 
