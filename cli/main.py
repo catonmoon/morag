@@ -140,6 +140,42 @@ def _build_llm_clients(llms: list) -> dict[str, LLMClient]:
     return clients
 
 
+def build_source_for_instance(
+    config: Config,
+    kind: str,
+    name: str,
+    llm_clients: dict[str, LLMClient] | None = None,
+):
+    """Построить Source для ОДНОГО инстанса `(kind, name)` из конфига — для одиночного
+    `load_one` (live-fetch read_pages, Фаза 2). Без оркестрации `cmd_index`: jira-карты
+    (`issue_map`/`parent_ids_map`) нужны только для link-extraction при полной индексации,
+    для `load_one(key)` — пусты. Confluence `vision_client` берётся из `llm_clients`
+    (опционален: None = без описания картинок). Возвращает Source или None если инстанса
+    нет в конфиге / kind не поддержан."""
+    src_cfg = next(
+        (s for s in config.sources if s.kind == kind and s.name == name), None
+    )
+    if src_cfg is None:
+        return None
+    idx = config.indexing
+    if kind == 'confluence':
+        vision = (
+            llm_clients.get(idx.vision)
+            if (idx and llm_clients and idx.vision) else None
+        )
+        return ConfluenceSource(
+            src_cfg,
+            vision_client=vision,
+            vision_max_tokens=idx.vision_max_tokens if idx else None,
+        )
+    if kind == 'jira':
+        return JiraSource(src_cfg, {}, {})
+    if kind == 'local':
+        return LocalDocumentSource(root=src_cfg.path, pdf_converter=None, name=src_cfg.name)
+    logger.warning('build_source_for_instance: неподдержанный kind=%s', kind)
+    return None
+
+
 def _make_pdf_converter(
     config: Config,
     vision_client: LLMClient | None,
@@ -203,6 +239,12 @@ class _StopReq(BaseModel):
 
 class _ReindexReq(BaseModel):
     scope: str = 'all'  # 'all' или имя источника (config.sources[].name)
+
+
+class _FetchPageReq(BaseModel):
+    kind: str            # 'confluence' | 'jira' | 'local'
+    name: str            # имя инстанса источника (config.sources[].name)
+    external_id: str     # внешний ID страницы (Confluence pageId / Jira issue key)
 
 
 def _make_status_reporter() -> StatusReporter:
@@ -970,6 +1012,41 @@ async def cmd_serve(config_path: str) -> None:
             raise HTTPException(status_code=409, detail=str(e)) from e
         except SetupIncomplete as e:
             raise HTTPException(status_code=412, detail={'blockers': e.blockers}) from e
+
+    @app.post('/control/fetch-page')
+    async def _fetch_page(req: _FetchPageReq):
+        """Live-fetch одной страницы (read_pages Фаза 2): строит Source инстанса и зовёт
+        `load_one` → markdown. Read-only, ВНЕ индекс-Lock (не блокируется текущей индексацией).
+        Для НЕ-индексированных страниц (особенно Jira — индексятся только прикреплённые)."""
+        try:
+            cfg = load_config(config_path)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f'config error: {e}') from e
+        clients = _build_llm_clients(cfg.llms) if cfg.llms else {}
+        src = build_source_for_instance(cfg, req.kind, req.name, clients)
+        if src is None:
+            raise HTTPException(status_code=404, detail=f'нет источника {req.kind}:{req.name}')
+        # JiraSource.load_one гейтит по issue_map (link-extraction-флоу полной индексации).
+        # Для standalone live-fetch регистрируем запрошенный ключ с пустыми путями —
+        # `_fetch_full` дальше тянет issue из Atlassian, doc_paths нужны лишь для display.
+        if req.kind == 'jira' and hasattr(src, '_issue_map'):
+            src._issue_map[req.external_id] = []
+        doc_id = f'{req.kind}:{req.name}:{req.external_id}'
+        try:
+            doc = await src.load_one(doc_id)
+        except Exception as e:  # noqa: BLE001 — фетч/конвертация упали → 502 наверх
+            logger.warning('fetch-page %s failed: %s', doc_id, e)
+            raise HTTPException(status_code=502, detail=f'fetch failed: {e}') from e
+        if doc is None:
+            raise HTTPException(status_code=404, detail=f'страница не найдена: {doc_id}')
+        return {
+            'ok': True,
+            'doc_id': doc.id,
+            'title': doc.title,
+            'text': doc.text,
+            'url': doc.url,
+            'updated_at': doc.updated_at.isoformat() if doc.updated_at else None,
+        }
 
     @app.post('/control/reload-schedule')
     async def _reload_schedule():

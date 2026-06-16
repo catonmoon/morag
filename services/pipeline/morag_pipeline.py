@@ -12,6 +12,7 @@ import os
 import re
 from typing import Any, Coroutine, Dict, Generator, Iterator, List, TypeVar, Union
 
+import httpx
 from pydantic import BaseModel
 from qdrant_client import AsyncQdrantClient
 from markdown_it import MarkdownIt
@@ -1174,7 +1175,9 @@ class Pipeline:
             doc_chunks = sorted(doc_chunks, key=lambda x: x.get('order', 0))
             path = doc_chunks[0].get('path')
             path_display = ' | '.join(path) if path else doc_id
-            lines = [f'[{n}] Документ: {self._get_doc_title(doc_id)}', f'Путь: {path_display}']
+            # title из чанка (live-fetch доки не в индексе → _get_doc_title их не знает)
+            title = doc_chunks[0].get('title') or self._get_doc_title(doc_id)
+            lines = [f'[{n}] Документ: {title}', f'Путь: {path_display}']
             updated_at = doc_chunks[0].get('updated_at', '')
             if updated_at:
                 lines.append(f'Обновлён: {updated_at}')
@@ -1430,16 +1433,45 @@ class Pipeline:
             inst = self._source_host_map().get(u.netloc)
             if inst is None:
                 return None  # не наш хост
-            m = re.search(r'pageId=(\d+)', ref) or re.search(r'/(\d{4,})(?:[/?#]|$)', ref)
+            kind, name = inst
+            if kind == 'jira':
+                # Jira-ключ (PROJ-123), не числовой pageId
+                m = re.search(r'/browse/([A-Z][A-Z0-9]+-\d+)', ref) or re.search(r'([A-Z][A-Z0-9]+-\d+)', ref)
+            else:
+                m = re.search(r'pageId=(\d+)', ref) or re.search(r'/(\d{4,})(?:[/?#]|$)', ref)
             if not m:
                 return None
-            return f'{inst[0]}:{inst[1]}:{m.group(1)}'
+            return f'{kind}:{name}:{m.group(1)}'
         if ref.isdigit():
             confs = [s for s in (self._config.sources if self._config else [])
                      if getattr(s, 'kind', '') == 'confluence']
             if len(confs) == 1:
                 return f'confluence:{getattr(confs[0], "name", "")}:{ref}'
         return None
+
+    def _fetch_page_live(self, kind: str, name: str, external_id: str) -> dict | None:
+        """Live-fetch страницы через control-plane индексера (read_pages Фаза 2):
+        `POST /control/fetch-page` → markdown. Graceful None если индексер недоступен /
+        страница не найдена. URL из env `MORAG_INDEXER_URL` (как у консоли)."""
+        base = os.getenv('MORAG_INDEXER_URL', 'http://morag-indexer:9090').rstrip('/')
+        try:
+            r = httpx.post(
+                base + '/control/fetch-page',
+                json={'kind': kind, 'name': name, 'external_id': external_id},
+                timeout=float(self._s.get('http_timeout') or 120),
+            )
+        except Exception as e:  # noqa: BLE001 — индексер недоступен → graceful
+            logger.warning('[read_pages] live-fetch %s:%s:%s — connection error: %s',
+                           kind, name, external_id, e)
+            return None
+        if r.status_code != 200:
+            logger.info('[read_pages] live-fetch %s:%s:%s → HTTP %d',
+                        kind, name, external_id, r.status_code)
+            return None
+        try:
+            return r.json()
+        except Exception:  # noqa: BLE001
+            return None
 
     def _tool_read_pages(self, refs: list[str]) -> tuple[str, list[dict]]:
         """Загрузить указанные страницы ЦЕЛИКОМ (по URL/ID), чанки по `order`.
@@ -1472,30 +1504,44 @@ class Pipeline:
                 not_resolved.append(ref)
                 continue
             doc = self._run(self._doc_repo.get_by_id(doc_id))
-            if doc is None:
-                not_indexed.append(ref)  # Фаза 2: живая выкачка если источник в конфиге
-                continue
-            lite = self._run(self._searcher.fetch_doc_chunks_lite(doc_id))
-            orders = [c['order'] for c in lite]
-            chunks = (self._run(self._searcher.fetch_chunks_by_orders(doc_id, orders))
-                      if orders else [])
+            if doc is not None:
+                # В ИНДЕКСЕ → все чанки документа по order (полнота, без рерэнка)
+                lite = self._run(self._searcher.fetch_doc_chunks_lite(doc_id))
+                orders = [c['order'] for c in lite]
+                chunks = (self._run(self._searcher.fetch_chunks_by_orders(doc_id, orders))
+                          if orders else [])
+                title = self._get_doc_title(doc_id) or doc_id
+            else:
+                # НЕ В ИНДЕКСЕ → live-fetch через индексер (Фаза 2). MD → синтетический «чанк».
+                kind, name, ext = (doc_id.split(':', 2) + ['', '', ''])[:3]
+                live = self._fetch_page_live(kind, name, ext)
+                if not (live and live.get('text')):
+                    not_indexed.append(ref)
+                    continue
+                title = live.get('title') or doc_id
+                chunks = [{
+                    'doc_id': doc_id, 'order': 0, 'text': live['text'],
+                    'chunk_id': f'live:{doc_id}', 'title': title, 'path': [title],
+                    'updated_at': live.get('updated_at') or '', 'context': '',
+                    'url': live.get('url'),
+                }]
             if not chunks:
                 not_indexed.append(ref)
                 continue
             cost = self._count_tokens(self._render_chunks_block(chunks, header=''))
             if fitted_chunks and used + cost > read_budget:
-                not_fit.append(self._get_doc_title(doc_id) or doc_id)
+                not_fit.append(title)
                 continue
             fitted_chunks.extend(chunks)
             used += cost
-            loaded.append(self._get_doc_title(doc_id) or doc_id)
+            loaded.append(title)
 
         if not fitted_chunks:
             note = 'Не удалось загрузить ни одной страницы.'
             if not_resolved:
                 note += f' Не распознаны / не наш хост: {len(not_resolved)}.'
             if not_indexed:
-                note += f' Нет в индексе: {len(not_indexed)} (живую выкачку пока не делаем).'
+                note += f' Не в индексе и не удалось выкачать live: {len(not_indexed)}.'
             return note, []
 
         body = (
@@ -1510,7 +1556,7 @@ class Pipeline:
                 + '. Обработаны первые; для полного охвата разбей набор на части.'
             )
         if not_indexed:
-            notes.append(f'⚠️ Нет в индексе ({len(not_indexed)}) — живую выкачку пока не делаем.')
+            notes.append(f'⚠️ Не в индексе и не удалось выкачать live ({len(not_indexed)}).')
         if not_resolved:
             notes.append(f'⚠️ Не распознаны или не наш хост ({len(not_resolved)}).')
         if notes:
