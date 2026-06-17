@@ -181,6 +181,11 @@ class JiraSource(Source):
 
     async def _fetch_full(self, issue_key: str, doc_paths: list[str]) -> Document | None:
         """Получить полную задачу и сконвертировать в Document."""
+        # Прайминг id→display_name кастомных полей. Идемпотентно (кэш `_field_names`).
+        # Нужно здесь, а не только в get_metadata: live-fetch (control-plane /fetch-page)
+        # зовёт load_one напрямую, минуя get_metadata — без этого кастомные поля
+        # рендерятся сырыми `customfield_NNNNN` вместо человекочитаемых имён.
+        await self._ensure_field_names()
         if self._auto:
             fields_to_request = '*all'
         elif self._custom_fields:

@@ -629,9 +629,9 @@ class Pipeline:
         tool_instances: dict[str, tuple] = {}
         core_overrides = {
             t['type']: t for t in s['tools']
-            if t['type'] in ('search', 'find_section', 'get_doc', 'read_pages')
+            if t['type'] in ('search', 'find_section', 'get_doc')
         }
-        for ctype in ('search', 'find_section', 'get_doc', 'read_pages'):
+        for ctype in ('search', 'find_section', 'get_doc'):
             spec = REGISTRY[ctype]
             cfg = dict(core_overrides.get(ctype) or {'type': ctype})
             if ctype == 'find_section':
@@ -742,6 +742,9 @@ class Pipeline:
         # search получит тот же номер что в первом. Решает проблему конфликтующих
         # цитат при многошаговом ретривале (ранее каждый tool_result начинал с [1]).
         self._doc_numbering: dict[str, int] = {}
+        # title'ы live-fetched доков (auto-fetch): doc_id → человекочитаемый title. Не в
+        # индексе → _get_doc_title берёт имя отсюда, иначе цитата/статус = doc_id. Per-pipe().
+        self._live_titles: dict[str, str] = {}
         # retrieval-результаты (search + get_doc) для RRF-бюджета контекста: на запись
         # {tool_call_id, chunks(ранжированные)}. _budget_agent_context фьюзит их по RRF,
         # дедупит и держит под agent_context_window целыми чанками. Сброс per-pipe().
@@ -749,6 +752,58 @@ class Pipeline:
 
         logger.info('=' * 70)
         logger.info('[agent] query: %r', last_content[:200])
+
+        # 4.0 Авто-fetch ссылок из вопроса — ДЕТЕРМИНИРОВАННО, до агентского цикла.
+        #     Требование: любая ссылка на источник из конфига ОБЯЗАТЕЛЬНО загружается и
+        #     учитывается — раньше это решал агент-тул и при temp уводило (то качал, то
+        #     искал id в базе), теперь детерминированно тут. Контент PINNED (в
+        #     _retrieval_entries не кладём); чанки → в all_chunks для цитат. Не загруженное
+        #     в контекст — честно в статус (#2).
+        auto_refs = self._extract_refs(last_content)
+        if auto_refs:
+            logger.info('[auto-fetch] refs from question: %s', auto_refs)
+            yield self._emit_status(
+                '📑', f'в вопросе ссылки ({len(auto_refs)}) — загружаю страницы целиком', False)
+            fr = self._fetch_refs(auto_refs)
+            if fr['chunks']:
+                for c in fr['chunks']:
+                    all_chunks[c['chunk_id']] = c
+                agent_messages.append({
+                    'role': 'user',
+                    'content': (
+                        'СИСТЕМА (не от пользователя): из вопроса распознаны ссылки на страницы '
+                        'базы — они уже ЗАГРУЖЕНЫ целиком ниже. ОБЯЗАТЕЛЬНО учти их содержимое при '
+                        'ответе. Если для ответа нужно ещё что-то (сравнить с темой/сущностью, '
+                        'которой в этих страницах нет) — ищи обычными инструментами.\n\n'
+                        + self._render_chunks_block(fr['chunks'], header='')
+                    ),
+                })
+                names = list(dict.fromkeys(
+                    (c.get('title') or self._get_doc_title(c['doc_id'])) for c in fr['chunks']))
+                preview = ', '.join(f'"{n}"' for n in names[:2])
+                if len(names) > 2:
+                    preview += f' и ещё {len(names) - 2}'
+                yield self._emit_status(
+                    '→',
+                    f'загружено {_plural(len(names), "документ", "документа", "документов")}: {preview}',
+                    False,
+                )
+                # Честно: загружено, но из ИНДЕКСА (live-fetch не отдал) → может быть не свежим.
+                if fr['from_index']:
+                    yield self._emit_status(
+                        'ℹ️', 'из индекса (live-fetch не отдал, версия может быть не самой '
+                        'свежей): ' + ', '.join(fr['from_index']), False)
+            # Требование #2: честно про не загруженное в контекст.
+            if fr['not_fit']:
+                yield self._emit_status(
+                    '⚠️', 'не поместились в контекст: ' + ', '.join(fr['not_fit']), False)
+            if fr['not_indexed']:
+                yield self._emit_status(
+                    '⚠️',
+                    'не удалось загрузить (нет в индексе и live-fetch не отдал): '
+                    f'{len(fr["not_indexed"])}',
+                    False,
+                )
 
         for iteration in range(self._s['max_iterations']):
             # Удержать накопленные retrieval-результаты в окне агента (RRF-фьюз +
@@ -985,8 +1040,6 @@ class Pipeline:
             return self._tool_find_section(args['query'])
         elif name == 'get_doc':
             return self._tool_get_doc(args['doc_id'], args['query'])
-        elif name == 'read_pages':
-            return self._tool_read_pages(args.get('refs') or [])
         # Инстанс-тулы из реестра (lookup/catalog/…) — handler из ToolSpec,
         # cfg инстанса передаётся в handler (у каждого lookup — свои doc_ids).
         inst = self._tool_instances.get(name)
@@ -1163,7 +1216,7 @@ class Pipeline:
     def _render_chunks_block(self, chunks: list[dict], header: str | None = None) -> str:
         """Рендер retrieval-результата из чанков: группировка по документу,
         блок `[N] Документ:` + путь/мета + (контекст+текст) каждого чанка. Единый
-        формат для search/get_doc/read_pages и для пере-рендера при бюджет-проходе.
+        формат для search/get_doc/авто-fetch и для пере-рендера при бюджет-проходе.
         `header=None` → «Найдено N документов:»; явный header (в т.ч. '') перебивает.
         `[N]` стабильна (`_global_doc_id`). Строки не режутся."""
         by_doc: dict[str, list[dict]] = {}
@@ -1450,7 +1503,7 @@ class Pipeline:
         return None
 
     def _fetch_page_live(self, kind: str, name: str, external_id: str) -> dict | None:
-        """Live-fetch страницы через control-plane индексера (read_pages Фаза 2):
+        """Live-fetch непроиндексированной страницы через control-plane индексера:
         `POST /control/fetch-page` → markdown. Graceful None если индексер недоступен /
         страница не найдена. URL из env `MORAG_INDEXER_URL` (как у консоли)."""
         base = os.getenv('MORAG_INDEXER_URL', 'http://morag-indexer:9090').rstrip('/')
@@ -1461,11 +1514,11 @@ class Pipeline:
                 timeout=float(self._s.get('http_timeout') or 120),
             )
         except Exception as e:  # noqa: BLE001 — индексер недоступен → graceful
-            logger.warning('[read_pages] live-fetch %s:%s:%s — connection error: %s',
+            logger.warning('[auto-fetch] live-fetch %s:%s:%s — connection error: %s',
                            kind, name, external_id, e)
             return None
         if r.status_code != 200:
-            logger.info('[read_pages] live-fetch %s:%s:%s → HTTP %d',
+            logger.info('[auto-fetch] live-fetch %s:%s:%s → HTTP %d',
                         kind, name, external_id, r.status_code)
             return None
         try:
@@ -1473,13 +1526,34 @@ class Pipeline:
         except Exception:  # noqa: BLE001
             return None
 
-    def _tool_read_pages(self, refs: list[str]) -> tuple[str, list[dict]]:
-        """Загрузить указанные страницы ЦЕЛИКОМ (по URL/ID), чанки по `order`.
+    _REF_RE = re.compile(r'https?://[^\s<>"\')\]]+')
+    _DOCID_RE = re.compile(r'\b(?:confluence|jira|local):[a-z0-9_-]+:[^\s<>"\')\]]+')
 
-        Фаза 1: только из индекса (URL → doc_id по хосту источника → все чанки дока).
-        Контент PINNED — НЕ кладём в `_retrieval_entries`, поэтому бюджет-проход его не
-        вытесняет (считается фиксированным overhead). Кап (option A): грузим целые
-        документы пока влезает в ~60% окна, не поместившиеся честно перечисляем."""
+    def _extract_refs(self, text: str) -> list[str]:
+        """Вычленить из текста вопроса ссылки/doc_id, КОТОРЫЕ резолвятся в источник
+        из конфига (требование #1: качаем только наши источники). Уникальные, в
+        порядке появления. Не-наши URL и произвольные числа игнорируются молча."""
+        if not text:
+            return []
+        cands = self._REF_RE.findall(text) + self._DOCID_RE.findall(text)
+        out: list[str] = []
+        seen: set[str] = set()
+        for c in cands:
+            c = c.rstrip('.,;')  # хвостовая пунктуация предложения
+            if c in seen:
+                continue
+            if self._resolve_ref(c) is not None:  # только источники из конфига
+                seen.add(c)
+                out.append(c)
+        return out
+
+    def _fetch_refs(self, refs: list[str] | str) -> dict:
+        """Резолв + загрузка набора ссылок ЦЕЛИКОМ (по URL/ID, только config-источники).
+        Движок авто-fetch ссылок из вопроса (детерминированно в `pipe()`) — возвращает
+        структурно, чтобы вызыватель сам оформил статус/контекст:
+          {chunks, loaded:[title], not_resolved:[ref], not_indexed:[ref], not_fit:[title]}.
+        В индексе → все чанки дока по order; нет в индексе → live-fetch через индексер
+        (Фаза 2). Кап ≈ 60% окна агента; не влезшие документы — в `not_fit`."""
         # grok иногда шлёт массив как JSON-СТРОКУ ("[\"url\", ...]") или одну ссылку
         # строкой/через перенос — нормализуем в list[str], иначе итерируем по символам.
         if isinstance(refs, str):
@@ -1489,42 +1563,45 @@ class Pipeline:
             except Exception:  # noqa: BLE001
                 refs = [r.strip() for r in re.split(r'[\s,]+', refs) if r.strip()]
         refs = [str(r).strip() for r in (refs or []) if str(r).strip()]
-        if not refs:
-            return 'Не передано ни одной ссылки.', []
         read_budget = int((self._s.get('agent_context_window') or 32768) * 0.6)
         fitted_chunks: list[dict] = []
         loaded: list[str] = []
         not_resolved: list[str] = []
         not_indexed: list[str] = []
         not_fit: list[str] = []
+        from_index: list[str] = []  # live-fetch не отдал → отдали индекс (может быть не свежим)
         used = 0
         for ref in refs:
             doc_id = self._resolve_ref(ref)
             if doc_id is None:
                 not_resolved.append(ref)
                 continue
-            doc = self._run(self._doc_repo.get_by_id(doc_id))
-            if doc is not None:
-                # В ИНДЕКСЕ → все чанки документа по order (полнота, без рерэнка)
-                lite = self._run(self._searcher.fetch_doc_chunks_lite(doc_id))
-                orders = [c['order'] for c in lite]
-                chunks = (self._run(self._searcher.fetch_chunks_by_orders(doc_id, orders))
-                          if orders else [])
-                title = self._get_doc_title(doc_id) or doc_id
-            else:
-                # НЕ В ИНДЕКСЕ → live-fetch через индексер (Фаза 2). MD → синтетический «чанк».
-                kind, name, ext = (doc_id.split(':', 2) + ['', '', ''])[:3]
-                live = self._fetch_page_live(kind, name, ext)
-                if not (live and live.get('text')):
-                    not_indexed.append(ref)
-                    continue
+            # СНАЧАЛА live-fetch — явная ссылка должна быть максимально СВЕЖЕЙ (индексная
+            # версия устаревает: cron индексит редко). Индекс — только fallback ниже.
+            kind, name, ext = (doc_id.split(':', 2) + ['', '', ''])[:3]
+            live = self._fetch_page_live(kind, name, ext)
+            if live and live.get('text'):
                 title = live.get('title') or doc_id
+                self._live_titles[doc_id] = title  # цитаты/статус берут имя отсюда
                 chunks = [{
                     'doc_id': doc_id, 'order': 0, 'text': live['text'],
                     'chunk_id': f'live:{doc_id}', 'title': title, 'path': [title],
                     'updated_at': live.get('updated_at') or '', 'context': '',
                     'url': live.get('url'),
                 }]
+            else:
+                # live-fetch не отдал (индексер рестартует / API моргнул) → FALLBACK на
+                # индекс, если страница там есть: не свежая, но лучше «не удалось».
+                doc = self._run(self._doc_repo.get_by_id(doc_id))
+                if doc is None:
+                    not_indexed.append(ref)
+                    continue
+                lite = self._run(self._searcher.fetch_doc_chunks_lite(doc_id))
+                orders = [c['order'] for c in lite]
+                chunks = (self._run(self._searcher.fetch_chunks_by_orders(doc_id, orders))
+                          if orders else [])
+                title = self._get_doc_title(doc_id) or doc_id
+                from_index.append(title)
             if not chunks:
                 not_indexed.append(ref)
                 continue
@@ -1535,33 +1612,10 @@ class Pipeline:
             fitted_chunks.extend(chunks)
             used += cost
             loaded.append(title)
-
-        if not fitted_chunks:
-            note = 'Не удалось загрузить ни одной страницы.'
-            if not_resolved:
-                note += f' Не распознаны / не наш хост: {len(not_resolved)}.'
-            if not_indexed:
-                note += f' Не в индексе и не удалось выкачать live: {len(not_indexed)}.'
-            return note, []
-
-        body = (
-            f'Загружены указанные страницы целиком ({len(loaded)}), по порядку — '
-            'анализируй/группируй ИМЕННО по этому набору:\n\n'
-            + self._render_chunks_block(fitted_chunks, header='')
-        )
-        notes = []
-        if not_fit:
-            notes.append(
-                f'⚠️ Не поместились в контекст ({len(not_fit)}): ' + ', '.join(not_fit)
-                + '. Обработаны первые; для полного охвата разбей набор на части.'
-            )
-        if not_indexed:
-            notes.append(f'⚠️ Не в индексе и не удалось выкачать live ({len(not_indexed)}).')
-        if not_resolved:
-            notes.append(f'⚠️ Не распознаны или не наш хост ({len(not_resolved)}).')
-        if notes:
-            body += '\n\n---\n' + '\n'.join(notes)
-        return body, fitted_chunks
+        return {
+            'chunks': fitted_chunks, 'loaded': loaded, 'not_resolved': not_resolved,
+            'not_indexed': not_indexed, 'not_fit': not_fit, 'from_index': from_index,
+        }
 
     # ── Reranker ──────────────────────────────────────────────────────────────
 
@@ -1691,6 +1745,11 @@ class Pipeline:
         return self._run(self._searcher.fetch_cluster_membership())
 
     def _get_doc_title(self, doc_id: str) -> str:
+        # live-fetched доки (auto-fetch) не в индексе — searcher вернёт doc_id; их
+        # человекочитаемый title кладётся в _live_titles при загрузке.
+        live = getattr(self, '_live_titles', {}).get(doc_id)
+        if live:
+            return live
         return self._run(self._searcher.get_doc_title(doc_id))
 
     # ── Citations ─────────────────────────────────────────────────────────────
