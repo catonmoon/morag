@@ -353,6 +353,10 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
             features.enable_diversity_nudge if features else None,
             default=True,
         ),
+        # Посекундные цитаты (config-only, по умолчанию off). Момент-уровень цитат
+        # для чанков со start_sec (аудио); документные корпуса не затрагиваются.
+        'timestamp_citations': bool(
+            getattr(features, 'timestamp_citations', False)) if features else False,
 
         'http_timeout': _int_or(
             v.HTTP_TIMEOUT, retr.http_timeout if retr else None, default=300,
@@ -742,6 +746,9 @@ class Pipeline:
         # search получит тот же номер что в первом. Решает проблему конфликтующих
         # цитат при многошаговом ретривале (ранее каждый tool_result начинал с [1]).
         self._doc_numbering: dict[str, int] = {}
+        # Мета единицы цитирования (ключ → {label,url,doc_id[,start_sec]}). Ключ = doc_id
+        # (документ) или f'{doc_id}#{sec}' (аудио-момент). Наполняется вместе с _doc_numbering.
+        self._cite_units: dict[str, dict] = {}
         # title'ы live-fetched доков (auto-fetch): doc_id → человекочитаемый title. Не в
         # индексе → _get_doc_title берёт имя отсюда, иначе цитата/статус = doc_id. Per-pipe().
         self._live_titles: dict[str, str] = {}
@@ -1016,20 +1023,46 @@ class Pipeline:
         )
         return msg
 
-    def _global_doc_id(self, doc_id: str) -> int:
-        """Сквозной номер документа для текущего pipe()-вызова.
-
-        Назначает 1, 2, 3, ... по порядку первого появления doc_id в любом
-        tool-результате. Повторный doc_id получает тот же номер.
-        Используется для стабильного цитирования `[N] Документ:` через все
-        search/get_doc в рамках одного агентского цикла.
-        """
-        n = self._doc_numbering.get(doc_id)
+    def _cite_register(self, key: str, meta: dict) -> int:
+        """Сквозной номер [N] единице цитирования (документ или аудио-момент) для
+        текущего pipe()-вызова. Назначает 1, 2, 3, ... по порядку первого появления
+        ключа в любом tool-результате; повторный ключ получает тот же номер. Решает
+        конфликтующие цитаты при многошаговом ретривале (ранее каждый tool_result с [1])."""
+        n = self._doc_numbering.get(key)
         if n is not None:
             return n
         n = len(self._doc_numbering) + 1
-        self._doc_numbering[doc_id] = n
+        self._doc_numbering[key] = n
+        self._cite_units[key] = meta
         return n
+
+    def _global_doc_id(self, doc_id: str) -> int:
+        """Документ-уровневая единица цитирования (docs/jira/confluence) — `[N] Документ:`.
+        label=None → таблица/цитата берут человекочитаемый title через _get_doc_title."""
+        return self._cite_register(doc_id, {'doc_id': doc_id, 'label': None, 'url': None})
+
+    def _citation_unit(self, chunk: dict) -> tuple[str, dict]:
+        """Единица цитирования чанка → (ключ, meta). При включённом `timestamp_citations`
+        и наличии `start_sec` — отдельный МОМЕНТ (ключ `{doc_id}#{sec}`, метка
+        «Выпуск · MM:SS · Спикер», deep-link `url#t=sec`); иначе — ДОКУМЕНТ (прежнее
+        поведение). Документные корпуса не затрагиваются (нет start_sec / флаг off)."""
+        doc_id = chunk['doc_id']
+        doc_url = chunk.get('url')
+        start_sec = chunk.get('start_sec')
+        if self._s.get('timestamp_citations') and start_sec is not None:
+            title = chunk.get('title') or self._get_doc_title(doc_id)
+            spk = ', '.join(chunk.get('speakers') or [])
+            label = f'{title} · {_fmt_mmss(start_sec)}' + (f' · {spk}' if spk else '')
+            url = f'{doc_url}#t={int(start_sec)}' if doc_url else None
+            return f'{doc_id}#{int(start_sec)}', {
+                'doc_id': doc_id, 'label': label, 'url': url, 'start_sec': start_sec,
+            }
+        return doc_id, {'doc_id': doc_id, 'label': None, 'url': doc_url}
+
+    def _cite_label(self, key: str) -> str:
+        """Человекочитаемая метка единицы [N]: сохранённая (аудио-момент) либо title дока."""
+        m = self._cite_units.get(key) or {}
+        return m.get('label') or self._get_doc_title(m.get('doc_id') or key)
 
     # ── Tool execution ────────────────────────────────────────────────────────
 
@@ -1221,35 +1254,58 @@ class Pipeline:
         """Рендер retrieval-результата из чанков: группировка по документу,
         блок `[N] Документ:` + путь/мета + (контекст+текст) каждого чанка. Единый
         формат для search/get_doc/авто-fetch и для пере-рендера при бюджет-проходе.
-        `header=None` → «Найдено N документов:»; явный header (в т.ч. '') перебивает.
-        `[N]` стабильна (`_global_doc_id`). Строки не режутся."""
-        by_doc: dict[str, list[dict]] = {}
+        `header=None` → «Найдено N документов/фрагментов:»; явный header (в т.ч. '') перебивает.
+        Аудио-момент (timestamp_citations + start_sec) → `[N] Выпуск · MM:SS · Спикер`.
+        `[N]` стабильна (`_cite_register`). Строки не режутся."""
+        units: dict[str, dict] = {}   # ключ → {'meta':..., 'chunks':[...]}
+        order_keys: list[str] = []
         for c in chunks:
-            by_doc.setdefault(c['doc_id'], []).append(c)
+            key, meta = self._citation_unit(c)
+            if key not in units:
+                units[key] = {'meta': meta, 'chunks': []}
+                order_keys.append(key)
+            units[key]['chunks'].append(c)
         parts = []
-        for doc_id, doc_chunks in by_doc.items():
-            n = self._global_doc_id(doc_id)
-            doc_chunks = sorted(doc_chunks, key=lambda x: x.get('order', 0))
-            path = doc_chunks[0].get('path')
-            path_display = ' | '.join(path) if path else doc_id
+        has_moment = False
+        for key in order_keys:
+            meta = units[key]['meta']
+            cs = units[key]['chunks']
+            n = self._cite_register(key, meta)
+            if meta.get('start_sec') is not None:
+                # Аудио-момент: одна пронумерованная реплика «Выпуск · MM:SS · Спикер».
+                has_moment = True
+                lines = [f'[{n}] {meta["label"]}']
+                for c in cs:
+                    if c.get('context'):
+                        lines.append(f'Контекст: {c["context"]}')
+                    lines.append(c.get('text', ''))
+                parts.append('\n'.join(lines))
+                continue
+            # Документ (прежнее поведение): [N] Документ: title + путь/мета + чанки.
+            cs = sorted(cs, key=lambda x: x.get('order', 0))
+            path = cs[0].get('path')
+            path_display = ' | '.join(path) if path else key
             # title из чанка (live-fetch доки не в индексе → _get_doc_title их не знает)
-            title = doc_chunks[0].get('title') or self._get_doc_title(doc_id)
+            title = cs[0].get('title') or self._get_doc_title(key)
             lines = [f'[{n}] Документ: {title}', f'Путь: {path_display}']
-            updated_at = doc_chunks[0].get('updated_at', '')
+            updated_at = cs[0].get('updated_at', '')
             if updated_at:
                 lines.append(f'Обновлён: {updated_at}')
-            url = doc_chunks[0].get('url')
+            url = cs[0].get('url')
             if url:
                 lines.append(f'URL: {url}')
             lines.append('')
-            for c in doc_chunks:
+            for c in cs:
                 if c.get('context'):
                     lines.append(f'Контекст: {c["context"]}')
                 lines.append(c.get('text', ''))
                 lines.append('')
             parts.append('\n'.join(lines))
         if header is None:
-            header = f'Найдено {_plural(len(by_doc), "документ", "документа", "документов")}:'
+            if has_moment:
+                header = f'Найдено {_plural(len(order_keys), "фрагмент", "фрагмента", "фрагментов")}:'
+            else:
+                header = f'Найдено {_plural(len(order_keys), "документ", "документа", "документов")}:'
         prefix = (header + '\n\n') if header else ''
         return prefix + '\n\n---\n\n'.join(parts)
 
@@ -1664,8 +1720,17 @@ class Pipeline:
         # Это убирает и ложные цитаты, и трение в reasoning (раньше инструкция была
         # самопротиворечива: «[N] с ЭТОГО хода» при отсутствии tool-вызовов на финале).
         sources = sorted(self._doc_numbering.items(), key=lambda kv: kv[1])
-        citation_table = '\n'.join(f'[{n}] {self._get_doc_title(did)}' for did, n in sources)
-        if citation_table:
+        citation_table = '\n'.join(f'[{n}] {self._cite_label(key)}' for key, n in sources)
+        if citation_table and self._s.get('timestamp_citations'):
+            cite_block = (
+                'Источники, найденные по этому вопросу (выпуск · тайм-код · спикер) — '
+                'цитируй ТОЛЬКО по этим номерам:\n'
+                f'{citation_table}\n'
+                '- Вставляй номер источника в формате [N], беря N из списка выше — это '
+                'конкретный момент записи, откуда взято. Несколько — перечисляй подряд: [1][3]. '
+                'НЕ придумывай номера и не ссылайся на источники не из этого списка.\n'
+            )
+        elif citation_table:
             cite_block = (
                 'Документы, найденные по этому вопросу — цитируй ТОЛЬКО по этим номерам:\n'
                 f'{citation_table}\n'
@@ -1759,34 +1824,48 @@ class Pipeline:
     # ── Citations ─────────────────────────────────────────────────────────────
 
     def _emit_grouped_sources(self, all_chunks: dict[str, dict]) -> Generator:
-        """Сгруппировать чанки по документу, emit один citation на документ
-        с массивом чанков в `data.document` (каждый чанк — отдельный элемент)."""
-        # Группировка по doc_id
-        by_doc: dict[str, list[dict]] = {}
+        """Emit citation-события по единицам цитирования. Документ → один citation на
+        чанк под общим `source.name` (OWUI склеивает в одну карточку — прежнее поведение,
+        до N чанков). Аудио-момент → отдельная карточка: уникальный `source.name` =
+        «Выпуск · MM:SS · Спикер» + deep-link `#t=СЕК`, OWUI НЕ склеивает.
+
+        Один citation event на один чанк — SSE-строка маленькая (~2KB), не упирается
+        в aiohttp/HTTP-chunked лимиты."""
+        units: dict[str, list[dict]] = {}
+        metas: dict[str, dict] = {}
         for chunk in all_chunks.values():
-            by_doc.setdefault(chunk['doc_id'], []).append(chunk)
+            key, meta = self._citation_unit(chunk)
+            units.setdefault(key, []).append(chunk)
+            metas[key] = meta
 
-        # Сортировка: внутри документа по order, документы по path
-        docs = []
-        for doc_id, chunks in by_doc.items():
-            chunks.sort(key=lambda c: c['order'])
-            path = chunks[0]['path'][0] if chunks[0]['path'] else doc_id
-            doc_name = self._get_doc_title(doc_id)
-            url = chunks[0].get('url')
-            docs.append((path, doc_name, url, chunks, doc_id))
+        def _sort_key(k: str):
+            # Момент — по номеру [N] (порядок релевантности); документ — по path (как раньше).
+            if metas[k].get('start_sec') is not None:
+                return (self._doc_numbering.get(k, 10**9), '')
+            cs = units[k]
+            path = cs[0]['path'][0] if cs[0].get('path') else k
+            return (10**9, path)
 
-        docs.sort(key=lambda d: d[0])
-
-        for path, doc_name, url, chunks, doc_id in docs:
-            # ОДИН citation event на ОДИН чанк — гарантия что SSE-строка
-            # маленькая (~2KB), не упирается в aiohttp/HTTP-chunked лимиты.
-            # OWUI сама агрегирует events по source.name в один сайдбарный
-            # элемент. Берём первые N чанков (упорядочены по `order`).
-            for c in chunks[:_CITATION_MAX_CHUNKS]:
+        for key in sorted(units, key=_sort_key):
+            meta = metas[key]
+            cs = units[key]
+            n = self._doc_numbering.get(key)
+            if meta.get('start_sec') is not None:
+                # Аудио-момент: одна карточка, source.name=label (уникальна → без склейки).
+                # base-url отдаём как есть — `#t=СЕК` строит _emit_source_multi по start_sec.
+                cs.sort(key=lambda c: c.get('order', 0))
                 yield self._emit_source_multi(
-                    doc_name, [c], url,
-                    source_id=doc_id,
-                    number=self._doc_numbering.get(doc_id),
+                    meta['label'], cs[:1], cs[0].get('url'),
+                    source_id=key, number=n,
+                )
+                continue
+            # Документ (прежнее поведение): до N чанков под одной карточкой.
+            cs.sort(key=lambda c: c['order'])
+            doc_name = self._get_doc_title(key)
+            url = cs[0].get('url')
+            for c in cs[:_CITATION_MAX_CHUNKS]:
+                yield self._emit_source_multi(
+                    doc_name, [c], url, source_id=key, number=n,
                 )
 
     # ── Open WebUI events ─────────────────────────────────────────────────────

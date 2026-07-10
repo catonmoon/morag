@@ -471,6 +471,11 @@ class RetrievalSearchConfig(BaseModel):
 
 class RetrievalFeaturesConfig(BaseModel):
     enable_diversity_nudge: bool = True
+    # Посекундные (moment-level) цитаты. Чанки со `start_sec` (аудио-транскрипты)
+    # цитируются как отдельные пронумерованные МОМЕНТЫ с deep-link `#t=СЕК` + меткой
+    # [MM:SS], а не группируются в одну цитату документа. Off (default) → прежнее
+    # поведение (цитата на документ) — документные корпуса не затрагиваются.
+    timestamp_citations: bool = False
 
 
 # Дефолтная доменная «роль» агента в начале system prompt. Единый источник истины:
