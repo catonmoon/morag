@@ -371,6 +371,11 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
         'completeness_check': (
             getattr(prompts, 'completeness_check', True) if prompts else True
         ),
+        # Оверрайд финальной инструкции (_stream_final). Пусто → зашитый документный
+        # стандарт байт-в-байт; задано → заменяет обёртку (cite_block добавляется после).
+        'final_instructions': (
+            getattr(prompts, 'final_instructions', '') if prompts else ''
+        ),
 
         # Инстансы агентских тулов (model_dump — handler'ы/билдеры работают с dict).
         'tools': [t.model_dump() for t in tools_cfg],
@@ -1740,9 +1745,17 @@ class Pipeline:
             )
         else:
             cite_block = ''
-        final_messages = messages + [{
-            'role': 'user',
-            'content': (
+        # Оверрайд финальной инструкции (retrieval.prompts.final_instructions):
+        # доменные требования к финальному ответу (напр. связный пересказ обсуждения
+        # для аудио-корпуса) вместо зашитого документного стандарта. cite_block —
+        # кодогенерируемый (номера рантаймовые), добавляется после текста оверрайда.
+        final_override = self._s.get('final_instructions') or ''
+        if final_override:
+            final_content = final_override.rstrip('\n') + (
+                '\n\n' + cite_block if cite_block else ''
+            )
+        else:
+            final_content = (
                 'Теперь дай финальный ответ на основе всей собранной информации. '
                 'Не вызывай инструменты, отвечай текстом. '
                 'ВАЖНО: ответ должен быть коротким — не более 3-5 абзацев. '
@@ -1750,8 +1763,8 @@ class Pipeline:
                 + cite_block +
                 '- Структурируй ответ максимально: заголовки, подзаголовки, нумерованные и маркированные списки, '
                 'таблицы. Разбивай информацию на логические блоки. Избегай сплошного текста.'
-            ),
-        }]
+            )
+        final_messages = messages + [{'role': 'user', 'content': final_content}]
         max_tokens = self._s['agent_answer_max_tokens'] if self._s['agent_answer_max_tokens'] > 0 else None
         agen = self._llm_agent.stream_complete(
             final_messages,
