@@ -925,7 +925,21 @@ class Pipeline:
                     icon = '🛠️'
                 yield self._emit_status(icon, status_text, False)
 
-                result, chunks = self._execute_tool(fn_name, fn_args)
+                try:
+                    result, chunks = self._execute_tool(fn_name, fn_args)
+                except Exception as exc:  # noqa: BLE001 — транзиентные сбои провайдеров
+                    # Ошибка тула НЕ должна убивать pipe()-генератор: обрыв посреди
+                    # SSE OWUI показывает как TransferEncodingError. Отдаём ошибку
+                    # агенту текстом — он повторит вызов (сбой обычно транзиентный,
+                    # напр. пустой embeddings-ответ OpenRouter) или сменит ход.
+                    logger.warning('[tool] %s failed: %s', fn_name, exc, exc_info=True)
+                    yield self._emit_status('⚠️', f'{fn_name}: временный сбой, продолжаю', False)
+                    result, chunks = (
+                        f'Инструмент {fn_name} временно недоступен '
+                        f'({type(exc).__name__}: {exc}). Повтори этот вызов ещё раз '
+                        '(сбой обычно кратковременный) или используй другой инструмент.',
+                        [],
+                    )
 
                 # Обновить статус с результатами
                 doc_names = list(dict.fromkeys(
