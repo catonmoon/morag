@@ -1907,7 +1907,6 @@ class Pipeline:
         на белом фоне читается одинаково в любой OWUI-теме."""
         documents: list[str] = []
         metadata_list: list[dict[str, Any]] = []
-        first_chunk_url: str | None = None
         for c in chunks:
             text = c.get('text', '')
             # Аудио-чанки: deep-link на секунду в оригинале (Media Fragments `#t=СЕК`)
@@ -1919,8 +1918,6 @@ class Pipeline:
                 text = f'[{label}] {text}'
                 if url:
                     chunk_url = f'{url}#t={int(start_sec)}'
-            if first_chunk_url is None:
-                first_chunk_url = chunk_url
             documents.append(_render_chunk_html(text))
             meta: dict[str, Any] = {
                 'source': source_id or name, 'name': name,
@@ -1934,11 +1931,8 @@ class Pipeline:
                 meta['order'] = c['order']
             metadata_list.append(meta)
         source: dict[str, Any] = {'name': name}
-        # source.url — то, что OWUI открывает при клике по карточке. Для аудио-момента
-        # это deep-link первого чанка (`#t=СЕК`); для документа chunk_url == url —
-        # поведение прежнее байт-в-байт.
-        if first_chunk_url or url:
-            source['url'] = first_chunk_url or url
+        if url:
+            source['url'] = url
         return {
             'event': {
                 'type': 'citation',
