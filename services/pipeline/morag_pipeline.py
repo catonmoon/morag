@@ -357,6 +357,10 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
         # для чанков со start_sec (аудио); документные корпуса не затрагиваются.
         'timestamp_citations': bool(
             getattr(features, 'timestamp_citations', False)) if features else False,
+        # Nudge «поиск перед ответом» (config-only, off): ход без единого tool-вызова
+        # не финалится сразу — одноразовый впрыск требования сделать search.
+        'require_search_before_answer': bool(
+            getattr(features, 'require_search_before_answer', False)) if features else False,
 
         'http_timeout': _int_or(
             v.HTTP_TIMEOUT, retr.http_timeout if retr else None, default=300,
@@ -737,6 +741,7 @@ class Pipeline:
         catalog_used = False
         searched_section_ids: set[str] = set()
         diversity_nudge_sent = False
+        zero_search_nudge_sent = False  # nudge «поиск перед ответом» — одноразовый
         glossary_nudge_sent = False  # после первого lookup_glossary инжектим
         # напоминание формата «Полное название (АББР)» для последующих
         # find_section/search. Vision LLM плохо держит длинные правила в
@@ -839,6 +844,31 @@ class Pipeline:
 
             # Если LLM решил ответить (не вызвал tool)
             if finish_reason != 'tool_calls' or not message.get('tool_calls'):
+                # Nudge «поиск перед ответом»: агент финалит ход БЕЗ единого
+                # tool-вызова (типовой провал follow-up вопросов: отвечает из
+                # истории диалога → ноль источников → мёртвые [N]). Одноразово
+                # требуем сделать search; механика как diversity-nudge.
+                if (
+                    self._s['require_search_before_answer']
+                    and not zero_search_nudge_sent
+                    and tool_call_count == 0
+                ):
+                    zero_search_nudge_sent = True
+                    agent_messages.append(message)
+                    agent_messages.append({'role': 'user', 'content': (
+                        'Ты не сделал ни одного вызова инструментов по этому вопросу. '
+                        'История диалога — НЕ источник: цитировать [N] можно только то, '
+                        'что инструменты вернули в ЭТОМ ходе. Сделай хотя бы один search '
+                        'по сути вопроса — короткий follow-up разверни контекстом '
+                        'предыдущих реплик («а что насчёт X?» → ищи X по теме прошлого '
+                        'вопроса). Если вопрос про состав/даты/перечни — вызови catalog. '
+                        'После этого отвечай.'
+                    )})
+                    yield self._emit_status(
+                        '🔎', 'Ответ без поиска — сначала ищу подтверждение в базе', False,
+                    )
+                    continue
+
                 # Diversity check: все чанки из ≤1 документа после ≥2 search →
                 # инжектим nudge и продолжаем цикл вместо ответа
                 unique_docs = {c['doc_id'] for c in all_chunks.values()}
@@ -1758,7 +1788,14 @@ class Pipeline:
                 'НЕ придумывай номера и не ссылайся на документы не из этого списка.\n'
             )
         else:
-            cite_block = ''
+            # Источников в этом ходе нет (ответ из истории диалога / без ретрива) —
+            # явно запрещаем номера-сноски: UI рендерит [N] в чипы только при
+            # citation-событиях этого хода, иначе агент мимикрирует под прошлые
+            # ходы и вставляет мёртвые [1][2] плоским текстом.
+            cite_block = (
+                'В этом ходе инструменты не вернули источников — НЕ вставляй '
+                'номера-сноски [N] в ответ.\n'
+            )
         # Оверрайд финальной инструкции (retrieval.prompts.final_instructions):
         # доменные требования к финальному ответу (напр. связный пересказ обсуждения
         # для аудио-корпуса) вместо зашитого документного стандарта. cite_block —
