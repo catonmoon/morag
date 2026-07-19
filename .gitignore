@@ -62,3 +62,7 @@ scripts/run_scorpi.py
 
 # Claude Code internal instructions — never commit
 CLAUDE.md
+
+# macOS
+.DS_Store
+.idea/
