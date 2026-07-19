@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- morag RAG: qdrant v1.17.0 native, aarch64-apple-darwin.
+     storage = КОПИЯ rag-test/qdrant-data с ноута (rsync при остановленных qdrant с обеих
+     сторон); пересчёт запрещён. Обновление корпуса: индексация на ноуте -> повторный rsync. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.morag.qdrant</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/USERNAME/morag-rag/qdrant/bin/qdrant</string>
+        <string>--config-path</string>
+        <string>/Users/USERNAME/morag-rag/qdrant/config/config.yaml</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/USERNAME/morag-rag/qdrant</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/USERNAME/logs/morag-qdrant-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/USERNAME/logs/morag-qdrant-launchd.log</string>
+</dict>
+</plist>

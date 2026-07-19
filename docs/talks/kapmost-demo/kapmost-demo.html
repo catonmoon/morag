@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Morag × Капитанский мостик</title>
+<style>
+/* ═══════════════ ШТУРМАНСКАЯ КАРТА НОЧЬЮ ═══════════════
+   Палуба ночью, сонар, координаты. Georgia (кириллица есть везде) +
+   моно для «данных». Оффлайн-самодостаточно; сеть нужна только
+   живому аудио и демо-ссылкам. Навигация: только ← → / пробел (клики не листают). */
+:root {
+  --deep:   #0b141b;   /* ночная вода */
+  --deeper: #071016;
+  --paper:  #e8ded0;   /* бумага карты */
+  --dim:    #9a8f80;   /* выцветшие чернила */
+  --faint:  #5a5347;
+  --signal: #e8a33d;   /* маячный янтарь */
+  --sonar:  #4fd1a5;   /* сонарная бирюза */
+  --alert:  #d96a4a;   /* сигнальный сурик */
+  --line:   rgba(232, 222, 208, 0.13);
+  --serif:  Georgia, 'Times New Roman', serif;
+  --mono:   'SF Mono', Menlo, 'Courier New', monospace;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; background: var(--deep); color: var(--paper);
+  font-family: var(--serif); overflow: hidden; }
+
+/* координатная сетка карты */
+body::before {
+  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+  background-image:
+    linear-gradient(var(--line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--line) 1px, transparent 1px);
+  background-size: 88px 88px;
+  opacity: .35;
+  mask-image: radial-gradient(ellipse 90% 80% at 50% 45%, black 30%, transparent 100%);
+  -webkit-mask-image: radial-gradient(ellipse 90% 80% at 50% 45%, black 30%, transparent 100%);
+}
+/* зерно */
+body::after {
+  content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 40;
+  opacity: .05; mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+.slide { position: absolute; inset: 0; display: none; padding: 6vh 7vw;
+  flex-direction: column; justify-content: center; z-index: 1; }
+.slide.active { display: flex; }
+.slide.active .rv { animation: rise .55s cubic-bezier(.2,.7,.2,1) both; }
+.slide.active .rv:nth-child(2) { animation-delay: .08s; }
+.slide.active .rv:nth-child(3) { animation-delay: .16s; }
+.slide.active .rv:nth-child(4) { animation-delay: .24s; }
+.slide.active .rv:nth-child(5) { animation-delay: .32s; }
+.slide.active .rv:nth-child(6) { animation-delay: .40s; }
+@keyframes rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+
+/* ── типографика ── */
+.kicker { font-family: var(--mono); font-size: clamp(11px, 1.1vw, 14px);
+  letter-spacing: .28em; text-transform: uppercase; color: var(--signal); margin-bottom: 2.2vh; }
+h1 { font-size: clamp(40px, 6.4vw, 92px); line-height: 1.04; font-weight: 400; letter-spacing: -.01em; }
+h2 { font-size: clamp(30px, 4.2vw, 58px); line-height: 1.08; font-weight: 400; margin-bottom: 3.5vh; }
+h2 em, h1 em { font-style: italic; color: var(--signal); }
+.sub { font-size: clamp(16px, 1.7vw, 24px); color: var(--dim); line-height: 1.5; max-width: 62ch; }
+.big { font-size: clamp(19px, 2vw, 28px); line-height: 1.55; max-width: 58ch; }
+.big strong, .sub strong { color: var(--signal); font-weight: 400; }
+.mono { font-family: var(--mono); }
+
+/* ── хром ── */
+#hud { position: fixed; left: 7vw; right: 7vw; bottom: 3.4vh; z-index: 30;
+  display: flex; justify-content: space-between; align-items: center;
+  font-family: var(--mono); font-size: 12px; letter-spacing: .18em; color: var(--faint); }
+#lag { position: fixed; left: 0; bottom: 0; height: 2px; background: var(--signal);
+  width: 0; z-index: 31; transition: width .35s ease; box-shadow: 0 0 12px rgba(232,163,61,.6); }
+
+/* ── сонар ── */
+.sonar { position: absolute; border-radius: 50%; border: 1px solid var(--sonar);
+  opacity: 0; pointer-events: none; }
+.pulse .sonar { animation: ping 3.6s ease-out infinite; }
+.pulse .sonar:nth-child(2) { animation-delay: 1.2s; }
+.pulse .sonar:nth-child(3) { animation-delay: 2.4s; }
+@keyframes ping { 0% { transform: scale(.18); opacity: .55; } 100% { transform: scale(1); opacity: 0; } }
+
+/* ── плитки цифр ── */
+.stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-top: 4.5vh; }
+.stat { border: 1px solid var(--line); padding: 2.6vh 1.4vw; background: rgba(7,16,22,.55); }
+.stat b { display: block; font-size: clamp(30px, 3.6vw, 54px); font-weight: 400; color: var(--signal);
+  font-variant-numeric: tabular-nums; }
+.stat span { font-family: var(--mono); font-size: clamp(10px, .95vw, 13px);
+  letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
+
+/* ── подкаст-строка (слайд 3) ── */
+.podrow { display: flex; align-items: center; gap: 2.5vw; margin-top: 3.5vh;
+  border: 1px solid var(--line); border-left: 2px solid var(--sonar);
+  padding: 2.2vh 2vw; background: rgba(7,16,22,.55); }
+.podtitle { font-family: var(--mono); font-size: clamp(11px, 1.05vw, 14px);
+  letter-spacing: .2em; text-transform: uppercase; color: var(--sonar); margin-bottom: 1.2vh; }
+.poddesc { font-size: clamp(14px, 1.45vw, 20px); color: var(--dim); line-height: 1.6; }
+.poddesc strong { color: var(--paper); font-weight: 400; }
+.qr-s { width: clamp(90px, 12vh, 140px); padding: 8px; flex: none; }
+
+/* ── конвейер ── */
+.flow { display: flex; align-items: stretch; gap: 0; margin-top: 4vh; }
+.step { flex: 1; border: 1px solid var(--line); padding: 2.4vh 1.1vw; position: relative;
+  background: rgba(7,16,22,.55); }
+.step + .step { margin-left: 26px; }
+.step + .step::before { content: '→'; position: absolute; left: -22px; top: 50%;
+  transform: translateY(-50%); color: var(--signal); font-size: 18px; }
+.step .n { font-family: var(--mono); color: var(--sonar); font-size: 11px; letter-spacing: .2em; }
+.step .t { font-size: clamp(15px, 1.45vw, 21px); margin: .8vh 0 .5vh; }
+.step .d { font-size: clamp(12px, 1.05vw, 15px); color: var(--dim); line-height: 1.45; }
+.step .tech { font-family: var(--mono); font-size: clamp(10px, .9vw, 12px);
+  color: var(--sonar); opacity: .85; margin-top: 1vh; letter-spacing: .04em; }
+
+/* ── терминал/лог ── */
+.term { font-family: var(--mono); font-size: clamp(13px, 1.25vw, 18px); line-height: 1.9;
+  border: 1px solid var(--line); background: var(--deeper); padding: 3vh 2vw; margin-top: 3.5vh;
+  box-shadow: inset 0 0 60px rgba(0,0,0,.4); }
+.term .c1 { color: var(--sonar); } .term .c2 { color: var(--signal); }
+.term .c3 { color: var(--alert); } .term .cd { color: var(--dim); }
+
+/* ── две колонки-контраст ── */
+.duel { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 3.5vh; }
+.duel .col { border: 1px solid var(--line); padding: 3vh 2vw; background: rgba(7,16,22,.55); }
+.duel .col h3 { font-family: var(--mono); font-size: 13px; letter-spacing: .22em;
+  text-transform: uppercase; margin-bottom: 2.2vh; font-weight: 400; }
+.duel .doc h3 { color: var(--dim); } .duel .pod h3 { color: var(--signal); }
+.duel li { list-style: none; font-size: clamp(15px, 1.5vw, 21px); line-height: 1.5;
+  padding: 1.1vh 0; border-top: 1px dashed var(--line); }
+.duel li:first-of-type { border-top: 0; }
+.duel .doc li { color: var(--dim); }
+
+/* ── карточка момента + аудио ── */
+.moment { border: 1px solid var(--signal); background: rgba(232,163,61,.06);
+  padding: 3vh 2.4vw; margin-top: 3.5vh; max-width: 780px; }
+.moment .mhead { font-family: var(--mono); font-size: clamp(13px, 1.3vw, 17px);
+  color: var(--signal); letter-spacing: .08em; margin-bottom: 1.6vh; }
+.moment blockquote { font-size: clamp(17px, 1.8vw, 26px); font-style: italic; line-height: 1.5; }
+.moment audio { width: 100%; margin-top: 2.4vh; filter: sepia(.4) saturate(.7); }
+
+/* ── карточки принципов ── */
+.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 4vh; }
+.cards2 { grid-template-columns: repeat(2, 1fr); gap: 16px; margin-top: 3vh; }
+.card { border: 1px solid var(--line); border-top: 2px solid var(--signal);
+  padding: 3vh 1.6vw; background: rgba(7,16,22,.55); }
+.card .n { font-family: var(--mono); color: var(--signal); font-size: 13px; letter-spacing: .2em; }
+.card h3 { font-size: clamp(17px, 1.8vw, 26px); font-weight: 400; margin: 1.4vh 0 1.2vh; line-height: 1.25; }
+.card p { font-size: clamp(13px, 1.2vw, 17px); color: var(--dim); line-height: 1.55; }
+.card p b { color: var(--paper); font-weight: 400; }
+
+/* ── демо-слайд ── */
+.demo-url { font-family: var(--mono); font-size: clamp(26px, 4.2vw, 64px);
+  color: var(--sonar); margin: 3vh 0; text-shadow: 0 0 30px rgba(79,209,165,.35); }
+.qr { color: var(--paper); width: clamp(160px, 20vh, 260px); height: auto;
+  background: var(--paper); padding: 14px; }
+.qr svg { display: block; width: 100%; height: auto; color: var(--deeper); }
+.hints { margin-top: 3vh; font-size: clamp(15px, 1.5vw, 21px); color: var(--dim); line-height: 1.9; }
+.hints em { color: var(--paper); font-style: italic; }
+
+/* ── копи-поле и чипы (клик по ним НЕ листает слайд) ── */
+.copybar { display: flex; gap: 10px; margin: 2.5vh 0; max-width: 680px; }
+.copybar input { flex: 1; font-family: var(--mono); font-size: clamp(15px, 1.5vw, 22px);
+  color: var(--sonar); background: var(--deeper); border: 1px solid var(--line);
+  padding: 1.4vh 1.2vw; letter-spacing: .02em; min-width: 0; }
+.copybar button, .golink { font-family: var(--mono); font-size: clamp(12px, 1.1vw, 15px);
+  letter-spacing: .12em; text-transform: uppercase; cursor: pointer;
+  background: transparent; color: var(--signal); border: 1px solid var(--signal);
+  padding: 1.4vh 1.4vw; text-decoration: none; display: inline-flex; align-items: center;
+  white-space: nowrap; transition: background .15s, color .15s; }
+.copybar button:hover, .golink:hover { background: var(--signal); color: var(--deeper); }
+.chip { display: inline-block; font-size: clamp(14px, 1.4vw, 19px); font-style: italic;
+  color: var(--paper); border: 1px dashed var(--line); padding: .9vh 1.1vw;
+  margin: 0 .6vw 1.2vh 0; cursor: copy; transition: border-color .15s, color .15s; }
+.chip:hover { border-color: var(--sonar); color: var(--sonar); }
+.chip.copied { border-color: var(--sonar); color: var(--sonar); }
+.chip.copied::after { content: ' ✓ скопировано'; font-size: .75em; font-family: var(--mono); font-style: normal; }
+
+.split { display: flex; gap: 5vw; align-items: center; }
+.chain { font-family: var(--mono); font-size: clamp(13px, 1.35vw, 19px); line-height: 2.2; margin-top: 3vh; }
+.chain .nw { white-space: nowrap; }
+.chain .arr { color: var(--faint); }
+kbd-note { display: block; }
+a { color: var(--sonar); }
+.footnote { position: absolute; bottom: 7.5vh; left: 7vw; right: 7vw;
+  font-family: var(--mono); font-size: 12px; color: var(--faint); letter-spacing: .1em; }
+</style>
+</head>
+<body>
+
+<!-- 01 ТИТУЛ -->
+<section class="slide pulse" data-title="титул">
+  <div class="sonar" style="width:110vh;height:110vh;left:58vw;top:-30vh"></div>
+  <div class="sonar" style="width:110vh;height:110vh;left:58vw;top:-30vh"></div>
+  <div class="sonar" style="width:110vh;height:110vh;left:58vw;top:-30vh"></div>
+  <div class="kicker rv">выездная сессия · live demo</div>
+  <h1 class="rv">Morag ×<br><em>Капитанский мостик</em></h1>
+  <p class="sub rv" style="margin-top:3vh">RAG-система, которая прослушала подкаст про ИИ —
+  и теперь отвечает на вопросы <strong>ссылкой на секунду звука</strong>, где это прозвучало.</p>
+  <div class="footnote rv"><a href="https://morag.catonmoon.com" target="_blank">morag.catonmoon.com</a> · открыто для всех · без регистрации</div>
+</section>
+
+<!-- 02 ХУК -->
+<section class="slide" data-title="хук">
+  <div class="kicker rv">проверка связи</div>
+  <h2 class="rv">Спросим его <em>прямо сейчас</em></h2>
+  <div class="copybar rv">
+    <input type="text" readonly value="https://morag.catonmoon.com" onclick="this.select()">
+    <button data-copy="https://morag.catonmoon.com">копировать</button>
+    <a class="golink" href="https://morag.catonmoon.com" target="_blank">открыть ↗</a>
+  </div>
+  <p class="sub rv" style="margin-bottom:1.5vh">вопрос — клик, чтобы скопировать:</p>
+  <div class="rv"><span class="chip">Скажи, как поменялось отношение Вали к технологии RAG на протяжении времени?</span></div>
+  <p class="sub rv" style="margin-top:2.5vh">Смотрите на ленту статусов:
+  видно, <strong>как он думает</strong> — что ищет, что читает, где копает глубже.</p>
+</section>
+
+<!-- 03 ЧТО ЭТО -->
+<section class="slide" data-title="что это">
+  <div class="kicker rv">судовая роль</div>
+  <h2 class="rv">Что за зверь</h2>
+  <p class="big rv"><strong>morag</strong> — открытый агентский RAG
+  (<a href="https://github.com/catonmoon/morag" target="_blank" class="mono">github.com/catonmoon/morag</a>).
+  Родился для корпоративной документации (Confluence, Jira), а этим летом выучил разговорный жанр.</p>
+  <div class="podrow rv">
+    <div>
+      <div class="podtitle">Топливо: подкаст «Капитанский мостик»</div>
+      <p class="poddesc">Еженедельные новости ИИ — с июля 2025, по воскресеньям.
+      Ведут <strong>Валентин Малых</strong> и <strong>Дмитрий Колодезев</strong>.<br>
+      Слушать: <a href="https://www.youtube.com/@promsoft" target="_blank">YouTube @promsoft</a> ·
+      <a href="https://st.zvuk.com/datacaptains" target="_blank">Звук</a> ·
+      <a href="https://kolodezev.ru" target="_blank">kolodezev.ru</a></p>
+    </div>
+    <div class="qr qr-s"><svg viewBox="0 0 37 37" class="segno"><path class="qrline" stroke="currentColor" d="M4 4.5h7m1 0h1m1 0h1m2 0h3m1 0h4m1 0h7m-29 1h1m5 0h1m1 0h1m1 0h1m1 0h2m2 0h3m3 0h1m5 0h1m-29 1h1m1 0h3m1 0h1m3 0h1m1 0h1m3 0h1m1 0h1m1 0h1m1 0h1m1 0h3m1 0h1m-29 1h1m1 0h3m1 0h1m1 0h5m1 0h2m1 0h3m2 0h1m1 0h3m1 0h1m-29 1h1m1 0h3m1 0h1m2 0h4m1 0h1m1 0h1m2 0h1m2 0h1m1 0h3m1 0h1m-29 1h1m5 0h1m5 0h2m1 0h6m1 0h1m5 0h1m-29 1h7m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h7m-21 1h1m3 0h1m2 0h6m-21 1h1m1 0h2m1 0h3m2 0h1m2 0h1m1 0h2m1 0h2m2 0h1m2 0h1m1 0h2m-28 1h2m2 0h1m1 0h1m3 0h5m2 0h3m1 0h3m3 0h1m-29 1h2m4 0h1m4 0h3m3 0h1m2 0h1m1 0h3m1 0h2m-28 1h1m1 0h2m1 0h1m1 0h3m1 0h2m3 0h1m3 0h5m3 0h1m-29 1h7m1 0h2m2 0h1m1 0h2m1 0h1m1 0h1m5 0h2m-27 1h3m1 0h1m4 0h3m2 0h1m2 0h4m1 0h2m2 0h3m-29 1h1m1 0h2m1 0h3m4 0h2m2 0h1m2 0h3m1 0h2m1 0h3m-29 1h3m1 0h2m3 0h4m1 0h3m1 0h1m1 0h1m1 0h3m2 0h1m-28 1h3m3 0h3m1 0h3m1 0h1m1 0h1m1 0h1m1 0h2m2 0h2m1 0h1m-23 1h1m1 0h3m4 0h2m2 0h1m1 0h2m1 0h1m1 0h3m-28 1h1m1 0h7m3 0h4m1 0h2m4 0h1m2 0h1m-24 1h1m1 0h1m6 0h6m1 0h3m4 0h1m-26 1h2m3 0h5m2 0h2m1 0h11m-19 1h1m2 0h2m3 0h3m1 0h1m3 0h5m-29 1h7m1 0h3m3 0h1m1 0h1m1 0h3m1 0h1m1 0h2m1 0h1m-28 1h1m5 0h1m1 0h4m1 0h3m2 0h1m1 0h1m3 0h2m1 0h2m-29 1h1m1 0h3m1 0h1m4 0h2m4 0h1m2 0h5m1 0h2m-28 1h1m1 0h3m1 0h1m1 0h3m2 0h1m1 0h2m2 0h3m2 0h2m2 0h1m-29 1h1m1 0h3m1 0h1m1 0h2m2 0h2m4 0h1m2 0h1m1 0h1m2 0h1m1 0h1m-29 1h1m5 0h1m3 0h1m1 0h1m1 0h1m4 0h2m2 0h1m1 0h1m1 0h1m-28 1h7m1 0h3m5 0h1m1 0h3m4 0h1m1 0h1"/></svg></div>
+  </div>
+  <div class="stats rv">
+    <div class="stat"><b>53</b><span>выпуска</span></div>
+    <div class="stat"><b>70</b><span>часов звука</span></div>
+    <div class="stat"><b>571k</b><span>слов</span></div>
+    <div class="stat"><b>2+14</b><span>капитана + гостей</span></div>
+    <div class="stat"><b>~80<span style="font-size:.5em">мин</span></b><span>средний выпуск</span></div>
+  </div>
+</section>
+
+<!-- 03b WHISPER-PODLODKA -->
+<section class="slide" data-title="уши">
+  <div class="kicker rv">сердце распознавания</div>
+  <h2 class="rv">Уши: <em>whisper-podlodka-turbo</em></h2>
+  <div class="split">
+    <div style="flex:1">
+  <p class="big rv">Открытая модель <strong>Ивана Бондаренко</strong>
+  (<a href="https://huggingface.co/bond005/whisper-podlodka-turbo" target="_blank" class="mono">hf.co/bond005/whisper-podlodka-turbo</a>) —
+  Whisper, дообученный под русскую разговорную речь. Русский подкаст
+  она слышит заметно лучше стокового Whisper.</p>
+  <p class="big rv" style="margin-top:2.5vh">Благодаря тому, что модель открыта, мы
+  <strong>сами подготовили и скомпилировали её MLX-версию</strong> — родной формат
+  Apple Silicon. Вся транскрипция крутится локально на Mac Studio:
+  быстро, бесплатно, без облака для звука.</p>
+  <p class="sub rv" style="margin-top:3vh">И важная возможность: модели можно передать
+  <strong>текстовую подсказку</strong> — до 224 токенов, небольшая шпаргалка терминов
+  и имён. На этом держится «акустический выбор» из следующих слайдов.</p>
+    </div>
+    <a href="https://vkvideo.ru/video-164555658_456241713" target="_blank" class="rv" style="text-decoration:none;text-align:center">
+      <div class="qr qr-s" style="margin:0 auto"><svg viewBox="0 0 41 41" class="segno"><path class="qrline" stroke="currentColor" d="M4 4.5h7m1 0h3m2 0h1m2 0h1m1 0h2m2 0h2m2 0h7m-33 1h1m5 0h1m4 0h2m3 0h2m2 0h2m1 0h1m2 0h1m5 0h1m-33 1h1m1 0h3m1 0h1m1 0h1m1 0h2m4 0h3m4 0h1m2 0h1m1 0h3m1 0h1m-33 1h1m1 0h3m1 0h1m1 0h3m2 0h3m1 0h1m5 0h2m1 0h1m1 0h3m1 0h1m-33 1h1m1 0h3m1 0h1m2 0h1m2 0h5m1 0h3m1 0h3m1 0h1m1 0h3m1 0h1m-33 1h1m5 0h1m1 0h1m1 0h1m2 0h3m2 0h2m1 0h2m3 0h1m5 0h1m-33 1h7m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h7m-25 1h1m1 0h2m1 0h2m1 0h2m1 0h1m1 0h1m1 0h2m-24 1h1m1 0h1m1 0h8m1 0h1m6 0h1m1 0h5m1 0h2m1 0h1m-33 1h1m1 0h4m1 0h1m3 0h2m1 0h2m4 0h2m2 0h4m4 0h1m-32 1h1m3 0h2m1 0h3m1 0h2m2 0h2m1 0h4m3 0h3m1 0h3m-33 1h1m3 0h2m2 0h1m1 0h5m2 0h1m3 0h1m4 0h1m1 0h2m2 0h1m-30 1h2m1 0h2m1 0h1m1 0h1m2 0h1m1 0h1m4 0h3m2 0h2m1 0h1m1 0h1m-31 1h1m1 0h2m3 0h3m1 0h1m1 0h1m1 0h2m1 0h1m5 0h5m1 0h2m-32 1h4m1 0h1m1 0h3m1 0h1m1 0h1m2 0h2m1 0h2m1 0h1m1 0h4m1 0h2m-31 1h2m1 0h1m4 0h3m4 0h1m2 0h1m1 0h2m1 0h1m1 0h1m2 0h1m1 0h1m-31 1h3m1 0h2m2 0h3m1 0h1m1 0h1m1 0h3m1 0h1m1 0h2m1 0h1m1 0h2m1 0h1m-31 1h2m1 0h1m2 0h1m3 0h1m1 0h1m3 0h1m3 0h1m1 0h2m2 0h1m1 0h1m1 0h1m-30 1h2m2 0h1m2 0h2m1 0h4m1 0h1m3 0h2m1 0h3m3 0h1m1 0h1m-29 1h2m3 0h2m2 0h1m1 0h2m2 0h4m1 0h1m1 0h2m3 0h2m-33 1h1m2 0h1m1 0h2m1 0h1m1 0h2m4 0h8m3 0h1m3 0h2m-31 1h4m1 0h3m1 0h2m1 0h1m3 0h1m3 0h3m1 0h2m3 0h2m-33 1h2m2 0h1m1 0h1m1 0h1m2 0h1m2 0h4m1 0h1m1 0h2m1 0h1m1 0h2m4 0h1m-32 1h3m1 0h1m1 0h1m2 0h1m2 0h3m1 0h2m2 0h1m3 0h1m5 0h2m-33 1h1m1 0h2m2 0h5m1 0h2m6 0h2m1 0h7m1 0h1m-24 1h1m1 0h2m1 0h3m3 0h1m1 0h1m2 0h1m3 0h2m2 0h1m-33 1h7m1 0h2m1 0h5m2 0h1m1 0h1m3 0h1m1 0h1m1 0h4m-32 1h1m5 0h1m1 0h4m5 0h1m1 0h3m2 0h1m3 0h1m-29 1h1m1 0h3m1 0h1m2 0h2m1 0h2m2 0h1m1 0h2m1 0h1m2 0h6m2 0h1m-33 1h1m1 0h3m1 0h1m1 0h1m2 0h1m3 0h4m1 0h5m1 0h1m1 0h2m1 0h1m-32 1h1m1 0h3m1 0h1m6 0h6m2 0h2m5 0h1m1 0h1m1 0h1m-33 1h1m5 0h1m1 0h3m6 0h1m3 0h2m1 0h2m3 0h1m-30 1h7m2 0h3m3 0h2m3 0h2m1 0h3m2 0h1m2 0h1"/></svg></div>
+      <div style="font-family:var(--mono);font-size:12px;color:var(--dim);margin-top:1.2vh;letter-spacing:.1em">рассказ Ивана<br>о модели · VK</div>
+    </a>
+  </div>
+</section>
+
+<!-- 04 ПУТЬ ЗВУКА -->
+<section class="slide" data-title="путь звука">
+  <div class="kicker rv">машинное отделение · 1/2</div>
+  <h2 class="rv">Путь звука: mp3 → текст с координатами</h2>
+  <div class="flow rv">
+    <div class="step"><div class="n">01</div><div class="t">Кто говорит</div>
+      <div class="d">Диаризация режет запись на реплики голосов — пока безымянных</div>
+      <div class="tech">pyannote 3.4</div></div>
+    <div class="step"><div class="n">02</div><div class="t">Что говорят</div>
+      <div class="d">Whisper, черновик целиком — контекст помогает, термины врёт</div>
+      <div class="tech">whisper-podlodka · MLX</div></div>
+    <div class="step"><div class="n">03</div><div class="t">Починка терминов</div>
+      <div class="d">LLM + повторный Whisper — про это отдельная история →</div>
+      <div class="tech">grok + whisper²</div></div>
+    <div class="step"><div class="n">04</div><div class="t">Имена по голосу</div>
+      <div class="d">Реестр голосов узнаёт ведущих; гостей называет из интро</div>
+      <div class="tech">CAM++ (3D-Speaker) + LLM</div></div>
+    <div class="step"><div class="n">05</div><div class="t">Текст + секунды</div>
+      <div class="d">Каждая реплика: [Имя] + таймкод. Готово к индексации</div>
+      <div class="tech">markdown + front-matter</div></div>
+  </div>
+  <p class="sub rv" style="margin-top:3.5vh">Весь конвейер — <strong>~10 минут на выпуск</strong>,
+  крутится на Mac Studio. Голос считает Mac, текстовые мозги — LLM в облаке.</p>
+</section>
+
+<!-- 05 НИТЬ 1: ПРОБЛЕМА -->
+<section class="slide" data-title="нить: проблема">
+  <div class="kicker rv">глубокое погружение · 1/2</div>
+  <h2 class="rv">Whisper слышит <em>не то</em></h2>
+  <div class="term rv">
+    <div><span class="cd">произнесено</span> → <span class="cd">услышано</span></div>
+    <div>«…видеокарта <span class="c2">H200</span>»&nbsp;&nbsp;→&nbsp;&nbsp;<span class="c3">«аж двести»</span></div>
+    <div>«…выпуск <span class="c2">«Капитанского мостика»</span>»&nbsp;&nbsp;→&nbsp;&nbsp;<span class="c3">«Pytamskogo мостика»</span></div>
+    <div>«…Иван <span class="c2">Оселедец</span>»&nbsp;&nbsp;→&nbsp;&nbsp;<span class="c3">«и Селедец»</span></div>
+    <div>«…спросил у <span class="c2">ChatGPT</span>»&nbsp;&nbsp;→&nbsp;&nbsp;<span class="c3">«джапити»</span></div>
+  </div>
+  <p class="big rv" style="margin-top:3.5vh">Два разных класса: <strong>«не расслышал»</strong> (акустика)
+  и <strong>«не понял»</strong> — «аж двести» Whisper слышит уверенно и правильно.
+  Он просто не в теме видеокарт.</p>
+</section>
+
+<!-- 06 НИТЬ 2: РЕШЕНИЕ -->
+<section class="slide" data-title="нить: решение">
+  <div class="kicker rv">глубокое погружение · 2/2</div>
+  <h2 class="rv">Тройной ключ: <em>кто за что отвечает</em></h2>
+  <div class="chain rv">
+    <span class="nw"><span style="color:var(--alert)">«аж двести»</span>
+    <span class="arr">──</span> LLM читает выпуск, предлагает <em>наборы</em>
+    <span class="arr">──▶</span> <span style="color:var(--paper)">[ H200 | A200 ]</span></span><br>
+    <span class="nw"><span class="arr">└──</span> Whisper слушает кусок <em>ещё раз</em>, с подсказкой
+    <span class="arr">──▶</span> выбирает <b style="color:var(--sonar)">по звуку</b>
+    <span class="arr">──▶</span> <span style="color:var(--signal)">«H200» ✓</span></span>
+  </div>
+  <div class="cards rv" style="margin-top:4vh">
+    <div class="card"><div class="n">LLM</div><h3>recall</h3>
+      <p>Предлагает <b>наборы гипотез</b>, когда не уверен, — выбор остаётся за звуком</p></div>
+    <div class="card"><div class="n">WHISPER²</div><h3>precision</h3>
+      <p>Акустика решает: выбрать можно только то, <b>что реально звучит</b></p></div>
+    <div class="card"><div class="n">LLM-ФИНАЛ</div><h3>арбитр</h3>
+      <p>Правит имена по контексту; сырец сохраняется — <b>страховка от переумничания</b></p></div>
+  </div>
+  <p class="sub rv" style="margin-top:3vh"><strong>LLM не может навязать то, чего нет в звуке.</strong>
+  Это главная защита от фантазий на этапе распознавания.</p>
+</section>
+
+<!-- 07 ГОЛОСА -->
+<section class="slide" data-title="голоса">
+  <div class="kicker rv">машинное отделение · 2/2</div>
+  <h2 class="rv">Голос — это <em>личность</em></h2>
+  <p class="big rv">Кросс-эпизодный реестр голосовых отпечатков: Малых и Колодезев
+  узнаются <strong>в любом выпуске</strong> — без разметки, по акустике.</p>
+  <p class="big rv" style="margin-top:2.5vh">Новый гость? Ведущие представляют его в интро —
+  LLM читает интро и даёт имя голосу. Дальше реестр узнаёт его сам:
+  <strong>Виталий Казунов появился в №2-24 — и теперь система знает его голос.</strong></p>
+  <p class="sub rv" style="margin-top:3vh">Принцип: личность — по голосу, структура — по тексту.
+  LLM голосам не доверяем: перепутает — реестр поправит.</p>
+</section>
+
+<!-- 08 ЧАНКИ-МОМЕНТЫ -->
+<section class="slide" data-title="моменты">
+  <div class="kicker rv">картография</div>
+  <h2 class="rv">Разговор режется на <em>моменты</em></h2>
+  <p class="big rv">LLM ставит тематические границы по репликам — каждый кусок несёт
+  <strong>спикеров и секунды</strong>. Это не абзацы, это координаты на карте беседы.</p>
+  <div class="term rv">
+    <div><span class="c1">[Валентин Малых]</span> <span class="cd">&lt;!-- t:734.5 --&gt;</span> Слушай, не согласен с тобой…</div>
+    <div><span class="c1">[Влад Голощапов]</span> <span class="cd">&lt;!-- t:116.1 --&gt;</span> …выступал на одном семинаре, и там был Оселедец…</div>
+    <div class="cd" style="margin-top:1vh">payload: { start_sec, end_sec, speakers[], episode, season, url }</div>
+  </div>
+</section>
+
+<!-- 09 ДОКА vs РАЗГОВОР -->
+<section class="slide" data-title="дока≠разговор">
+  <div class="kicker rv">смена курса</div>
+  <h2 class="rv">Документация ≠ разговор: <em>промпт перевёрнут</em></h2>
+  <div class="duel rv">
+    <div class="col doc"><h3>корп-документация</h3>
+      <li>Цитируй дословно — точность буквы</li>
+      <li>Автор не важен: текст = политика компании</li>
+      <li>Не обобщай — риск домыслить</li>
+    </div>
+    <div class="col pod"><h3>подкаст</h3>
+      <li>Пересказывай <em>смысл</em> — дословность тащит шум ASR</li>
+      <li><em>Кто сказал — священно.</em> Мнение ≠ факт</li>
+      <li>Различай: мнение / пересказ чужого / ирония / «отыграю оппонента»</li>
+    </div>
+  </div>
+  <p class="sub rv" style="margin-top:3vh">Один и тот же движок, противоположные режимы ответа.
+  Вся разница — <strong>в конфиге</strong>, ядро общее.</p>
+</section>
+
+<!-- 10 АГЕНТ -->
+<section class="slide" data-title="агент">
+  <div class="kicker rv">эхолот</div>
+  <h2 class="rv">Не «топ-5 похожих кусков», а <em>агент роет</em></h2>
+  <p class="big rv">У агента инструменты: каталог выпусков, гибридный поиск (смысл + слова),
+  глубокое чтение выпуска. Он планирует, ищет с разных сторон, проверяет себя.</p>
+  <div class="term rv">
+    <div><span class="c2">📋</span> читаю каталог корпуса <span class="cd">→ 53 выпуска</span></div>
+    <div><span class="c1">🔍</span> [Влад Голощапов налоги стартаперы котики] <span class="cd">→ №20</span></div>
+    <div><span class="c1">📄</span> глубокое чтение: «Капитанский мостик №20…» <span class="cd">→ вся линия гостя</span></div>
+    <div><span class="c1">🔍</span> [стартаперы работают за ИИ котики] <span class="cd">→ уточнение</span></div>
+    <div><span class="c2">✅</span> Найдено 8 документов за 5 шагов</div>
+  </div>
+  <p class="sub rv" style="margin-top:2.5vh">Это реальная лента одного вопроса. Проверим живьём —
+  клик по вопросу копирует:</p>
+  <div class="rv" style="display:flex;align-items:center;gap:1vw;flex-wrap:wrap">
+    <span class="chip">Кто был гостем в 20-м выпуске и о чём он говорил?</span>
+    <a class="golink" href="https://morag.catonmoon.com" target="_blank">открыть демо ↗</a>
+  </div>
+</section>
+
+<!-- 11 ЦИТАТА = СЕКУНДА -->
+<section class="slide" data-title="цитата=секунда">
+  <div class="kicker rv">главная фишка</div>
+  <h2 class="rv">Цитата — это <em>секунда звука</em></h2>
+  <p class="sub rv">Спросили: <em style="color:var(--paper)">«Что рассказывали про робота,
+  который сбежал с места ДТП?»</em> Агент ответил:</p>
+  <p class="big rv" style="margin-top:1.5vh">«Робот-доставщик врезался в автомобиль и скрылся.
+  <strong>Колодезев подхватил с юмором, спросив, лишили ли робота прав [2]</strong>, — и оба
+  сошлись, что мы живём в удивительное время…»</p>
+  <div class="moment rv">
+    <div class="mhead">[2] Капитанский мостик №2-27 · 78:25 · Дмитрий Колодезев</div>
+    <blockquote>«Вообще, конечно, да: робот скрывается с места происшествия.
+    В удивительное время мы живём»</blockquote>
+    <audio controls preload="none" src="https://kolodezev.ru/download/data-capitan/captainsbridge2-27.mp3#t=4705.5"></audio>
+  </div>
+  <p class="sub rv" style="margin-top:2.5vh">Каждый тезис, приписанный человеку, несёт такой якорь.
+  Клик — и утверждение ответа <strong>подтверждается голосом</strong>. Не верьте пересказу — проверяйте ухом.</p>
+</section>
+
+<!-- 12a ИССЛЕДОВАНИЯ -->
+<section class="slide" data-title="исследования">
+  <div class="kicker rv">судовой журнал · 1/2</div>
+  <h2 class="rv">Не гадаем — <em>сравниваем подходы</em></h2>
+  <p class="big rv">Как искать искажённые термины в черновике? Прожили две гипотезы:</p>
+  <div class="term rv">
+    <div><span class="c1">Гипотеза 1.</span> Гарбл = <span class="c2">редкое слово</span> × <span class="c2">низкая уверенность Whisper</span></div>
+    <div class="cd">частотность по корпусу языка — та же идея, что IDF в BM25. Срезала 91% ложных кандидатов:</div>
+    <div class="cd">частые «в»/«не» с низким confidence — шум; редкий «стенгаус» — почти наверняка гарбл</div>
+    <div style="margin-top:1.2vh"><span class="c3">Упёрлись:</span> слепа к классу «не понял» — «аж двести» услышано <em>уверенно</em>.</div>
+    <div class="cd">И одинаковый confidence у «десять» в составе «1080» и просто числа 10. Плюс пословные</div>
+    <div class="cd">вероятности замедляют транскрипцию ×4</div>
+    <div style="margin-top:1.2vh"><span class="c1">Гипотеза 2.</span> <span class="c2">LLM читает весь черновик</span> и находит неканоничное по смыслу</div>
+    <div class="cd">видит оба класса ошибок; решает по-прежнему акустика (второй проход Whisper)</div>
+  </div>
+  <p class="sub rv" style="margin-top:2.5vh">Каждая ступень конвейера выросла из <strong>измеренного провала</strong>
+  предыдущей.</p>
+</section>
+
+<!-- 12b ИНСАЙТЫ -->
+<section class="slide" data-title="инсайты">
+  <div class="kicker rv">судовой журнал · 2/2</div>
+  <h2 class="rv">Инсайты, которые <em>нас удивили</em></h2>
+  <div class="cards rv">
+    <div class="card"><div class="n">ГОЛОСА</div><h3>Свой голос оказался «дальше» чужого</h3>
+      <p>Проверяли, узнаёт ли система голос Малых в другом выпуске. Эмбеддер из диаризации
+      (<b>wespeaker</b>) считал его похожим на самого себя на <b>0.55</b>, а на чужой голос —
+      на <b>0.75</b>: путал хуже монетки.</p>
+      <p style="margin-top:1.2vh">Причина: кластеризация голосов <b>внутри одной записи</b> и
+      узнавание человека <b>между записями</b> — разные задачи обучения. Взяли верификационный
+      <b>CAM++</b> (3D-Speaker), заточенный под «тот же ли это человек?» — стало 0.95 и 0.33.
+      На нём и держится кросс-эпизодный реестр</p></div>
+    <div class="card"><div class="n">ASR</div><h3>Целый файл лучше нарезки</h3>
+      <p>Логичная идея: раз диаризация уже разрезала запись по репликам — распознавать кусочки.
+      Сравнили на сущностях: черновик <b>целым файлом точнее</b> — Whisper'у помогает контекст
+      разговора, он «понимает», о чём вообще речь.</p>
+      <p style="margin-top:1.2vh">Поэтому первый проход — целиком, а по кусочкам — только
+      <b>второй</b>, когда термины выпуска уже известны и подложены подсказкой. Интуиция
+      «нарезал — распознал» проиграла измерению</p></div>
+    <div class="card"><div class="n">АГЕНТ</div><h3>«Инженер-электрик», которого не было</h3>
+      <p>Агент заявил: «Колодезев — инженер-электрик по образованию», и приклеил ссылку на момент.
+      В подкасте этого <b>нет</b>. В логах нашлось его же: поисковый запрос «Колодезев инженер
+      электрик» — гипотеза существовала <b>до поиска</b>, из общих знаний модели.</p>
+      <p style="margin-top:1.2vh">Не нашёл — всё равно заявил и подобрал тематически близкую
+      цитату. Лечение: правило «факты — только из найденного» + регрессионный прогон.
+      Теперь честно отвечает: «в подкасте не говорилось»</p></div>
+  </div>
+</section>
+
+<!-- 13 КАК СТРОИЛОСЬ -->
+<section class="slide" data-title="как строилось">
+  <div class="kicker rv">судовой устав</div>
+  <h2 class="rv">Принципы, на которых <em>стоит morag</em></h2>
+  <p class="sub rv">Весь проект строится в паре с Claude Code, а правила игры записаны в CLAUDE.md:</p>
+  <div class="cards rv">
+    <div class="card"><div class="n">МИССИЯ</div><h3>Главный пользователь базы — агент</h3>
+      <p>База организуется так, чтобы агенту было <b>удобно рыть</b>: каталог, карта знаний,
+      моменты с секундами. Улучшения драйвятся его наблюдаемыми провалами</p></div>
+    <div class="card"><div class="n">ЧАНКИНГ</div><h3>Чанк — законченная мысль</h3>
+      <p>Главный критерий нарезки: каждый кусок <b>самодостаточен и осмыслен</b>.
+      Для подкаста это реплики и темы, а не окна по N символов</p></div>
+    <div class="card"><div class="n">МЕТОД</div><h3>Не гадаем — измеряем</h3>
+      <p>Каждое решение — через <b>сравнение подходов на данных</b>. И взвешенность:
+      без over-engineering, каждое усложнение обосновано</p></div>
+  </div>
+  <div class="term rv" style="margin-top:3.5vh">
+    <div><span class="c2">16</span> задокументированных экспериментов <span class="cd">· adventures/experiments/</span></div>
+    <div><span class="c2">14</span> ADR — architecture decision records <span class="cd">· каждое несущее решение с контекстом и обоснованием</span></div>
+    <div class="cd" style="margin-top:.8vh">0008 hybrid-chunker · 0010 knowledge-map · 0011 qwen3-embedder-migration · asr_redecode_acoustic_grounding…</div>
+  </div>
+</section>
+
+<!-- 14 ДЕМО -->
+<section class="slide pulse" data-title="демо">
+  <div class="sonar" style="width:120vh;height:120vh;left:60vw;top:-20vh"></div>
+  <div class="sonar" style="width:120vh;height:120vh;left:60vw;top:-20vh"></div>
+  <div class="sonar" style="width:120vh;height:120vh;left:60vw;top:-20vh"></div>
+  <div class="split">
+    <div style="flex:1">
+      <div class="kicker rv">все на мостик</div>
+      <h2 class="rv">Ваша вахта</h2>
+      <a class="demo-url rv" style="display:block;text-decoration:none"
+         href="https://morag.catonmoon.com" target="_blank">morag.catonmoon.com</a>
+      <div class="copybar rv">
+        <input type="text" readonly value="https://morag.catonmoon.com" onclick="this.select()">
+        <button data-copy="https://morag.catonmoon.com">копировать</button>
+        <a class="golink" href="https://morag.catonmoon.com" target="_blank">открыть ↗</a>
+      </div>
+      <div class="hints rv">
+        Со своего телефона, без регистрации. Или с экрана — клик по вопросу копирует:<br>
+        <span class="chip">Кто был гостем в 9-м выпуске и о чём он говорил?</span><br>
+        <span class="chip">Что Дима думает про изменения в найме из-за ИИ?</span><br>
+        <span class="chip">Что говорят про прибыльность AI-компаний? Неужели все работают в убыток и нас ждёт рост стоимости токенов? Как сходится экономика AI-гигантов?</span><br>
+        <span class="chip">Перечисли все выпуски и гостей подкаста</span>
+      </div>
+    </div>
+    <div class="rv qr"><svg viewBox="0 0 37 37" class="segno"><path class="qrline" stroke="currentColor" d="M4 4.5h7m3 0h4m1 0h1m2 0h1m3 0h7m-29 1h1m5 0h1m1 0h2m1 0h2m1 0h1m1 0h1m5 0h1m5 0h1m-29 1h1m1 0h3m1 0h1m1 0h1m1 0h2m1 0h1m5 0h2m1 0h1m1 0h3m1 0h1m-29 1h1m1 0h3m1 0h1m5 0h2m2 0h2m1 0h2m1 0h1m1 0h3m1 0h1m-29 1h1m1 0h3m1 0h1m2 0h2m2 0h3m1 0h1m1 0h1m2 0h1m1 0h3m1 0h1m-29 1h1m5 0h1m3 0h2m1 0h1m1 0h2m2 0h2m1 0h1m5 0h1m-29 1h7m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h7m-19 1h2m1 0h1m3 0h1m1 0h1m-19 1h3m1 0h2m3 0h1m1 0h3m11 0h2m-24 1h1m2 0h1m3 0h1m2 0h3m1 0h9m1 0h1m-29 1h1m1 0h1m2 0h2m3 0h1m4 0h1m1 0h1m4 0h1m1 0h2m1 0h1m-25 1h2m2 0h3m1 0h4m1 0h1m1 0h1m1 0h1m2 0h2m3 0h1m-28 1h1m2 0h1m1 0h1m2 0h4m1 0h4m1 0h1m1 0h1m1 0h1m2 0h3m-29 1h3m7 0h2m1 0h1m2 0h1m2 0h1m2 0h2m1 0h2m1 0h1m-27 1h2m2 0h2m1 0h3m2 0h2m1 0h5m1 0h3m1 0h2m-28 1h2m1 0h1m2 0h1m1 0h1m3 0h1m3 0h2m1 0h3m1 0h2m1 0h1m-27 1h1m3 0h3m4 0h9m2 0h3m1 0h1m-25 1h1m6 0h1m1 0h1m3 0h1m3 0h1m2 0h1m2 0h1m-27 1h1m5 0h3m2 0h3m1 0h3m2 0h1m1 0h2m2 0h1m-25 1h1m2 0h1m1 0h4m1 0h1m1 0h1m2 0h6m1 0h5m-28 1h1m1 0h4m3 0h1m1 0h1m3 0h2m1 0h8m-19 1h1m1 0h1m5 0h1m1 0h1m1 0h1m3 0h2m2 0h1m-29 1h7m2 0h6m1 0h2m1 0h2m1 0h1m1 0h1m1 0h2m-28 1h1m5 0h1m1 0h1m2 0h3m1 0h2m1 0h1m1 0h1m3 0h1m2 0h2m-29 1h1m1 0h3m1 0h1m2 0h2m1 0h1m1 0h2m2 0h1m1 0h8m-28 1h1m1 0h3m1 0h1m1 0h1m1 0h4m2 0h1m1 0h2m4 0h2m1 0h1m-28 1h1m1 0h3m1 0h1m1 0h1m3 0h7m1 0h1m2 0h1m4 0h1m-29 1h1m5 0h1m1 0h1m1 0h3m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h2m1 0h1m-28 1h7m3 0h1m2 0h3m2 0h3m1 0h2m3 0h1"/></svg></div>
+  </div>
+</section>
+
+<!-- 15 ГРАНИЦЫ -->
+<section class="slide" data-title="границы">
+  <div class="kicker rv">без прикрас</div>
+  <h2 class="rv">Где <em>честные границы</em></h2>
+  <p class="big rv">— ASR-огрызки просачиваются: в одном интро Колодезев стал «Медвиком Аудзевым».
+  Метки спикеров при этом верны: они приходят из реестра голосов, текст на них не влияет.</p>
+  <p class="big rv" style="margin-top:2vh">— Агент работает на <strong>дешёвой модели</strong> (центы за вопрос) —
+  иногда ленится искать. Лечим механикой агентского цикла.</p>
+  <p class="big rv" style="margin-top:2vh">— Тайминг момента — старт реплики: клик приводит
+  «примерно туда», в длинном монологе — с интерполяцией.</p>
+  <p class="sub rv" style="margin-top:3.5vh">Всё открыто: <span class="mono">github.com/catonmoon/morag</span></p>
+</section>
+
+<!-- 16 ФИНАЛ -->
+<section class="slide pulse" data-title="финал">
+  <div class="sonar" style="width:130vh;height:130vh;left:35vw;top:-25vh"></div>
+  <div class="sonar" style="width:130vh;height:130vh;left:35vw;top:-25vh"></div>
+  <div class="sonar" style="width:130vh;height:130vh;left:35vw;top:-25vh"></div>
+  <div style="display:flex;align-items:center;gap:5vw">
+    <div>
+      <h1 class="rv">Спросите<br><em>мостик</em> сами</h1>
+      <p class="sub rv" style="margin-top:3vh"><a href="https://morag.catonmoon.com" target="_blank">morag.catonmoon.com</a> — живёт и после этой встречи.<br>
+      Вопросы, идеи, жалобы на ответы — welcome.</p>
+    </div>
+    <div class="rv qr"><svg viewBox="0 0 37 37" class="segno"><path class="qrline" stroke="currentColor" d="M4 4.5h7m3 0h4m1 0h1m2 0h1m3 0h7m-29 1h1m5 0h1m1 0h2m1 0h2m1 0h1m1 0h1m5 0h1m5 0h1m-29 1h1m1 0h3m1 0h1m1 0h1m1 0h2m1 0h1m5 0h2m1 0h1m1 0h3m1 0h1m-29 1h1m1 0h3m1 0h1m5 0h2m2 0h2m1 0h2m1 0h1m1 0h3m1 0h1m-29 1h1m1 0h3m1 0h1m2 0h2m2 0h3m1 0h1m1 0h1m2 0h1m1 0h3m1 0h1m-29 1h1m5 0h1m3 0h2m1 0h1m1 0h2m2 0h2m1 0h1m5 0h1m-29 1h7m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h7m-19 1h2m1 0h1m3 0h1m1 0h1m-19 1h3m1 0h2m3 0h1m1 0h3m11 0h2m-24 1h1m2 0h1m3 0h1m2 0h3m1 0h9m1 0h1m-29 1h1m1 0h1m2 0h2m3 0h1m4 0h1m1 0h1m4 0h1m1 0h2m1 0h1m-25 1h2m2 0h3m1 0h4m1 0h1m1 0h1m1 0h1m2 0h2m3 0h1m-28 1h1m2 0h1m1 0h1m2 0h4m1 0h4m1 0h1m1 0h1m1 0h1m2 0h3m-29 1h3m7 0h2m1 0h1m2 0h1m2 0h1m2 0h2m1 0h2m1 0h1m-27 1h2m2 0h2m1 0h3m2 0h2m1 0h5m1 0h3m1 0h2m-28 1h2m1 0h1m2 0h1m1 0h1m3 0h1m3 0h2m1 0h3m1 0h2m1 0h1m-27 1h1m3 0h3m4 0h9m2 0h3m1 0h1m-25 1h1m6 0h1m1 0h1m3 0h1m3 0h1m2 0h1m2 0h1m-27 1h1m5 0h3m2 0h3m1 0h3m2 0h1m1 0h2m2 0h1m-25 1h1m2 0h1m1 0h4m1 0h1m1 0h1m2 0h6m1 0h5m-28 1h1m1 0h4m3 0h1m1 0h1m3 0h2m1 0h8m-19 1h1m1 0h1m5 0h1m1 0h1m1 0h1m3 0h2m2 0h1m-29 1h7m2 0h6m1 0h2m1 0h2m1 0h1m1 0h1m1 0h2m-28 1h1m5 0h1m1 0h1m2 0h3m1 0h2m1 0h1m1 0h1m3 0h1m2 0h2m-29 1h1m1 0h3m1 0h1m2 0h2m1 0h1m1 0h2m2 0h1m1 0h8m-28 1h1m1 0h3m1 0h1m1 0h1m1 0h4m2 0h1m1 0h2m4 0h2m1 0h1m-28 1h1m1 0h3m1 0h1m1 0h1m3 0h7m1 0h1m2 0h1m4 0h1m-29 1h1m5 0h1m1 0h1m1 0h3m1 0h1m1 0h1m1 0h1m1 0h1m1 0h1m1 0h2m1 0h1m-28 1h7m3 0h1m2 0h3m2 0h3m1 0h2m3 0h1"/></svg></div>
+  </div>
+</section>
+
+<div id="lag"></div>
+<div id="hud">
+  <span id="coord">широта 01 · долгота 16</span>
+  <span>← → · пробел</span>
+</div>
+
+<script>
+const slides = [...document.querySelectorAll('.slide')];
+let cur = 0;
+function show(i) {
+  cur = Math.max(0, Math.min(slides.length - 1, i));
+  slides.forEach((s, k) => s.classList.toggle('active', k === cur));
+  document.getElementById('lag').style.width = ((cur + 1) / slides.length * 100) + '%';
+  document.getElementById('coord').textContent =
+    'широта ' + String(cur + 1).padStart(2, '0') + ' · долгота ' + slides.length +
+    ' · ' + slides[cur].dataset.title;
+  location.hash = cur + 1;
+  // стоп всем аудио при смене слайда
+  document.querySelectorAll('audio').forEach(a => a.pause());
+}
+addEventListener('keydown', e => {
+  if (['ArrowRight',' ','PageDown'].includes(e.key)) { e.preventDefault(); show(cur + 1); }
+  if (['ArrowLeft','PageUp'].includes(e.key)) { e.preventDefault(); show(cur - 1); }
+  if (e.key === 'Home') show(0);
+  if (e.key === 'End') show(slides.length - 1);
+});
+// копирование: чипы-вопросы и кнопки data-copy. Fallback на execCommand для file://
+function copyText(text, el) {
+  const done = () => {
+    if (!el) return;
+    el.classList.add('copied');
+    setTimeout(() => el.classList.remove('copied'), 1600);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+  } else fallbackCopy(text, done);
+}
+function fallbackCopy(text, done) {
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.select();
+  try { document.execCommand('copy'); } catch (e) {}
+  document.body.removeChild(ta); done();
+}
+document.querySelectorAll('.chip').forEach(ch =>
+  ch.addEventListener('click', () => copyText(ch.textContent.trim(), ch)));
+document.querySelectorAll('button[data-copy]').forEach(b =>
+  b.addEventListener('click', () => {
+    copyText(b.dataset.copy, null);
+    const old = b.textContent; b.textContent = '✓ скопировано';
+    setTimeout(() => b.textContent = old, 1600);
+  }));
+
+show(parseInt(location.hash.slice(1)) - 1 || 0);
+</script>
+</body>
+</html>

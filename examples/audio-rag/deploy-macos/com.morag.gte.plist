@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- morag RAG: GTE sparse embedder (CPU, query-side одиночные эмбеддинги).
+     Веса = офлайн-кэш из docker-образа morag-embedder-gte (two-snapshot layout:
+     models--...gte-multilingual-base + new-impl + modules). Сеть не нужна (OFFLINE=1). -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.morag.gte</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/USERNAME/morag-rag/gte/.venv-gte/bin/uvicorn</string>
+        <string>app:app</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>8081</string>
+        <string>--workers</string>
+        <string>1</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/USERNAME/morag-rag/gte</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HF_HOME</key>
+        <string>/Users/USERNAME/morag-rag/gte/hf_cache</string>
+        <key>TRANSFORMERS_OFFLINE</key>
+        <string>1</string>
+        <key>HF_HUB_OFFLINE</key>
+        <string>1</string>
+        <key>HF_HUB_DISABLE_TELEMETRY</key>
+        <string>1</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/USERNAME/logs/morag-gte-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/USERNAME/logs/morag-gte-launchd.log</string>
+</dict>
+</plist>
