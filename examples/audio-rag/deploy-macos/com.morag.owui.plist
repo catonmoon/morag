@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- morag RAG: Open WebUI, ПУБЛИЧНЫЙ БЕЗ АВТОРИЗАЦИИ (демо подкаст-RAG).
+     WEBUI_AUTH=False валиден только на ЧИСТОЙ data/ (webui.db без юзеров) - не подкладывать
+     сюда чужие webui.db. ENABLE_PERSISTENT_CONFIG=False: env - источник истины, правки
+     посетителей в Admin UI не переживают рестарт. Аварийный рубильник при абьюзе:
+     launchctl unload этого плиста либо basic_auth-блок в Caddy. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.morag.owui</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/USERNAME/morag-rag/owui/.venv-owui/bin/open-webui</string>
+        <string>serve</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>3000</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/USERNAME/morag-rag/owui</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>DATA_DIR</key>
+        <string>/Users/USERNAME/morag-rag/owui/data</string>
+        <key>WEBUI_AUTH</key>
+        <string>False</string>
+        <key>ENABLE_SIGNUP</key>
+        <string>False</string>
+        <key>ENABLE_OLLAMA_API</key>
+        <string>False</string>
+        <key>OPENAI_API_BASE_URL</key>
+        <string>http://127.0.0.1:9099</string>
+        <key>OPENAI_API_KEY</key>
+        <string>0p3n-w3bu!</string>
+        <key>DEFAULT_MODELS</key>
+        <string>morag-audio</string>
+        <key>ENABLE_PERSISTENT_CONFIG</key>
+        <string>False</string>
+        <key>WEBUI_URL</key>
+        <string>https://rag.your-domain.example</string>
+        <key>WEBUI_NAME</key>
+        <string>My Audio RAG</string>
+        <key>DO_NOT_TRACK</key>
+        <string>true</string>
+        <key>SCARF_NO_ANALYTICS</key>
+        <string>true</string>
+        <key>ANONYMIZED_TELEMETRY</key>
+        <string>false</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/USERNAME/logs/morag-owui-launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/USERNAME/logs/morag-owui-launchd.log</string>
+</dict>
+</plist>
