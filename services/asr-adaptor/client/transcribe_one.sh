@@ -41,13 +41,21 @@ EPID="ep${PFX}${N}"
 AUDIO="$CACHE/ep${N}.mp3"
 
 # источник: прямой аргумент › шаблон
+# ВАЖНО: внутри ${VAR:?msg} / ${VAR:-default} нельзя писать фигурные плейсхолдеры —
+# первая же } закрывает подстановку, и хвост сообщения приклеивается к значению
+# (реальный баг: URL превращался в «…mp3/2- or pass url as 2nd arg}»).
 if [ -n "$DIRECT_SRC" ]; then
   SRC="$DIRECT_SRC"
 else
-  SRC="${MP3_URL_TEMPLATE:?set MP3_URL_TEMPLATE with {n}/{pfx} or pass url as 2nd arg}"
+  if [ -z "${MP3_URL_TEMPLATE:-}" ]; then
+    echo "ERROR: set MP3_URL_TEMPLATE (with {n} and {pfx} placeholders) or pass url as 2nd arg" >&2
+    exit 2
+  fi
+  SRC="$MP3_URL_TEMPLATE"
   SRC="${SRC//\{n\}/$N}"; SRC="${SRC//\{pfx\}/$PFX}"
 fi
-TITLE="${TITLE_TEMPLATE:-Episode {pfx}{n}}"
+TITLE="${TITLE_TEMPLATE:-}"
+[ -z "$TITLE" ] && TITLE='Episode {pfx}{n}'
 TITLE="${TITLE//\{n\}/$N}"; TITLE="${TITLE//\{pfx\}/$PFX}"
 
 # идемпотентность: готовая запись не перегоняется (резюм прогона корпуса)
