@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 
 MAX_S = 28.0
@@ -116,3 +117,43 @@ def chunk(words, spans, max_s: float = MAX_S):
         for s, e, txt in _split_turn(cur, max_s):
             out.append({'start': s, 'end': e, 'speaker': cur_spk, 'text': txt})
     return _merge_short(out, max_s)
+
+
+def gap_chunks(holes, spans, max_s: float = MAX_S) -> list[dict]:
+    """Чанки на промежутки, которые пасс-1 не покрыл своими сегментами.
+
+    Нарезка идёт ПО НЕМУ, поэтому там, где он промолчал, чанка не возникает — и пасс-2 этот звук
+    никогда не услышит, сколько бы речи в нём ни было. Здесь такой промежуток режется на куски
+    ≤max_s и отдаётся пассу-2 наравне с остальными; текста от пасса-1 у них нет (`text: ''`).
+    Помечены `recovered`, чтобы их вклад был виден в отчёте о покрытии.
+
+    **Добираем только то, где диаризация слышит речь.** Заставка, музыка и тишина — тоже
+    непокрытые промежутки, а Whisper на них склонен фантазировать: без фильтра страховка от потери
+    речи сама дописывала бы в транскрипт то, чего не звучало. Диаризация уже посчитана, и это её
+    прямая компетенция. Если спанов нет вовсе (диаризация не отработала), фильтровать нечем —
+    добираем промежуток целиком.
+    """
+    out = []
+    for a, b in holes:
+        for s0, e0 in (_speech_parts(a, b, spans) if spans else [(a, b)]):
+            n = max(1, math.ceil((e0 - s0) / max_s))
+            step = (e0 - s0) / n
+            for k in range(n):
+                s, e = s0 + k * step, s0 + (k + 1) * step
+                out.append({'start': s, 'end': e, 'speaker': speaker_of(s, e, spans) or 'unknown',
+                            'text': '', 'recovered': True})
+    return out
+
+
+def _speech_parts(a: float, b: float, spans) -> list[tuple[float, float]]:
+    """Куски [a, b], которые диаризация считает речью (объединённые спаны, по времени)."""
+    parts: list[list[float]] = []
+    for s in sorted(spans, key=lambda x: x['start']):
+        s0, e0 = max(a, float(s['start'])), min(b, float(s['end']))
+        if e0 <= s0:
+            continue
+        if parts and s0 <= parts[-1][1]:
+            parts[-1][1] = max(parts[-1][1], e0)
+        else:
+            parts.append([s0, e0])
+    return [(s, e) for s, e in parts]

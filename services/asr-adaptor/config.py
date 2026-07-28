@@ -20,6 +20,10 @@ def _env(key: str, default: str = '') -> str:
     return os.environ.get(key, default)
 
 
+def _flag(key: str, default: str = '1') -> bool:
+    return _env(key, default) not in ('0', 'false', 'no', '')
+
+
 def _enable_thinking() -> bool | None:
     """Reasoning-флаг для LLMClient (env `ASR_LLM_ENABLE_THINKING`). Пусто/none → None: НЕ слать
     reasoning-параметр (для non-reasoning моделей типа grok-4.20-non-reasoning он невалиден → 400).
@@ -60,8 +64,19 @@ class Config:
     whisper_tokenizer: str = field(default_factory=lambda: _env('ASR_WHISPER_TOKENIZER', 'openai/whisper-large-v3'))
     prompt_budget: int = field(default_factory=lambda: int(_env('ASR_PROMPT_BUDGET', '200')))
     # авто-наминг Speaker_N → имя (интро-LLM + реестр). off → транскрипт остаётся в Speaker_N
-    enable_naming: bool = field(
-        default_factory=lambda: _env('ASR_ENABLE_NAMING', '1') not in ('0', 'false', 'no', ''))
+    enable_naming: bool = field(default_factory=lambda: _flag('ASR_ENABLE_NAMING'))
+
+    # --- покрытие звука расшифровкой (потери речи, см. stages/coverage.py) ---
+    # hole_min_s — с какой длины считать непокрытый промежуток дырой (и добирать его чанками);
+    # coverage_warn_s — расхождение «длительность реплики vs распознанное», с которого пишем WARN.
+    hole_min_s: float = field(default_factory=lambda: float(_env('ASR_HOLE_MIN_S', '5')))
+    coverage_warn_s: float = field(default_factory=lambda: float(_env('ASR_COVERAGE_WARN_S', '5')))
+    recover_gaps: bool = field(default_factory=lambda: _flag('ASR_RECOVER_GAPS'))
+    retry_empty: bool = field(default_factory=lambda: _flag('ASR_RETRY_EMPTY'))
+
+    # --- пословное выравнивание (stages/align.py; торч ставится отдельно, см. requirements-align.txt) ---
+    enable_align: bool = field(default_factory=lambda: _flag('ASR_ENABLE_ALIGN'))
+    align_device: str = field(default_factory=lambda: _env('ASR_ALIGN_DEVICE'))  # '' → mps|cuda|cpu
 
     def build_llm(self) -> LLMClient:
         """morag LLMClient (облако = Grok). enable_thinking из ASR_LLM_ENABLE_THINKING (дефолт None —

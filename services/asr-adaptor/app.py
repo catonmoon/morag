@@ -9,6 +9,7 @@ mode=async (дефолт) → 202 {job_id}, поллинг GET /v1/jobs/{id}. mo
 """
 from __future__ import annotations
 
+import logging
 import tempfile
 from pathlib import Path
 
@@ -19,20 +20,32 @@ import jobs
 from config import CFG
 from pipeline import run_pipeline
 
+# Без этого INFO-записи конвейера (сводка о покрытии) не доходят до лога: uvicorn настраивает
+# свои логгеры, а корневой остаётся на WARNING.
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
+
 app = FastAPI(title='asr-adaptor', version='1.0')
 _LLM = CFG.build_llm()
 
 
 def _enriched(r: dict) -> dict:
+    """Стандартный verbose_json + кастомный x_enriched.
+
+    `segments` — НАСТОЯЩИЕ сегменты пасса-2 (раньше тут была заглушка `start == end == начало
+    реплики`: реплика идёт до четырёх минут, и такое «время» бесполезно как якорь).
+    """
+    flat = [s for t in r['turns'] for s in t.get('segments') or []]
     return {
         'task': 'transcribe', 'language': 'ru', 'text': r['text'],
-        'segments': [{'id': i, 'start': t['start'], 'end': t['start'], 'text': t['text']}
-                     for i, t in enumerate(r['turns'])],
+        'segments': [{'id': i, 'start': s['start'], 'end': s['end'], 'text': s['text']}
+                     for i, s in enumerate(flat)],
         'x_enriched': {'format': 'morag-md-v1', 'markdown': r['markdown'], 'turns': r['turns'],
                        'raw_sidecar': r['raw_sidecar'], 'timing': r['timing'],
                        'speaker_map': r['speaker_map'],
                        'speaker_names': r.get('speaker_names', {}),
-                       'name_conflicts': r.get('name_conflicts', [])},
+                       'name_conflicts': r.get('name_conflicts', []),
+                       'coverage': r.get('coverage', {}),
+                       'words': r.get('words')},
     }
 
 

@@ -25,10 +25,15 @@ def diarize(wav_path: str, min_spk: int = 1, max_spk: int = 10) -> list[dict]:
     return d.get('spans') or d.get('segments') or next((v for v in d.values() if isinstance(v, list)), [])
 
 
-def asr(wav_path: str, prompt: str = '', want_segments: bool = False):
-    """podlodka через transcribe_backend. want_segments → verbose_json (пасс-1); иначе text (пасс-2)."""
-    data = {'model': CFG.asr_model, 'language': 'ru',
-            'response_format': 'verbose_json' if want_segments else 'json'}
+def asr(wav_path: str, prompt: str = '') -> dict:
+    """podlodka через transcribe_backend, всегда verbose_json → {'text', 'segments'}.
+
+    Сегменты нужны ОБОИМ пассам: пасс-1 по ним нарезает чанки, пасс-2 — чтобы было видно, сколько
+    звука кусок реально покрыл. Без них потеря речи невидима: текст перескакивает через кусок, а
+    тайм-коды соседних реплик не рвутся (см. stages/coverage.py). Расшифровка та же — verbose_json
+    лишь подробнее отвечает, поэтому отдельной ветки «только текст» больше нет.
+    """
+    data = {'model': CFG.asr_model, 'language': 'ru', 'response_format': 'verbose_json'}
     if prompt:
         data['prompt'] = prompt
     headers = {'Authorization': f'Bearer {CFG.asr_key}'} if CFG.asr_key else {}
@@ -36,7 +41,7 @@ def asr(wav_path: str, prompt: str = '', want_segments: bool = False):
         r = requests.post(CFG.asr_url, data=data, files={'file': f}, headers=headers, timeout=300)
     r.raise_for_status()
     j = r.json()
-    return j if want_segments else (j.get('text') or '').strip()
+    return {'text': (j.get('text') or '').strip(), 'segments': j.get('segments') or []}
 
 
 def campp(wav_path: str, spans: list[dict]) -> tuple[dict, dict]:

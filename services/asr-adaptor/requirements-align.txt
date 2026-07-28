@@ -1,0 +1,15 @@
+# Зависимости стадии пословного выравнивания (stages/align.py).
+# Держим ОТДЕЛЬНО от requirements.txt: торч весит гигабайты, а Docker-вариант адаптера —
+# оркестратор без аудио-моделей, ему они не нужны (и выравнивание всё равно упирается в MPS).
+# Ставятся в Mac-native venv поверх основных:
+#
+#   ~/diar-test/.venv-asr/bin/pip install -r requirements-align.txt
+#
+# Первый запуск тянет веса MMS_FA (~1 ГБ) в ~/.cache/torch. Без этих пакетов стадия молча
+# пропускается: в ответе `x_enriched.words = null` и предупреждение в логе.
+
+torch>=2.1
+torchaudio>=2.1
+soundfile>=0.12
+uroman>=1.3
+num2words>=0.5
