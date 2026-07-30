@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import re
 
 _SYS = (
@@ -25,6 +26,20 @@ _SYS = (
     'самоназывание («меня зовут …», «я …»). Верни СТРОГО JSON '
     '{"speakers":[{"label":"Speaker_N","name":"Имя Фамилия"|null}, …]} без иного текста.'
 )
+
+_GUESTS_SYS = (
+    'Тебе дано НАЧАЛО подкаста. Ведущие представляются сами и представляют ГОСТЕЙ («сегодня с нами…», '
+    '«у нас в гостях…», «затащить в гости…»). Перечисли ТОЛЬКО гостей — людей, которых представили, '
+    'но которые не являются ведущими. Полное Имя Фамилия в именительном падеже («Валеру Бабушкина» → '
+    '«Валерий Бабушкин»), правь очевидный ASR-гарбл фамилии. Никого не представили — пустой список. '
+    'Верни СТРОГО JSON {"guests": ["Имя Фамилия", …]} без иного текста.'
+)
+
+_GUESTS_SCHEMA = {
+    'type': 'object',
+    'properties': {'guests': {'type': 'array', 'items': {'type': 'string'}}},
+    'required': ['guests'],
+}
 
 _SCHEMA = {
     'type': 'object',
@@ -51,7 +66,7 @@ def _name_in_intro(name: str, intro_norm: str) -> bool:
 
 
 async def name_speakers(turns: list[dict], registry_names: dict, llm,
-                        intro_turns: int = 8, max_tokens: int = 400) -> tuple[dict, list]:
+                        intro_turns: int = 12, max_tokens: int = 400) -> tuple[dict, list]:
     """turns (со `speaker`=Speaker_N) + registry_names {Speaker_N: имя} → ({Speaker_N: итоговое_имя},
     конфликты). Итоговое имя = интро (истина) → реестр (fallback) → Speaker_N (не назван)."""
     present = sorted({t['speaker'] for t in turns}, key=lambda s: int(s.split('_')[1]))
@@ -72,7 +87,38 @@ async def name_speakers(turns: list[dict], registry_names: dict, llm,
     except Exception:
         pass  # LLM-сбой → fallback только на реестр
 
+    # Гость, представленный ведущим, — атрибуция МЕТОДОМ ИСКЛЮЧЕНИЯ, и делает её КОД, не модель.
+    # Grok выводил гостя сам; deepseek строго отказывается спекулировать — на ep2-20 трижды вернул
+    # null и для гостя, и для представленного текстом Колодезева (промпт-разрешения не помогли).
+    # LLM здесь оставлена задача на извлечение (список представленных гостей), а «чья метка» —
+    # детерминированно: ровно один гость и ровно одна незанятая не-ведущая метка → она его.
     intro_norm = _norm(intro)
+    # Экстракция — та же провайдерская лотерея, что глоссарий (2 из 3 прогонов находили гостя,
+    # третий возвращал пусто): recall-вызовы удваиваем и объединяем. Дедуп по ФАМИЛИИ — «Валера
+    # Бабушкин» и «Валерий Бабушкин» это один гость, предпочитаем более полную форму.
+    async def _extract():
+        try:
+            g = await llm.complete_json(
+                [{'role': 'system', 'content': _GUESTS_SYS}, {'role': 'user', 'content': intro}],
+                schema=_GUESTS_SCHEMA, schema_name='guests', max_tokens=200)
+            return [x.strip() for x in (g or {}).get('guests', [])
+                    if isinstance(x, str) and x.strip()
+                    and x.strip().lower() not in ('null', 'none', 'неизвестно')]
+        except Exception:
+            return []
+
+    by_surname: dict = {}
+    for cand in [g for lst in await asyncio.gather(_extract(), _extract()) for g in lst]:
+        key = _norm(cand.split()[-1])
+        if key and len(cand) > len(by_surname.get(key, '')):
+            by_surname[key] = cand
+    guests = list(by_surname.values())
+    if len(guests) == 1:
+        hosts = {sid for sid in present
+                 if registry_names.get(sid) and _name_in_intro(registry_names[sid], intro_norm)}
+        free = [sid for sid in present if sid not in hosts and sid not in intro_map]
+        if len(free) == 1 and _name_in_intro(guests[0], intro_norm):
+            intro_map.setdefault(free[0], guests[0])
     # имена известных присутствующих спикеров — для детекта свопа меток
     reg_present_norm = {_norm(registry_names[s]): s for s in present if registry_names.get(s)}
 
