@@ -78,7 +78,12 @@ audio → диаризация (pyannote) → пасс-1 Whisper целым фа
 `ASR_ENABLE_NAMING` (авто-наминг из интро, on);
 `ASR_RETRY_EMPTY` / `ASR_RECOVER_GAPS` (страховка от потери речи, обе on),
 `ASR_HOLE_MIN_S` (5 — с какой длины считать промежуток дырой), `ASR_COVERAGE_WARN_S` (5),
-`ASR_ENABLE_ALIGN` (пословное выравнивание, on) / `ASR_ALIGN_DEVICE` (`mps|cpu|cuda`).
+`ASR_ENABLE_ALIGN` (пословное выравнивание, on) / `ASR_ALIGN_DEVICE` (`mps|cpu|cuda`);
+`ASR_ALWAYS_TERMS` — постоянные термины корпуса (имена ведущих, названия продуктов): идут в
+подсказку распознавания всегда и первыми, лечат устойчивые искажения у источника;
+`ASR_ROUND_CONCURRENCY` (6) — параллельность правки; `ASR_CONTEXT_TURNS` (1) — сколько соседних
+реплик видит правка. Правка сущностей работает списком замен с механическими проверками — см.
+ADR [0020](../../docs/adr/0020-asr-correction-as-verifiable-fixes.md)-[0022](../../docs/adr/0022-guest-naming-extraction-plus-code.md).
 
 ## Деплой
 
