@@ -63,3 +63,20 @@ async def test_resource_semaphore_caps_concurrency():
     await asyncio.gather(*(use(f'j{i}') for i in range(4)))
 
     assert peak == 1
+
+
+async def test_slow_episode_survives_neighbours_finishing_first():
+    """Гонка, стоившая ep3 получаса: релиз на стадии реестра прошёл, соседи убежали вперёд и в
+    старой версии прибирали его билет (pop(t-2)) — повторный релиз из finally падал на KeyError,
+    перекрывая ГОТОВЫЙ результат. Теперь релиз идемпотентен, чужие билеты никто не трогает."""
+    t0, t1, t2, t3 = (pipeline._take_ticket() for _ in range(4))
+
+    pipeline._release_turn(t0)
+    await pipeline._wait_turn(t1)
+    pipeline._release_turn(t1)      # стадия реестра медленного выпуска пройдена
+    await pipeline._wait_turn(t2)
+    pipeline._release_turn(t2)      # быстрые соседи финишируют и прибирают за собой
+    await pipeline._wait_turn(t3)
+    pipeline._release_turn(t3)
+
+    pipeline._release_turn(t1)      # finally медленного: не должен упасть и никого не ждёт
