@@ -184,7 +184,7 @@ async def test_sweep_pass_heals_transient_failure(monkeypatch):
 
     async def transient(raw, dsum, csum, canon, llm, always=(), recalled=''):
         calls['n'] += 1
-        if calls['n'] <= 2:
+        if calls['n'] <= 1:                       # ретраи ВЫЗОВА — в RetryingLLM, стадия зовёт раз
             raise ValueError('LLM returned invalid JSON')
         return raw + ' [правлено]'
 

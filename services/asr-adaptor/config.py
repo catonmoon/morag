@@ -14,6 +14,7 @@ import os
 from dataclasses import dataclass, field
 
 from morag.llm.client import LLMClient
+from morag.llm.retry import RetryPolicy
 
 
 def _env(key: str, default: str = '') -> str:
@@ -91,15 +92,58 @@ class Config:
     always_terms: list[str] = field(default_factory=lambda: [
         t.strip() for t in _env('ASR_ALWAYS_TERMS').split(',') if t.strip()])
 
+    # --- прикладные ретраи LLM: SDK повторяет ТРАНСПОРТ (429/5xx/обрывы), а битый JSON
+    #     деген-петли для него успех (HTTP 200). Поверх — RetryPolicy ядра: 3 попытки с паузой
+    #     10с (спайк сети/нагрузки живёт дольше секунды, немедленный повтор бьёт в него же) ---
+    llm_attempts: int = field(default_factory=lambda: int(_env('ASR_LLM_ATTEMPTS', '3')))
+    llm_retry_delay: float = field(default_factory=lambda: float(_env('ASR_LLM_RETRY_DELAY', '10')))
+    llm_max_concurrent: int = field(default_factory=lambda: int(_env('ASR_LLM_MAX_CONCURRENT', '8')))
+
+    # --- параллельные транскрибации: N выпусков в полёте, ресурсы гейтятся по отдельности.
+    #     Выигрыш — конвейеризация СТАДИЙ: GPU-стадии выпуска B идут, пока у A работает LLM.
+    #     Слоты по 1: у бэкендов один инстанс модели (pyannote thread-unsafe, mlx-очередь общая);
+    #     whisper_slots=2 можно пробовать после замера. max_jobs=1 — прежнее поведение ---
+    max_jobs: int = field(default_factory=lambda: int(_env('ASR_MAX_JOBS', '1')))
+    diarize_slots: int = field(default_factory=lambda: int(_env('ASR_DIARIZE_SLOTS', '1')))
+    whisper_slots: int = field(default_factory=lambda: int(_env('ASR_WHISPER_SLOTS', '1')))
+    campp_slots: int = field(default_factory=lambda: int(_env('ASR_CAMPP_SLOTS', '1')))
+    align_slots: int = field(default_factory=lambda: int(_env('ASR_ALIGN_SLOTS', '1')))
+
     # --- пословное выравнивание (stages/align.py; торч ставится отдельно, см. requirements-align.txt) ---
     enable_align: bool = field(default_factory=lambda: _flag('ASR_ENABLE_ALIGN'))
     align_device: str = field(default_factory=lambda: _env('ASR_ALIGN_DEVICE'))  # '' → mps|cuda|cpu
 
-    def build_llm(self) -> LLMClient:
-        """morag LLMClient (облако = Grok). enable_thinking из ASR_LLM_ENABLE_THINKING (дефолт None —
-        не слать reasoning-флаг; non-reasoning модель его реджектит. grok-4.3-fallback → =false)."""
-        return LLMClient(base_url=self.llm_base_url, model=self.llm_model, api_key=self.llm_key,
-                         enable_thinking=_enable_thinking(), timeout=180, max_retries=4)
+    def build_llm(self) -> 'RetryingLLM':
+        """morag LLMClient + прикладной RetryPolicy. SDK-ретраи (max_retries) закрывают транспорт,
+        политика поверх — битый JSON деген-петель и спайки; max_concurrent — общий потолок
+        одновременных вызовов через реестр семафоров ядра (важен при ASR_MAX_JOBS > 1)."""
+        client = LLMClient(base_url=self.llm_base_url, model=self.llm_model, api_key=self.llm_key,
+                           enable_thinking=_enable_thinking(), timeout=180, max_retries=4,
+                           max_concurrent=self.llm_max_concurrent)
+        policy = RetryPolicy(max_retries=max(0, self.llm_attempts - 1),
+                             delay=self.llm_retry_delay, backoff=1.0)
+        return RetryingLLM(client, policy)
+
+
+class RetryingLLM:
+    """Прозрачная обёртка LLMClient: complete/complete_json идут через RetryPolicy ядра.
+
+    Ретраи живут ЗДЕСЬ, а не россыпью по стадиям: глоссарий, правка, наминг получают их
+    автоматически и одинаково. Остальные атрибуты (context_window и пр.) — сквозные."""
+
+    def __init__(self, client: LLMClient, policy: RetryPolicy) -> None:
+        self._client = client
+        self._policy = policy
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+    async def complete(self, *args, **kwargs):
+        return await self._policy.call(lambda: self._client.complete(*args, **kwargs), 'complete')
+
+    async def complete_json(self, *args, **kwargs):
+        return await self._policy.call(
+            lambda: self._client.complete_json(*args, **kwargs), 'complete_json')
 
 
 CFG = Config()

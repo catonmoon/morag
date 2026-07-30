@@ -138,20 +138,19 @@ def _sentence_batches(text: str, max_chars: int = 8000):
         yield ' '.join(cur)
 
 
-async def _one_batch(llm, batch: str, tag: str, tries: int = 2) -> list[dict]:
-    """Один батч с одним ретраем: деген-петля даёт битый JSON (ловили 125КБ на 9253 строках),
-    повтор обычно чистый — генерация недетерминирована."""
-    for attempt in range(1, tries + 1):
-        try:
-            res = await llm.complete_json(
-                [{'role': 'system', 'content': _SYS}, {'role': 'user', 'content': batch}],
-                schema=_SCHEMA, schema_name='glossary', max_tokens=_GLOSSARY_MAX_TOKENS)
-            return (res or {}).get('terms') or []
-        except Exception as e:
-            logging.getLogger('asr').warning(
-                'glossary: батч %s, попытка %d — %s: %s', tag, attempt,
-                type(e).__name__, str(e)[:120])
-    return []
+async def _one_batch(llm, batch: str, tag: str) -> list[dict]:
+    """Один батч. Ретраи (битый JSON деген-петли, спайки) — в RetryingLLM (config.py), не здесь:
+    политика одна на все стадии. Исчерпал попытки → батч скипается с логом, дедуп по второму
+    проходу страхует."""
+    try:
+        res = await llm.complete_json(
+            [{'role': 'system', 'content': _SYS}, {'role': 'user', 'content': batch}],
+            schema=_SCHEMA, schema_name='glossary', max_tokens=_GLOSSARY_MAX_TOKENS)
+        return (res or {}).get('terms') or []
+    except Exception as e:
+        logging.getLogger('asr').warning(
+            'glossary: батч %s пропущен — %s: %s', tag, type(e).__name__, str(e)[:120])
+        return []
 
 
 async def build_glossary(full_text: str, llm, passes: int = 2) -> list[dict]:

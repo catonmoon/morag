@@ -1,7 +1,9 @@
 """Async job-store для длинных транскрайб-джоб (выпуск ~8-15 мин).
 
-Один in-flight job (Mac GPU — бутылочное горло; параллель = трэшинг) через Semaphore(1).
-In-memory dict. progress-колбэк обновляет статус для поллинга GET /v1/jobs/{id}.
+In-flight выпусков — `ASR_MAX_JOBS` (дефолт 1 = прежнее поведение). Параллель здесь — это
+конвейеризация СТАДИЙ, а не одновременный трэшинг GPU: каждый аудио-ресурс (whisper, pyannote,
+CAM++, MPS-выравнивание) отдельно гейтится семафором в pipeline, поэтому GPU-стадии выпуска B
+идут, пока у A работает LLM. In-memory dict; progress-колбэк — для GET /v1/jobs/{id}.
 """
 from __future__ import annotations
 
@@ -9,8 +11,10 @@ import asyncio
 import time
 import uuid
 
+from config import CFG
+
 _JOBS: dict[str, dict] = {}
-_SEM = asyncio.Semaphore(1)
+_SEM = asyncio.Semaphore(max(1, CFG.max_jobs))
 
 
 def get(job_id: str):

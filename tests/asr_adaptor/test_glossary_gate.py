@@ -118,14 +118,13 @@ class _RouletteLLM:
         return {'terms': [{'heard': f'гарблик{self.calls}', 'canonicals': [f'Term{self.calls}']}]}
 
 
-async def test_glossary_unions_passes_and_retries_failed_batch():
-    """Одиночный прогон теряет до половины recall (62-96 терминов, пересечение 32 из 136) —
-    объединение двух проходов замерено как 128. Упавший батч ретраится, не пропадает."""
+async def test_glossary_unions_passes_and_survives_failed_batch():
+    """Ретраи вызова живут в RetryingLLM (config.py), не в стадии: упавший батч скипается с логом,
+    второй проход страхует объединением (одиночный прогон терял до половины recall)."""
     from stages.glossary import build_glossary
     llm = _RouletteLLM()
 
     out = await build_glossary('Одно предложение про гарблик.', llm, passes=2)
 
-    assert llm.calls == 3                      # 2 прохода + 1 ретрай упавшего
-    assert len(out) == 2                       # термины обоих проходов объединены
-    assert {t['heard'] for t in out} == {'гарблик2', 'гарблик3'}
+    assert llm.calls == 2
+    assert {t['heard'] for t in out} == {'гарблик2'}

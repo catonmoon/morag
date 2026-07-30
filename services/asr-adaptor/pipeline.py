@@ -31,6 +31,44 @@ log = logging.getLogger('asr')
 
 PAD_S = 0.3  # паддинг куска при повторе пустого чанка (см. _decode)
 
+# --- параллельные выпуски: ресурсы и порядок ---------------------------------------------------
+# У каждого аудио-бэкенда один инстанс модели, поэтому ресурсы гейтятся по отдельности
+# (ASR_*_SLOTS, дефолт 1): при ASR_MAX_JOBS>1 выигрывает КОНВЕЙЕРИЗАЦИЯ стадий — GPU-стадии
+# выпуска B идут, пока у A работает LLM-раунд. Семафоры лениво: на импорте event loop не тот.
+_RES_SEMS: dict[str, asyncio.Semaphore] = {}
+
+
+def _res(name: str, slots: int) -> asyncio.Semaphore:
+    if name not in _RES_SEMS:
+        _RES_SEMS[name] = asyncio.Semaphore(max(1, slots))
+    return _RES_SEMS[name]
+
+
+# Реестр голосов требует ДЕТЕРМИНИЗМА порядка (нумерация Speaker_N по порядку появления): при
+# параллельных выпусках стадия реестра идёт строго в порядке ПОСТУПЛЕНИЯ — цепочка билетов.
+_TICKETS: dict[int, asyncio.Event] = {}
+_NEXT_TICKET = 0
+
+
+def _take_ticket() -> int:
+    global _NEXT_TICKET
+    t = _NEXT_TICKET
+    _NEXT_TICKET += 1
+    _TICKETS[t] = asyncio.Event()
+    return t
+
+
+async def _wait_turn(t: int) -> None:
+    prev = _TICKETS.get(t - 1)
+    if prev is not None:
+        await prev.wait()
+
+
+def _release_turn(t: int) -> None:
+    # Идемпотентно; зовётся в finally: упавший выпуск не должен вешать очередь за собой.
+    _TICKETS[t].set()
+    _TICKETS.pop(t - 2, None)
+
 
 def _ffmpeg(args):
     subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', *args], check=True)
@@ -87,25 +125,24 @@ async def _final_round(turns, dsum: str, gloss, llm, concurrency: int, step,
     sem = asyncio.Semaphore(max(1, concurrency))
     done = 0
 
-    async def one(i: int, t: dict, attempts: int = 2) -> tuple[bool, bool]:
+    async def one(i: int, t: dict) -> tuple[bool, bool]:
         nonlocal done
         raw = t['raw']
         if len(raw.split()) < 3 or not has_entity_signal(raw, gloss):
             t['final'] = raw
             return False, False
+        # Ретраи вызова (3 × 10с) — в RetryingLLM; здесь ловим только полное исчерпание.
         ok = False
-        for attempt in range(1, attempts + 1):
-            try:
-                async with sem:
-                    recalled = await recall_entities(dsum, raw, llm)
-                    t['final'] = await correct(raw, dsum, _around(turns, i, CFG.context_turns),
-                                               relevant(raw, gloss), llm, always, recalled)
-                ok = True
-                break
-            except Exception as e:
-                t['final'] = raw
-                log.warning('final-round failed at %.1fs, попытка %d (%s: %s)',
-                            t['start'], attempt, type(e).__name__, str(e)[:120])
+        try:
+            async with sem:
+                recalled = await recall_entities(dsum, raw, llm)
+                t['final'] = await correct(raw, dsum, _around(turns, i, CFG.context_turns),
+                                           relevant(raw, gloss), llm, always, recalled)
+            ok = True
+        except Exception as e:
+            t['final'] = raw
+            log.warning('final-round failed at %.1fs (%s: %s)',
+                        t['start'], type(e).__name__, str(e)[:120])
         done += 1
         if done % 20 == 0:
             step(f'final-round {done}')
@@ -139,12 +176,14 @@ async def _decode(wav: str, sl: str, c: dict, prompt: str, audio_sec: float) -> 
     соседнего слова, и это дешевле, чем потерять кусок целиком.
     """
     await asyncio.to_thread(_slice, wav, c['start'], c['end'], sl)
-    r = await asyncio.to_thread(audio_clients.asr, sl, prompt)
+    async with _res('whisper', CFG.whisper_slots):
+        r = await asyncio.to_thread(audio_clients.asr, sl, prompt)
     off = c['start']
     if not r['text'] and CFG.retry_empty:
         a, b = max(0.0, c['start'] - PAD_S), min(audio_sec, c['end'] + PAD_S)
         await asyncio.to_thread(_slice, wav, a, b, sl)
-        again = await asyncio.to_thread(audio_clients.asr, sl, '')
+        async with _res('whisper', CFG.whisper_slots):
+            again = await asyncio.to_thread(audio_clients.asr, sl, '')
         if again['text']:
             r, off, c['retried'] = again, a, True
     Path(sl).unlink(missing_ok=True)
@@ -163,6 +202,7 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
     t0 = time.monotonic()
     tmp = Path(tempfile.mkdtemp(prefix='asr_'))
     tm: dict = {}
+    ticket = _take_ticket()  # порядок реестра = порядок поступления выпусков
 
     def step(m):
         if progress:
@@ -174,14 +214,16 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
 
         step('diarize')
         _t = time.monotonic()
-        spans = await asyncio.to_thread(audio_clients.diarize, wav)
+        async with _res('diarize', CFG.diarize_slots):
+            spans = await asyncio.to_thread(audio_clients.diarize, wav)
         tm['diarize_s'] = round(time.monotonic() - _t, 1)
 
         audio_sec = coverage.wav_duration(wav)
 
         step('pass1')
         _t = time.monotonic()
-        p1 = await asyncio.to_thread(audio_clients.asr, wav, '')
+        async with _res('whisper', CFG.whisper_slots):
+            p1 = await asyncio.to_thread(audio_clients.asr, wav, '')
         segs = p1['segments']
         words = {'segments': segs}
         full_text = ' '.join((s.get('text') or '').strip() for s in segs)
@@ -263,10 +305,13 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             log.warning('final-round: %d реплик остались сырыми из-за ошибок LLM', n_failed)
 
         step('speakers')
-        cents, air = await asyncio.to_thread(audio_clients.campp, wav, spans)
+        await _wait_turn(ticket)  # реестр — строго в порядке поступления выпусков
+        async with _res('campp', CFG.campp_slots):
+            cents, air = await asyncio.to_thread(audio_clients.campp, wav, spans)
         mapping = await asyncio.to_thread(
             registry.assign, cents, air, episode or 'adhoc', CFG.registry_path,
             CFG.match_threshold, CFG.max_centroids)
+        _release_turn(ticket)
         # реплики кластеров без матча (короткий шум) → доминирующий Speaker по air-time
         air_by_lbl = defaultdict(float)
         for t in turns:
@@ -311,9 +356,10 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             step('align')
             _t = time.monotonic()
             try:
-                words_doc = await asyncio.to_thread(
-                    align.align_turns, wav, out_turns, audio_sec,
-                    episode=episode, device=CFG.align_device)
+                async with _res('align', CFG.align_slots):
+                    words_doc = await asyncio.to_thread(
+                        align.align_turns, wav, out_turns, audio_sec,
+                        episode=episode, device=CFG.align_device)
             except Exception as e:
                 log.warning('word alignment skipped: %s: %s', type(e).__name__, e)
             tm['align_s'] = round(time.monotonic() - _t, 1)
@@ -332,4 +378,5 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
                 # глоссарий и сводка — в артефакт: офлайн-долечивание реплик без пересчёта
                 'glossary': gloss, 'doc_summary': dsum}
     finally:
+        _release_turn(ticket)  # идемпотентно: упавший выпуск не вешает очередь реестра
         shutil.rmtree(tmp, ignore_errors=True)

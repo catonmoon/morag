@@ -10,19 +10,18 @@ logger = logging.getLogger(__name__)
 T = TypeVar('T')
 
 
-_DELAY = 1.0    # начальная задержка между попытками (секунды)
-_BACKOFF = 2.0  # множитель: 1s → 2s → 4s → ...
-
-
 @dataclass
 class RetryPolicy:
     """Политика повторных попыток с экспоненциальной задержкой.
 
     max_retries=0 означает один вызов без повторов.
-    Задержка и backoff фиксированы: начальная 1s, множитель 2.0.
+    Дефолты прежние (1s × 2.0); delay/backoff настраиваемы — транзиентный спайк провайдера
+    живёт дольше секунды, и потребителю (asr-adaptor) нужны паузы порядка 10с.
     """
 
     max_retries: int = 3
+    delay: float = 1.0
+    backoff: float = 2.0
 
     async def call(self, coro_factory: Callable[[], Awaitable[T]], context: str = '') -> T:
         """Выполнить async-вызов с повторами по политике.
@@ -33,7 +32,7 @@ class RetryPolicy:
         """
         ctx = f' [{context}]' if context else ''
         last_exc: BaseException = RuntimeError('no attempts made')
-        current_delay = _DELAY
+        current_delay = self.delay
 
         for attempt in range(self.max_retries + 1):
             try:
@@ -46,7 +45,7 @@ class RetryPolicy:
                         ctx, attempt + 1, self.max_retries + 1, exc, current_delay,
                     )
                     await asyncio.sleep(current_delay)
-                    current_delay *= _BACKOFF
+                    current_delay *= self.backoff
                 else:
                     logger.warning(
                         'Call failed%s: all %d attempt(s) exhausted: %s',
