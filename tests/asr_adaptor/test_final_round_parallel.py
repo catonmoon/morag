@@ -148,3 +148,29 @@ def _async(value):
     async def _inner():
         return value
     return _inner()
+
+
+async def test_failed_turn_is_retried_once_and_second_try_wins(monkeypatch):
+    """Деген даёт битый JSON, второй заход обычно чистый — как у батчей глоссария.
+
+    НЕ «до успеха»: систематическая ошибка (402/403 — ловили обе) зависла бы навсегда.
+    """
+    calls = {'n': 0}
+
+    async def flaky_once(raw, dsum, csum, canon, llm, always=(), recalled=''):
+        calls['n'] += 1
+        if calls['n'] == 1:
+            raise ValueError('LLM returned invalid JSON')
+        return raw + ' [правлено]'
+
+    monkeypatch.setattr(pipeline, 'has_entity_signal', lambda raw, gloss: True)
+    monkeypatch.setattr(pipeline, 'correct', flaky_once)
+    monkeypatch.setattr(pipeline, 'relevant', lambda *a: [])
+    monkeypatch.setattr(pipeline, 'recall_entities', lambda *a, **kw: _async(''))
+    turns = [{'start': 0.0, 'raw': 'одна реплика про NVIDIA'}]
+
+    n, failed = await pipeline._final_round(turns, 'сводка', [], None, 2, lambda m: None)
+
+    assert (n, failed) == (1, 0)
+    assert turns[0]['final'].endswith('[правлено]')
+    assert calls['n'] == 2

@@ -91,17 +91,24 @@ async def _final_round(turns, dsum: str, gloss, llm, concurrency: int, step,
         if len(raw.split()) < 3 or not has_entity_signal(raw, gloss):
             t['final'] = raw
             return 0, 0
-        try:
-            async with sem:
-                recalled = await recall_entities(dsum, raw, llm)
-                t['final'] = await correct(raw, dsum, _around(turns, i, CFG.context_turns),
-                                           relevant(raw, gloss), llm, always, recalled)
-            failed = 0
-        except Exception as e:
-            log.warning('final-round failed at %.1fs (%s: %s) — оставляем сырой текст',
-                        t['start'], type(e).__name__, str(e)[:120])
-            t['final'] = raw
-            failed = 1
+        # Один прикладной повтор, как у батчей глоссария: деген даёт битый JSON, второй заход
+        # обычно чистый. НЕ «до успеха»: систематическая ошибка (402 кредиты, 403 прокси — ловили
+        # обе) зависла бы навсегда; после второй неудачи реплика остаётся сырой, выпуск цел.
+        failed = 0
+        for attempt in (1, 2):
+            try:
+                async with sem:
+                    recalled = await recall_entities(dsum, raw, llm)
+                    t['final'] = await correct(raw, dsum, _around(turns, i, CFG.context_turns),
+                                               relevant(raw, gloss), llm, always, recalled)
+                failed = 0
+                break
+            except Exception as e:
+                failed = 1
+                t['final'] = raw
+                log.warning('final-round failed at %.1fs, попытка %d (%s: %s)%s',
+                            t['start'], attempt, type(e).__name__, str(e)[:120],
+                            '' if attempt == 1 else ' — оставляем сырой текст')
         done += 1
         if done % 20 == 0:
             step(f'final-round {done}')
