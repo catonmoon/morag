@@ -150,4 +150,42 @@ async def name_speakers(turns: list[dict], registry_names: dict, llm,
             out[sid] = reg_name             # известный, интро не назвал
         else:
             out[sid] = sid                  # не назван — остаётся Speaker_N
+
+    # Одно имя на ДВУХ метках — противоречие: один человек не может быть двумя голосами.
+    # Ловили на ep18: LLM отдала «Пётр Ермаков» и ведущему (он представлял гостя), и самому гостю,
+    # реестр обоих не подтвердил → used_intro дважды → выпуск с двумя Ермаковыми. Разрешаем по
+    # силе улики: самоназвание («я Петя Ермаков») бьёт упоминание в чужой реплике; при равенстве
+    # не гадаем — метка откатывается к реестру либо к Speaker_N (невыставленное имя дешевле свопа).
+    for name, sids in _by_name(out).items():
+        if len(sids) < 2:
+            continue
+        owner = _self_introducer(name, sids, turns)
+        for sid in sids:
+            if sid == owner:
+                continue
+            out[sid] = registry_names.get(sid) or sid
+            conflicts.append({'speaker': sid, 'intro': name, 'registry': registry_names.get(sid),
+                              'resolution': 'dropped_duplicate',
+                              'reason': 'name_claimed_by_other_speaker'})
     return out, conflicts
+
+
+def _by_name(out: dict) -> dict:
+    """Имя → метки, которым его выдали (Speaker_N-заглушки не считаются именами)."""
+    res: dict = {}
+    for sid, name in out.items():
+        if name != sid:
+            res.setdefault(_norm(name), []).append(sid)
+    return {next(o for s, o in out.items() if _norm(o) == k): v for k, v in res.items()}
+
+
+def _self_introducer(name: str, sids: list, turns: list) -> str | None:
+    """Кто из спорящих меток произносит это имя в СВОЕЙ реплике — тот и хозяин.
+
+    Гость отвечает на представление («да, действительно, Петя Ермаков»), ведущий называет имя в
+    своей — поэтому при равном счёте выбираем позднейшего (ведущий представляет ПЕРВЫМ)."""
+    surname = _norm(name.split()[-1])
+    said = [sid for sid in sids
+            if any(t.get('speaker') == sid and surname in _norm(t.get('final') or t.get('text') or '')
+                   for t in turns)]
+    return said[-1] if said else None
