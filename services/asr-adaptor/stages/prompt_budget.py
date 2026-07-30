@@ -48,8 +48,21 @@ def fit_prompt(terms, counter: WhisperTokenCounter, budget: int = 200, prefix: s
     return (prefix + ', '.join(out) + '.') if out else ''
 
 
-def build_prompt(canonicals, counter: WhisperTokenCounter, budget: int = 200) -> str:
-    """Промпт для podlodka: ТОЛЬКО латино-каноники (whisper их garble-ит → каноник помогает;
-    русские имена кириллицей не праймим — латиница искажает Sbera/DERIPASKA)."""
+def build_prompt(canonicals, counter: WhisperTokenCounter, budget: int = 200,
+                 always: tuple[str, ...] | list[str] = ()) -> str:
+    """Промпт для podlodka: постоянные термины корпуса + латино-каноники куска.
+
+    `always` — то, что не надо переоткрывать в каждом выпуске: имена ведущих, повторяющиеся
+    продукты. Глоссарий строится заново на каждом выпуске и на устойчивом гарбле срывается —
+    замерено на корпусе: «Колодзев» вместо «Колодезев» в 14 репликах, `MotorMost` вместо
+    `Mattermost` в 24. Финал-раунд их тоже не чинит.
+
+    Кириллица в подсказке РАБОТАЕТ, вопреки прежнему «только латиница» — проверено A/B на интро
+    ep11: без подсказки и с латинской «Дмитрий Колодзев», с кириллическим именем «Дмитрий
+    Колодезев». Смешанная подсказка (имена + латинские термины) тоже не ломает ни то, ни другое.
+    Постоянные термины идут ПЕРВЫМИ: бюджет ≤200 whisper-токенов, и лучше потерять хвост
+    случайных канонико́в куска, чем фамилию ведущего.
+    """
     latin = [c for c in canonicals if _LAT.search(c)]
-    return fit_prompt(latin, counter, budget)
+    terms = list(dict.fromkeys([t for t in always if t] + latin))
+    return fit_prompt(terms, counter, budget)
