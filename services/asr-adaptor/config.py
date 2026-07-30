@@ -74,6 +74,23 @@ class Config:
     recover_gaps: bool = field(default_factory=lambda: _flag('ASR_RECOVER_GAPS'))
     retry_empty: bool = field(default_factory=lambda: _flag('ASR_RETRY_EMPTY'))
 
+    # Параллельность финал-раунда: реплики независимы, а стадия занимала 8-12 мин из 15-18 на
+    # выпуск. Потолок скромный — упирается не в нас, а в лимиты провайдера.
+    round_concurrency: int = field(default_factory=lambda: int(_env('ASR_ROUND_CONCURRENCY', '6')))
+    # Контекст правки — ЦЕЛЫМИ репликами по n с каждой стороны (реплика = непрерывная речь одного
+    # человека из диаризации, законченная мысль). Не символы и не токены: они рвут фразы и шумят.
+    # По ОДНОЙ: с двумя контекст выходил крупнее самого фрагмента (реплика бывает и в 1000 слов),
+    # модель теряла внимание к нему и переставала править вовсе — на ep20 ушли Three Mile Island,
+    # Olkiluoto, FAW, Kaspersky, а раунд разбух с 48 до 172 секунд.
+    context_turns: int = field(default_factory=lambda: int(_env('ASR_CONTEXT_TURNS', '1')))
+
+    # --- постоянный словарь корпуса: имена ведущих и повторяющиеся продукты идут в подсказку
+    #     пасса-2 ВСЕГДА. Глоссарий переоткрывает термины каждый выпуск и на устойчивом гарбле
+    #     срывается (замерено: «Колодзев» ×14, `MotorMost` ×24 по корпусу). Список доменный —
+    #     живёт в env деплоя, не в коде. Пример: ASR_ALWAYS_TERMS='Иван Иванов,Mattermost' ---
+    always_terms: list[str] = field(default_factory=lambda: [
+        t.strip() for t in _env('ASR_ALWAYS_TERMS').split(',') if t.strip()])
+
     # --- пословное выравнивание (stages/align.py; торч ставится отдельно, см. requirements-align.txt) ---
     enable_align: bool = field(default_factory=lambda: _flag('ASR_ENABLE_ALIGN'))
     align_device: str = field(default_factory=lambda: _env('ASR_ALIGN_DEVICE'))  # '' → mps|cuda|cpu

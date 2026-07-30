@@ -22,7 +22,7 @@ from config import CFG
 from stages import align, coverage, registry
 from stages.chunking import chunk as chunk_fn
 from stages.chunking import gap_chunks
-from stages.final_round import chunk_summary, correct, doc_summary, has_entity_signal
+from stages.final_round import correct, doc_summary, has_entity_signal, recall_entities
 from stages.glossary import build_glossary, relevant
 from stages.namer import name_speakers
 from stages.prompt_budget import WhisperTokenCounter, build_prompt
@@ -51,6 +51,64 @@ def _neighbour_text(chunks, i: int) -> str:
         if 0 <= k < len(chunks) and chunks[k].get('text'):
             return chunks[k]['text']
     return ''
+
+
+def _around(turns, i: int, n: int = 2) -> str:
+    """Разговор вокруг реплики — ЦЕЛЫМИ РЕПЛИКАМИ, по n с каждой стороны.
+
+    Раньше правке давали пересказ ЭТОГО ЖЕ фрагмента, сделанный той же моделью: она пересказывала
+    себе то, что и так видит. Настоящий контекст — соседние реплики: на них видно, что WeChat здесь
+    второй игрок рядом с Alipay, а не описка. Заодно ушёл лишний вызов LLM на каждую реплику.
+
+    Единица — реплика, а не символы и не токены. Реплика приходит из диаризации: это непрерывная
+    речь одного человека, законченная мысль. Окно в символах резало бы фразы посередине и тащило
+    шум, а окно в токенах вообще ничего не значит для смысла.
+    """
+    lo, hi = max(0, i - n), min(len(turns), i + n + 1)
+    parts = [f"[{t.get('speaker') or t.get('cluster') or '?'}] {t['raw']}"
+             for k, t in enumerate(turns[lo:hi], start=lo) if k != i]
+    return '\n'.join(parts)
+
+
+async def _final_round(turns, dsum: str, gloss, llm, concurrency: int, step,
+                       always=()) -> tuple[int, int]:
+    """Правка сущностей по репликам — ПАРАЛЛЕЛЬНО. Возвращает (сколько правили, сколько сорвалось).
+
+    Реплики друг от друга не зависят: каждой нужны doc-summary, её собственный chunk-summary и
+    каноники. Последовательный проход держал стадию 8-12 минут на выпуск при том, что аудио-стадии
+    занимают пять — то есть именно он определял длительность прогона.
+
+    Срыв на одной реплике больше не роняет выпуск: она остаётся сырой, остальные считаются. За день
+    мы дважды потеряли по десять минут GPU из-за внешней ошибки на этой стадии (кончились кредиты,
+    отбил прокси) — сырая реплика несравнимо дешевле.
+    """
+    sem = asyncio.Semaphore(max(1, concurrency))
+    done = 0
+
+    async def one(i: int, t: dict) -> tuple[int, int]:
+        nonlocal done
+        raw = t['raw']
+        if len(raw.split()) < 3 or not has_entity_signal(raw, gloss):
+            t['final'] = raw
+            return 0, 0
+        try:
+            async with sem:
+                recalled = await recall_entities(dsum, raw, llm)
+                t['final'] = await correct(raw, dsum, _around(turns, i, CFG.context_turns),
+                                           relevant(raw, gloss), llm, always, recalled)
+            failed = 0
+        except Exception as e:
+            log.warning('final-round failed at %.1fs (%s: %s) — оставляем сырой текст',
+                        t['start'], type(e).__name__, str(e)[:120])
+            t['final'] = raw
+            failed = 1
+        done += 1
+        if done % 20 == 0:
+            step(f'final-round {done}')
+        return 1, failed
+
+    res = await asyncio.gather(*(one(i, t) for i, t in enumerate(turns)))
+    return sum(r[0] for r in res), sum(r[1] for r in res)
 
 
 async def _decode(wav: str, sl: str, c: dict, prompt: str, audio_sec: float) -> None:
@@ -120,6 +178,7 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         _t = time.monotonic()
         gloss = await build_glossary(full_text, llm)
         tm['glossary_s'] = round(time.monotonic() - _t, 1)
+        tm['n_glossary'] = len(gloss)  # размер глоссария — чем кормим подсказку пасса-2 (бюджет ≤200 ток.)
 
         chunks = chunk_fn(words, spans)
         # Звук, которого пасс-2 НЕ услышит, — это дыры между ЧАНКАМИ, а не между сегментами
@@ -143,7 +202,7 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         _t = time.monotonic()
         for i, c in enumerate(chunks):
             src = c['text'] or _neighbour_text(chunks, i)
-            prompt = build_prompt(relevant(src, gloss), counter, CFG.prompt_budget)
+            prompt = build_prompt(relevant(src, gloss), counter, CFG.prompt_budget, CFG.always_terms)
             await _decode(wav, str(tmp / f'c{i}.wav'), c, prompt, audio_sec)
             if (i + 1) % 20 == 0:
                 step(f'pass2 {i + 1}/{len(chunks)}')
@@ -172,20 +231,17 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         step('final-round')
         _t = time.monotonic()
         dsum = await doc_summary(full_text, llm)
-        raw_side, n_round = {}, 0
         for t in turns:
-            raw = ' '.join(c['raw'] for c in t['chunks'] if c['raw']).strip()
-            t['raw'] = raw
-            if len(raw.split()) >= 3 and has_entity_signal(raw, gloss):
-                n_round += 1
-                csum = await chunk_summary(dsum, raw, llm)
-                t['final'] = await correct(raw, dsum, csum, relevant(raw, gloss), llm)
-            else:
-                t['final'] = raw
-            if t['final'] != raw:
-                raw_side[f"{t['start']:.1f}"] = {'raw': raw, 'final': t['final']}
+            t['raw'] = ' '.join(c['raw'] for c in t['chunks'] if c['raw']).strip()
+        n_round, n_failed = await _final_round(turns, dsum, gloss, llm, CFG.round_concurrency,
+                                              step, CFG.always_terms)
+        raw_side = {f"{t['start']:.1f}": {'raw': t['raw'], 'final': t['final']}
+                    for t in turns if t['final'] != t['raw']}
         tm['round_s'] = round(time.monotonic() - _t, 1)
         tm['n_round_turns'] = n_round
+        if n_failed:
+            tm['n_round_failed'] = n_failed
+            log.warning('final-round: %d реплик остались сырыми из-за ошибок LLM', n_failed)
 
         step('speakers')
         cents, air = await asyncio.to_thread(audio_clients.campp, wav, spans)

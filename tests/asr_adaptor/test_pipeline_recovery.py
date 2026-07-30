@@ -85,7 +85,8 @@ def backend(monkeypatch, wav) -> FakeBackend:
     monkeypatch.setattr(pipeline, 'has_entity_signal', lambda raw, gloss: False)
     monkeypatch.setattr(pipeline, 'name_speakers', no_names)
     monkeypatch.setattr(pipeline, 'WhisperTokenCounter', lambda model: None)
-    monkeypatch.setattr(pipeline, 'build_prompt', lambda terms, counter, budget: 'каноники')
+    monkeypatch.setattr(pipeline, 'build_prompt',
+                        lambda terms, counter, budget, always=(): 'каноники')
     return fake
 
 
