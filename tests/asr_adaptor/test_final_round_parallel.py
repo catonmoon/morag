@@ -73,9 +73,11 @@ async def test_one_failed_turn_does_not_kill_the_episode(monkeypatch):
     monkeypatch.setattr(pipeline, 'recall_entities', lambda *a, **kw: _async(''))
     turns = _turns(5)
 
-    n, failed = await pipeline._final_round(turns, 'сводка', [], None, 4, lambda m: None)
+    n, failed = await pipeline._final_round(turns, 'сводка', [], None, 4, lambda m: None,
+                                            sweep_delay=0)
 
     assert (n, failed) == (5, 1)
+    assert turns[2].get('correction_failed') is True
     assert turns[2]['final'] == turns[2]['raw']              # сорвавшаяся — сырой текст
     assert all(t['final'].endswith('[правлено]') for i, t in enumerate(turns) if i != 2)
 
@@ -174,3 +176,27 @@ async def test_failed_turn_is_retried_once_and_second_try_wins(monkeypatch):
     assert (n, failed) == (1, 0)
     assert turns[0]['final'].endswith('[правлено]')
     assert calls['n'] == 2
+
+
+async def test_sweep_pass_heals_transient_failure(monkeypatch):
+    """Спайк сети/нагрузки: оба захода на месте упали, добивочный проход спустя паузу — прошёл."""
+    calls = {'n': 0}
+
+    async def transient(raw, dsum, csum, canon, llm, always=(), recalled=''):
+        calls['n'] += 1
+        if calls['n'] <= 2:
+            raise ValueError('LLM returned invalid JSON')
+        return raw + ' [правлено]'
+
+    monkeypatch.setattr(pipeline, 'has_entity_signal', lambda raw, gloss: True)
+    monkeypatch.setattr(pipeline, 'correct', transient)
+    monkeypatch.setattr(pipeline, 'relevant', lambda *a: [])
+    monkeypatch.setattr(pipeline, 'recall_entities', lambda *a, **kw: _async(''))
+    turns = [{'start': 0.0, 'raw': 'одна реплика про NVIDIA'}]
+
+    n, failed = await pipeline._final_round(turns, 'сводка', [], None, 2, lambda m: None,
+                                            sweep_delay=0)
+
+    assert (n, failed) == (1, 0)
+    assert turns[0]['final'].endswith('[правлено]')
+    assert not turns[0].get('correction_failed')

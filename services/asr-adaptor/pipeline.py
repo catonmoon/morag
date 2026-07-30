@@ -71,51 +71,63 @@ def _around(turns, i: int, n: int = 2) -> str:
 
 
 async def _final_round(turns, dsum: str, gloss, llm, concurrency: int, step,
-                       always=()) -> tuple[int, int]:
-    """Правка сущностей по репликам — ПАРАЛЛЕЛЬНО. Возвращает (сколько правили, сколько сорвалось).
+                       always=(), sweep_delay: float = 30.0) -> tuple[int, int]:
+    """Правка сущностей по репликам — параллельно, с повтором и добивочным проходом.
 
-    Реплики друг от друга не зависят: каждой нужны doc-summary, её собственный chunk-summary и
-    каноники. Последовательный проход держал стадию 8-12 минут на выпуск при том, что аудио-стадии
-    занимают пять — то есть именно он определял длительность прогона.
-
-    Срыв на одной реплике больше не роняет выпуск: она остаётся сырой, остальные считаются. За день
-    мы дважды потеряли по десять минут GPU из-за внешней ошибки на этой стадии (кончились кредиты,
-    отбил прокси) — сырая реплика несравнимо дешевле.
+    Реплики независимы; последовательный проход держал стадию 8-12 мин из 15-18 на выпуск.
+    Отказоустойчивость трёхслойная, потому что «реплика навсегда осталась сырой из-за лага сети» —
+    недопустимый исход:
+      1) два захода на месте (деген даёт битый JSON, второй заход обычно чистый);
+      2) ДОБИВОЧНЫЙ проход через sweep_delay — транзиентный спайк (сеть, загрузка провайдера)
+         за это время проходит, а немедленный повтор бьёт в него же;
+      3) не долечилось — реплика помечается `correction_failed` в артефакте, её доправит офлайн
+         `client/repair_turns.py` (правка текстовая, аудио не нужно). НЕ «до успеха»:
+         систематическая ошибка (402 кредиты, 403 прокси — ловили обе) зависла бы навсегда.
     """
     sem = asyncio.Semaphore(max(1, concurrency))
     done = 0
 
-    async def one(i: int, t: dict) -> tuple[int, int]:
+    async def one(i: int, t: dict, attempts: int = 2) -> tuple[bool, bool]:
         nonlocal done
         raw = t['raw']
         if len(raw.split()) < 3 or not has_entity_signal(raw, gloss):
             t['final'] = raw
-            return 0, 0
-        # Один прикладной повтор, как у батчей глоссария: деген даёт битый JSON, второй заход
-        # обычно чистый. НЕ «до успеха»: систематическая ошибка (402 кредиты, 403 прокси — ловили
-        # обе) зависла бы навсегда; после второй неудачи реплика остаётся сырой, выпуск цел.
-        failed = 0
-        for attempt in (1, 2):
+            return False, False
+        ok = False
+        for attempt in range(1, attempts + 1):
             try:
                 async with sem:
                     recalled = await recall_entities(dsum, raw, llm)
                     t['final'] = await correct(raw, dsum, _around(turns, i, CFG.context_turns),
                                                relevant(raw, gloss), llm, always, recalled)
-                failed = 0
+                ok = True
                 break
             except Exception as e:
-                failed = 1
                 t['final'] = raw
-                log.warning('final-round failed at %.1fs, попытка %d (%s: %s)%s',
-                            t['start'], attempt, type(e).__name__, str(e)[:120],
-                            '' if attempt == 1 else ' — оставляем сырой текст')
+                log.warning('final-round failed at %.1fs, попытка %d (%s: %s)',
+                            t['start'], attempt, type(e).__name__, str(e)[:120])
         done += 1
         if done % 20 == 0:
             step(f'final-round {done}')
-        return 1, failed
+        return True, not ok
 
     res = await asyncio.gather(*(one(i, t) for i, t in enumerate(turns)))
-    return sum(r[0] for r in res), sum(r[1] for r in res)
+    n_round = sum(1 for c, _ in res if c)
+    failed_idx = [i for i, (_, f) in enumerate(res) if f]
+
+    if failed_idx:
+        log.warning('final-round: %d реплик сорвались — добивочный проход через %.0fс',
+                    len(failed_idx), sweep_delay)
+        if sweep_delay:
+            await asyncio.sleep(sweep_delay)
+        res2 = await asyncio.gather(*(one(i, turns[i]) for i in failed_idx))
+        failed_idx = [i for i, (_, f) in zip(failed_idx, res2) if f]
+
+    for i in failed_idx:
+        turns[i]['correction_failed'] = True
+        log.warning('final-round: реплика %.1fs осталась сырой — помечена correction_failed',
+                    turns[i]['start'])
+    return n_round, len(failed_idx)
 
 
 async def _decode(wav: str, sl: str, c: dict, prompt: str, audio_sec: float) -> None:
@@ -289,7 +301,8 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             plain.append(t['final'])
             out_turns.append({'speaker': t['speaker'], 'speaker_id': t['speaker_id'],
                               'start': round(t['start'], 1), 'end': t['end'],
-                              'text': t['final'], 'raw': t['raw'], 'segments': t['segments']})
+                              'text': t['final'], 'raw': t['raw'], 'segments': t['segments'],
+                              **({'correction_failed': True} if t.get('correction_failed') else {})})
 
         # Пословные тайм-коды: звук и реплики уже здесь, поэтому и время слова считается здесь.
         # Стадия не критичная (торч ставится отдельно, см. requirements-align.txt) — падает мягко.
@@ -315,6 +328,8 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         return {'markdown': '\n'.join(lines), 'text': ' '.join(plain), 'turns': out_turns,
                 'raw_sidecar': raw_side, 'timing': tm, 'speaker_map': mapping,
                 'speaker_names': name_map, 'name_conflicts': name_conflicts,
-                'coverage': cov, 'words': words_doc}
+                'coverage': cov, 'words': words_doc,
+                # глоссарий и сводка — в артефакт: офлайн-долечивание реплик без пересчёта
+                'glossary': gloss, 'doc_summary': dsum}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

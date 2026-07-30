@@ -45,7 +45,9 @@ def _enriched(r: dict) -> dict:
                        'speaker_names': r.get('speaker_names', {}),
                        'name_conflicts': r.get('name_conflicts', []),
                        'coverage': r.get('coverage', {}),
-                       'words': r.get('words')},
+                       'words': r.get('words'),
+                       'glossary': r.get('glossary', []),
+                       'doc_summary': r.get('doc_summary', '')},
     }
 
 
