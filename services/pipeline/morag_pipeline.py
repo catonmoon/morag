@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 _T = TypeVar('_T')
 
+# Сколько находок помнить на чанк. Один и тот же фрагмент агент находит разными
+# запросами; первые несколько говорят всё, остальное — вес в каждом citation-кадре.
+_MAX_PROVENANCE = 4
+
 
 # ── Config ↔ Valves merge helpers ─────────────────────────────────────────────
 # Источник истины — config.yml (читается в __init__). OWUI Valves остаются как
@@ -984,8 +988,22 @@ class Pipeline:
                 elif inst_type == 'catalog' and result:
                     yield self._emit_status('→', result.split('.', 1)[0], False)
 
-                # Собрать чанки
-                for c in chunks:
+                # Собрать чанки, запомнив, КАК каждый нашёлся.
+                #
+                # Провенанс — единственное, чем можно объяснить читателю, почему
+                # фрагмент попал в ответ: сам чанк об этом молчит, а подсветка
+                # <mark> склеивает все запросы агента и различить их не даёт.
+                # Чанк, найденный несколькими запросами, копит записи — это и
+                # есть сигнал «ядро темы», а не случайное попадание.
+                for rank, c in enumerate(chunks, 1):
+                    found = {'tool': fn_name, 'step': tool_call_count, 'rank': rank}
+                    if isinstance(query, str) and query.strip():
+                        found['query'] = query.strip()
+                    prev = all_chunks.get(c['chunk_id']) or {}
+                    trail = list(prev.get('found_by') or [])
+                    if len(trail) < _MAX_PROVENANCE:
+                        trail.append(found)
+                    c['found_by'] = trail
                     all_chunks[c['chunk_id']] = c
 
                 # Добавить tool result в историю
@@ -1983,6 +2001,12 @@ class Pipeline:
                 meta['citation_number'] = number
             if 'order' in c:
                 meta['order'] = c['order']
+            # Как этот чанк нашёлся: запрос агента, инструмент, шаг, место в
+            # выдаче. Поле ДОПОЛНИТЕЛЬНОЕ — OWUI читает известные ключи и
+            # незнакомые пропускает, поэтому его карточка источников не меняется.
+            # Клиент, который умеет больше, может показать «нашлось по запросу…».
+            if c.get('found_by'):
+                meta['found_by'] = c['found_by']
             metadata_list.append(meta)
         source: dict[str, Any] = {'name': name}
         # source.url — то, что OWUI открывает при клике по карточке. Для аудио-момента
