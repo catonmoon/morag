@@ -542,6 +542,7 @@ async def cmd_index(
             max_output_tokens=config.indexing.context.max_tokens,
             window_tokens=config.indexing.context.window_tokens,
             chunk_max_tokens=config.indexing.context.chunk_max_tokens,
+            prompt_template=config.indexing.context.prompt,
         ) if config.indexing.context.mode == 'llm' else NoopContextGenerator()
     )
     sparse_embedder = _make_sparse_embedder(config.indexing.sparse_embedder)

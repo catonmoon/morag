@@ -272,6 +272,11 @@ class ContextConfig(BaseModel):
     max_tokens: int | None = None
     window_tokens: int | None = None
     chunk_max_tokens: int = 512
+    # Свой промпт генерации контекста. None = встроенный дефолт. Что считать
+    # полезным контекстом — доменное решение: разговорной расшифровке нужно
+    # раскрыть местоимения именами, договору — назвать стороны и раздел.
+    # Обязан содержать плейсхолдеры {doc_summary}, {doc_text}, {chunk_text}.
+    prompt: str | None = None
 
 
 class KnowledgeMapConfig(BaseModel):

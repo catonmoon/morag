@@ -115,6 +115,7 @@ class LLMContextGenerator(ContextGenerator):
         max_output_tokens: int | None = None,
         window_tokens: int | None = None,
         chunk_max_tokens: int | None = None,
+        prompt_template: str | None = None,
     ) -> None:
         self._client = client
         self._token_counter = token_counter or TiktokenCounter()  # для LLM context window
@@ -122,8 +123,12 @@ class LLMContextGenerator(ContextGenerator):
         self._max_output_tokens = max_output_tokens
         self._window_tokens = window_tokens
         self._chunk_max_tokens = chunk_max_tokens
+        # Промпт — доменная настройка инстанса: что считать полезным контекстом,
+        # зависит от корпуса (у разговорной расшифровки и у договора это разное).
+        # Обязан содержать {doc_summary}, {doc_text} и {chunk_text}.
+        self._prompt_template = prompt_template or _PROMPT_TEMPLATE
         self._prompt_overhead = self._token_counter.count(
-            _PROMPT_TEMPLATE.format(doc_text='', chunk_text='', doc_summary='')
+            self._prompt_template.format(doc_text='', chunk_text='', doc_summary='')
         )
 
     def _adaptive_max_tokens(self, chunk_tokens: int, path_tokens: int) -> int | None:
@@ -175,7 +180,7 @@ class LLMContextGenerator(ContextGenerator):
         window_limit = min(self._window_tokens or available_for_doc, available_for_doc)
         doc_text = _extract_window(doc_text, char_offset, window_limit, self._token_counter)
 
-        prompt = _PROMPT_TEMPLATE.format(
+        prompt = self._prompt_template.format(
             doc_summary=doc_summary, doc_text=doc_text, chunk_text=chunk_text,
         )
         messages = [{'role': 'user', 'content': prompt}]
