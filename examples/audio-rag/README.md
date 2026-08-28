@@ -24,16 +24,16 @@
 
 ```bash
 cd services/asr-adaptor/deploy/mac
-./install.sh            # создаст ~/.asr-stack.env и остановится — впишите ключ LLM
+./install.sh            # создаст ~/.asr-stack.env и остановится — впишите OR_KEY и HF_TOKEN
 ./install.sh            # venv-ы и зависимости (~10 мин, ~4.6 ГБ на диске)
+./fetch-models.sh       # модели из сети (~1.6 ГБ): Whisper, CAM++, pyannote
 ./stack.sh up           # диаризатор грузит модель ~90 с
 ./stack.sh health       # downstream должен быть ok у всех трёх
 ```
 
-Веса моделей установщик не качает: MLX-конверсии Whisper в сети нет, pyannote — gated. Если рядом
-есть машина с рабочим стеком, `./fetch-assets.sh user@host` принесёт веса и реестр голосов; если
-нет — понадобится HF-токен с принятыми условиями `pyannote/speaker-diarization-3.1` и своя
-конверсия Whisper. Требования, диагностика и грабли — в
+Свободно качается всё, кроме двух gated-репозиториев pyannote, для которых понадобится HF-токен
+с принятыми условиями на `pyannote/segmentation-3.0` и `pyannote/speaker-diarization-3.1`.
+Требования, таблица происхождения моделей и грабли — в
 [`deploy/mac/README.md`](../../services/asr-adaptor/deploy/mac/README.md).
 
 ## Шаг 2. Настроить корпус

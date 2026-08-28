@@ -47,8 +47,20 @@ audio → диаризация (pyannote) → пасс-1 Whisper целым фа
 | `backends/transcribe` | 8123 | Whisper (mlx), **honor-ит `prompt`** — стоковые сервер-обвязки его игнорируют, поэтому свой |
 | `backends/campp` | 8126 | CAM++ (3D-Speaker) — верификационные эмбеддинги голоса для реестра |
 
-Модели Whisper: рекомендуем [bond005/whisper-podlodka-turbo](https://huggingface.co/bond005/whisper-podlodka-turbo)
-для русской разговорной речи (конвертируется в MLX для Apple Silicon).
+### Откуда берутся веса
+
+| модель | зачем | источник | конверсия |
+|---|---|---|---|
+| [`bond005/whisper-podlodka-turbo`](https://huggingface.co/bond005/whisper-podlodka-turbo) | распознавание русской разговорной речи, оба прохода | автор модели, свободно | для Apple Silicon нужна MLX-раскладка — готовая лежит в [`chukanov/whisper-podlodka-turbo-mlx`](https://huggingface.co/chukanov/whisper-podlodka-turbo-mlx) (float16), собрана `mlx-examples/whisper/convert.py` |
+| `pyannote/segmentation-3.0` | границы речи | авторы pyannote, **gated** (токен + принятые условия) | нет, берётся как есть |
+| `pyannote/speaker-diarization-3.1` | конфигурация пайплайна диаризации | авторы pyannote, **gated** | нет; весов не содержит, ссылается на две модели выше и ниже |
+| `pyannote/wespeaker-voxceleb-resnet34-LM` | эмбеддер голосов внутри диаризации | авторы pyannote, свободно | нет |
+| `3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx` | эмбеддинги голоса для кросс-эпизодного реестра | [релизы sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models) | ONNX-сборка модели 3D-Speaker, сделана проектом sherpa-onnx |
+| `MMS_FA` | пословное выравнивание (ADR-0019) | бандл `torchaudio` | нет; качается сам при первом выравнивании (~1.3 ГБ) |
+
+Скачать всё, кроме `MMS_FA`, — `deploy/mac/fetch-models.sh`. Единственное, чего нет в сети, —
+`speaker_registry.json`: это не модель, а состояние корпуса (ADR-0018), и у нового корпуса он
+просто начинается пустым.
 
 ## Потери речи и контроль покрытия
 

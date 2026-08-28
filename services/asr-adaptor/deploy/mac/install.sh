@@ -6,8 +6,8 @@
 #   ./install.sh --check      # ничего не менять, только сказать чего не хватает
 #   ./install.sh --launchd    # вдобавок сгенерировать и загрузить плисты (см. README: на 16 ГБ не надо)
 #
-# Идемпотентен: существующие venv не пересоздаёт, зависимости досыпает. Модели НЕ качает —
-# их приносит fetch-assets.sh (pyannote gated, whisper-turbo собирался вручную).
+# Идемпотентен: существующие venv не пересоздаёт, зависимости досыпает. Модели сам НЕ качает —
+# их скачивает fetch-models.sh.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -19,7 +19,7 @@ for a in "$@"; do
   case "$a" in
     --check) CHECK_ONLY=1 ;;
     --launchd) WANT_LAUNCHD=1 ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
     *) echo "неизвестный флаг: $a" >&2; exit 2 ;;
   esac
 done
@@ -65,8 +65,7 @@ ok "morag: $MORAG_REPO"
 
 # --- локальные Bearer'ы бэкендов ---------------------------------------------
 # Диаризатор без DIARIZER_API_KEY не стартует вовсе, CAM++ и transcribe проверяют свой.
-# Это секрет между процессами ОДНОЙ машины, и переносить его с донора незачем: генерируем свой.
-# С донора нужны только ключ LLM и egress-прокси (import-env.sh).
+# Это секрет между процессами ОДНОЙ машины — генерируем свой, вписывать вручную нечего.
 # Заполняем ПУСТУЮ строку шаблона, а не дописываем в конец: иначе в файле оказываются два
 # присваивания одного имени (побеждает последнее), и правка верхней строки молча ни на что не
 # влияет. Дописываем только если строки нет вовсе.
@@ -106,7 +105,7 @@ gen_key ASR_DIARIZER_KEY DIARIZER_API_KEY
 # ⚠️ Без OR_KEY адаптер не просто теряет LLM-стадии — он НЕ СТАРТУЕТ: app.py строит LLMClient на
 # импорте модуля, и AsyncOpenAI падает «Missing credentials» ещё до первого запроса.
 [[ -n "${OR_KEY:-}" ]] && ok "ключ LLM задан" \
-  || warn "OR_KEY пуст — адаптер не стартует вовсе (LLMClient строится на импорте): ./import-env.sh <донор>"
+  || warn "OR_KEY пуст — адаптер не стартует вовсе (LLMClient строится на импорте). Впишите его в $ENV_FILE"
 
 # --- каталоги ----------------------------------------------------------------
 say "каталоги стека — $STACK_HOME"
@@ -154,19 +153,27 @@ mkvenv adaptor  "сам asr-adaptor + morag-core + выравнивание сл
 say "модели и состояние"
 WHISPER_DIR="$STACK_HOME/models/whisper-podlodka-turbo"
 CAMPP_ONNX="$STACK_HOME/models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx"
-PYANNOTE_CACHE="$HOME/.cache/torch/pyannote"
-REGISTRY="$STACK_HOME/state/speaker_registry.json"
+# ⚠️ Кэш pyannote — СОБСТВЕННЫЙ дефолт библиотеки (PYANNOTE_CACHE), а не кэш huggingface_hub.
+# В ~/.cache/huggingface/hub может лежать неполная копия, и по ней легко решить, что моделей нет.
+PYANNOTE_CACHE="${PYANNOTE_CACHE:-$HOME/.cache/torch/pyannote}"
+# Реестр — из профиля корпуса, если он задан: у каждого корпуса свой файл.
+REGISTRY="${ASR_REGISTRY_PATH:-$STACK_HOME/state/speaker_registry.json}"
 
 [[ -f "$WHISPER_DIR/weights.safetensors" ]] && ok "whisper-podlodka-turbo" \
-  || warn "нет весов whisper: $WHISPER_DIR — забрать fetch-assets.sh"
-[[ -f "$CAMPP_ONNX" ]] && ok "CAM++ onnx" || warn "нет CAM++ onnx: $CAMPP_ONNX — забрать fetch-assets.sh"
+  || warn "нет весов whisper ($WHISPER_DIR) — ./fetch-models.sh whisper"
+[[ -f "$CAMPP_ONNX" ]] && ok "CAM++ onnx" \
+  || warn "нет CAM++ onnx ($CAMPP_ONNX) — ./fetch-models.sh campp"
 [[ -d "$PYANNOTE_CACHE/models--pyannote--speaker-diarization-3.1" ]] && ok "pyannote в кэше" \
-  || warn "нет pyannote ($PYANNOTE_CACHE) — забрать fetch-assets.sh либо скачать с HF_TOKEN"
+  || warn "нет pyannote ($PYANNOTE_CACHE) — ./fetch-models.sh pyannote (нужен HF_TOKEN)"
+
+# ⚠️ Пустой реестр — НОРМА для нового корпуса: голоса накопятся сами за первые прогоны. Тревожно
+# только когда продолжают ПРЕЖНИЙ корпус: там нумерация Speaker_N сквозная, и начав с нуля,
+# наминг разъедется с уже расшифрованным.
 if [[ -f "$REGISTRY" ]]; then
   ok "реестр голосов: $("$PY" -c "import json;d=json.load(open('$REGISTRY'));print(f\"next_id={d['next_id']}, голосов {len(d['speakers'])}\")" 2>/dev/null || echo "есть")"
 else
-  warn "НЕТ РЕЕСТРА ГОЛОСОВ ($REGISTRY). Без него нумерация Speaker_N начнётся заново и наминг"
-  warn "всего будущего корпуса разъедется с прежним. Забрать fetch-assets.sh до первого прогона."
+  ok "реестра нет ($REGISTRY) — для НОВОГО корпуса так и надо, заведётся при первом прогоне"
+  warn "продолжаете ПРЕЖНИЙ корпус? положите сюда его реестр — иначе нумерация начнётся заново"
 fi
 
 # MMS_FA для пословного выравнивания качается сам при первом прогоне (~1.3 ГБ в ~/.cache/torch).
