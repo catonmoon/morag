@@ -25,9 +25,9 @@ from typing import Optional  # noqa: E402
 import mlx_whisper  # noqa: E402
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile  # noqa: E402
 
-# Каталог с MLX-весами. Env `TRANSCRIBE_MODELS_DIR` — чтобы бэкенд разворачивался на машине с
-# другим раскладом каталогов (deploy/mac); дефолт прежний, историческая раскладка Мака.
-MODELS_DIR = Path(os.environ.get('TRANSCRIBE_MODELS_DIR') or (Path.home() / 'llm-stack/models'))
+# Каталог с MLX-весами: env `TRANSCRIBE_MODELS_DIR`, иначе каталог моделей стека.
+MODELS_DIR = Path(os.environ.get('TRANSCRIBE_MODELS_DIR')
+                  or Path(os.environ.get('ASR_STACK_HOME') or (Path.home() / 'asr-stack')) / 'models')
 MODELS = {
     'whisper-podlodka-turbo': str(MODELS_DIR / 'whisper-podlodka-turbo'),
     'whisper-large-v3-turbo': str(MODELS_DIR / 'whisper-large-v3-turbo'),

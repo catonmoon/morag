@@ -20,9 +20,9 @@ import sherpa_onnx
 import soundfile as sf
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
 
-EMB = os.environ.get('CAMPP_MODEL', str(
-    Path.home() / 'llm-stack/services/diarizer-onnx/models'
-    / '3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx'))
+EMB = os.environ.get('CAMPP_MODEL') or str(
+    Path(os.environ.get('ASR_STACK_HOME') or (Path.home() / 'asr-stack')) / 'models'
+    / '3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx')
 API_KEY = os.environ.get('CAMPP_API_KEY')
 MIN_DUR = 2.0   # сегменты короче не берём в центроид
 MAX_SEGS = 20   # самых длинных сегментов на центроид

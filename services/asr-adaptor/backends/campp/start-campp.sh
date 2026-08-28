@@ -2,19 +2,20 @@
 # Запуск CAM++ embed-бэкенда (:8126). Паттерн как у start-diarizer.sh — pid/лог в файлы.
 #
 # Окружение (дефолты — историческая раскладка):
-#   CAMPP_VENV     venv с sherpa-onnx      (~/diar-test/.venv-qwenasr)
-#   CAMPP_MODEL    путь к .onnx CAM++      (~/llm-stack/services/diarizer-onnx/models/…advanced.onnx) — читает app.py
+#   CAMPP_VENV     venv с sherpa-onnx      ($ASR_STACK_HOME/venvs/campp)
+#   CAMPP_MODEL    путь к .onnx CAM++      ($ASR_STACK_HOME/models/…advanced.onnx) — читает app.py
 #   CAMPP_API_KEY  Bearer (обязателен)     — из ~/.asr-stack.env или окружения
 #   HOST/PORT      где слушать             (127.0.0.1:8126)
 set -euo pipefail
 
 SERVICE_DIR="${CAMPP_SERVICE_DIR:-$(cd "$(dirname "$0")" && pwd)}"
-VENV="${CAMPP_VENV:-$HOME/diar-test/.venv-qwenasr}"
+STACK_HOME="${ASR_STACK_HOME:-$HOME/asr-stack}"
+VENV="${CAMPP_VENV:-$STACK_HOME/venvs/campp}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8126}"
 
-LOG_DIR="${LOG_DIR:-$HOME/llm-stack/logs}"
-RUN_DIR="${RUN_DIR:-$HOME/llm-stack/run}"
+LOG_DIR="${LOG_DIR:-$STACK_HOME/logs}"
+RUN_DIR="${RUN_DIR:-$STACK_HOME/run}"
 LOG_FILE="${LOG_FILE:-$LOG_DIR/campp.log}"
 PID_FILE="${PID_FILE:-$RUN_DIR/campp.pid}"
 

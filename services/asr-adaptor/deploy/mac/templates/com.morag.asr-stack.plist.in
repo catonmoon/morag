@@ -11,7 +11,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.podlodka.asr-stack</string>
+    <string>com.morag.asr-stack</string>
 
     <key>ProgramArguments</key>
     <array>

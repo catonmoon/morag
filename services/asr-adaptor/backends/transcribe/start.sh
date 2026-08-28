@@ -3,8 +3,8 @@
 # venv должен иметь: mlx-whisper, fastapi, uvicorn, python-multipart.
 #
 # Пути настраиваются окружением (дефолты — историческая раскладка):
-#   TRANSCRIBE_VENV       venv с mlx-whisper           (~/diar-test/.venv-whisper)
-#   TRANSCRIBE_MODELS_DIR каталог с MLX-весами         (~/llm-stack/models) — читает app.py
+#   TRANSCRIBE_VENV       venv с mlx-whisper           ($ASR_STACK_HOME/venvs/whisper)
+#   TRANSCRIBE_MODELS_DIR каталог с MLX-весами         ($ASR_STACK_HOME/models) — читает app.py
 #   TRANSCRIBE_PORT       порт                         (8123)
 #   TRANSCRIBE_HOST       адрес прослушивания          (loopback; исторический дефолт — 0.0.0.0)
 #
@@ -14,5 +14,6 @@ set -e
 export PATH=/opt/homebrew/bin:$PATH
 cd "$(dirname "$0")"
 PORT="${TRANSCRIBE_PORT:-8123}"
-VENV="${TRANSCRIBE_VENV:-$HOME/diar-test/.venv-whisper}"
+STACK_HOME="${ASR_STACK_HOME:-$HOME/asr-stack}"
+VENV="${TRANSCRIBE_VENV:-$STACK_HOME/venvs/whisper}"
 exec "$VENV/bin/uvicorn" app:app --host "${TRANSCRIBE_HOST:-127.0.0.1}" --port "$PORT"

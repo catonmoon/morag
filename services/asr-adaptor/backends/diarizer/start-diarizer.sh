@@ -2,12 +2,13 @@
 # Запуск сервиса диаризации, паттерн как у start-omlx.sh.
 set -euo pipefail
 
-SERVICE_DIR="${SERVICE_DIR:-$HOME/llm-stack/services/diarizer}"
+STACK_HOME="${ASR_STACK_HOME:-$HOME/asr-stack}"
+SERVICE_DIR="${SERVICE_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8090}"
 
-LOG_DIR="${LOG_DIR:-$HOME/llm-stack/logs}"
-RUN_DIR="${RUN_DIR:-$HOME/llm-stack/run}"
+LOG_DIR="${LOG_DIR:-$STACK_HOME/logs}"
+RUN_DIR="${RUN_DIR:-$STACK_HOME/run}"
 LOG_FILE="${LOG_FILE:-$LOG_DIR/diarizer.log}"
 PID_FILE="${PID_FILE:-$RUN_DIR/diarizer.pid}"
 
@@ -37,7 +38,7 @@ echo "  log:    $LOG_FILE"
 
 cd "$SERVICE_DIR"
 # venv отдельной переменной: на машине с раскладкой deploy/mac он лежит не внутри SERVICE_DIR
-VENV="${DIARIZER_VENV:-$SERVICE_DIR/.venv}"
+VENV="${DIARIZER_VENV:-$STACK_HOME/venvs/diarizer}"
 nohup "$VENV/bin/uvicorn" app:app \
   --host "$HOST" --port "$PORT" \
   --log-level info \

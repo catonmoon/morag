@@ -56,7 +56,9 @@ class Config:
 
     # --- реестр спикеров (локальный JSON, см. CLAUDE.md — НЕ Qdrant) ---
     registry_path: str = field(default_factory=lambda: _env(
-        'ASR_REGISTRY_PATH', os.path.expanduser('~/diar-test/speaker_registry.json')))
+        'ASR_REGISTRY_PATH',
+        os.path.join(os.environ.get('ASR_STACK_HOME')
+                     or os.path.expanduser('~/asr-stack'), 'state', 'speaker_registry.json')))
     match_threshold: float = field(default_factory=lambda: float(_env('ASR_MATCH_THRESHOLD', '0.55')))
     max_centroids: int = field(default_factory=lambda: int(_env('ASR_MAX_CENTROIDS', '8')))
 
