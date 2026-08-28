@@ -18,6 +18,14 @@ ENV_FILE="${ASR_STACK_ENV:-$HOME/.asr-stack.env}"
 [[ -f "$ENV_FILE" ]] || { echo "нет $ENV_FILE — сначала ./install.sh" >&2; exit 1; }
 set -a; source "$ENV_FILE"; set +a
 
+# Профиль корпуса — доменные настройки (описание материала, термины, голоса), которые живут в
+# репозитории проекта, а не в секретном env машины. Читается ПОСЛЕ него и потому перекрывает:
+#   ASR_PROFILE=<репозиторий-проекта>/<корпус>/asr-profile.env ./stack.sh up
+if [[ -n "${ASR_PROFILE:-}" ]]; then
+  [[ -f "$ASR_PROFILE" ]] || { echo "нет профиля: $ASR_PROFILE" >&2; exit 1; }
+  set -a; source "$ASR_PROFILE"; set +a
+fi
+
 STACK_HOME="${ASR_STACK_HOME:-$HOME/asr-stack}"
 VENVS="$STACK_HOME/venvs"
 LOGS="$STACK_HOME/logs"; RUN="$STACK_HOME/run"
