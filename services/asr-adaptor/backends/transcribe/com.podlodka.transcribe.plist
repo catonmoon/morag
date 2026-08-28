@@ -7,7 +7,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/chukanov_ai/diar-test/.venv-whisper/bin/uvicorn</string>
+        <string>/Users/USER/diar-test/.venv-whisper/bin/uvicorn</string>
         <string>app:app</string>
         <string>--host</string>
         <string>0.0.0.0</string>
@@ -16,7 +16,7 @@
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/chukanov_ai/diar-test/transcribe_backend</string>
+    <string>/Users/USER/diar-test/transcribe_backend</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -33,9 +33,9 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/chukanov_ai/llm-stack/logs/transcribe-launchd.log</string>
+    <string>/Users/USER/llm-stack/logs/transcribe-launchd.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/chukanov_ai/llm-stack/logs/transcribe-launchd.log</string>
+    <string>/Users/USER/llm-stack/logs/transcribe-launchd.log</string>
 </dict>
 </plist>

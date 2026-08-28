@@ -1,8 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Mac-native деплой asr-adaptor. Код на Маке: ~/diar-test/asr-adaptor; venv ~/diar-test/.venv-asr
-     (pip install /opt/morag/ + requirements). Аудио — loopback к локальным Mac-сервисам.
-     OR_KEY — реальный OpenRouter-ключ (как TRANSCRIBE_API_KEY у transcribe_backend). -->
+<!-- Mac-native деплой asr-adaptor, ИСТОРИЧЕСКАЯ раскладка (код и venv в ~/diar-test).
+     Аудио — loopback к локальным Mac-сервисам. `/Users/USER` и REPLACE_WITH_* подставить своими.
+
+     ⚠️ Для новой машины этот файл не нужен: `deploy/mac/install.sh --launchd` генерирует плист сам,
+     с путями этой машины, и держит секреты в ~/.asr-stack.env (0600), а не в плисте — тот лежит
+     в ~/Library/LaunchAgents и читается кем угодно. Образец оставлен для уже развёрнутых
+     инстансов. -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
@@ -10,7 +14,7 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/chukanov_ai/diar-test/.venv-asr/bin/uvicorn</string>
+        <string>/Users/USER/diar-test/.venv-asr/bin/uvicorn</string>
         <string>app:app</string>
         <string>--host</string>
         <string>0.0.0.0</string>
@@ -19,7 +23,7 @@
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/chukanov_ai/diar-test/asr-adaptor</string>
+    <string>/Users/USER/diar-test/asr-adaptor</string>
 
     <key>EnvironmentVariables</key>
     <dict>
@@ -34,7 +38,7 @@
         <key>ASR_CAMPP_URL</key>
         <string>http://127.0.0.1:8126/embed-centroids</string>
         <key>ASR_REGISTRY_PATH</key>
-        <string>/Users/chukanov_ai/diar-test/speaker_registry.json</string>
+        <string>/Users/USER/diar-test/speaker_registry.json</string>
     </dict>
 
     <key>RunAtLoad</key>
@@ -44,9 +48,9 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/Users/chukanov_ai/llm-stack/logs/asr-launchd.log</string>
+    <string>/Users/USER/llm-stack/logs/asr-launchd.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/chukanov_ai/llm-stack/logs/asr-launchd.log</string>
+    <string>/Users/USER/llm-stack/logs/asr-launchd.log</string>
 </dict>
 </plist>
