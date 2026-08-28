@@ -15,8 +15,13 @@ from __future__ import annotations
 import asyncio
 import re
 
+DEFAULT_CORPUS = 'подкаста'
+
+# Подставляется .replace(), а не .format(): в промптах есть литеральные фигурные скобки JSON.
+_CORPUS_SLOT = '@CORPUS@'
+
 _SYS = (
-    'Тебе дано НАЧАЛО подкаста — реплики с метками говорящих в формате `[Speaker_N] текст`. '
+    f'Тебе дано НАЧАЛО {_CORPUS_SLOT} — реплики с метками говорящих в формате `[Speaker_N] текст`. '
     'Ведущие в начале представляются и представляют гостей по имени («меня зовут …», «со мной …», '
     '«сегодня с нами …», «у нас в гостях …»), гость часто подтверждает своё имя сам. '
     'Сопоставь КАЖДОЙ метке `[Speaker_N]`, которую можно опознать, реальное ПОЛНОЕ Имя и Фамилию '
@@ -28,7 +33,7 @@ _SYS = (
 )
 
 _GUESTS_SYS = (
-    'Тебе дано НАЧАЛО подкаста. Ведущие представляются сами и представляют ГОСТЕЙ («сегодня с нами…», '
+    f'Тебе дано НАЧАЛО {_CORPUS_SLOT}. Ведущие представляются сами и представляют ГОСТЕЙ («сегодня с нами…», '
     '«у нас в гостях…», «затащить в гости…»). Перечисли ТОЛЬКО гостей — людей, которых представили, '
     'но которые не являются ведущими. Полное Имя Фамилия в именительном падеже («Валеру Бабушкина» → '
     '«Валерий Бабушкин»), правь очевидный ASR-гарбл фамилии. Никого не представили — пустой список. '
@@ -66,7 +71,8 @@ def _name_in_intro(name: str, intro_norm: str) -> bool:
 
 
 async def name_speakers(turns: list[dict], registry_names: dict, llm,
-                        intro_turns: int = 12, max_tokens: int = 400) -> tuple[dict, list]:
+                        intro_turns: int = 12, max_tokens: int = 400,
+                        corpus_desc: str = DEFAULT_CORPUS) -> tuple[dict, list]:
     """turns (со `speaker`=Speaker_N) + registry_names {Speaker_N: имя} → ({Speaker_N: итоговое_имя},
     конфликты). Итоговое имя = интро (истина) → реестр (fallback) → Speaker_N (не назван)."""
     present = sorted({t['speaker'] for t in turns}, key=lambda s: int(s.split('_')[1]))
@@ -76,7 +82,8 @@ async def name_speakers(turns: list[dict], registry_names: dict, llm,
     intro_map: dict = {}
     try:
         res = await llm.complete_json(
-            [{'role': 'system', 'content': _SYS}, {'role': 'user', 'content': intro}],
+            [{'role': 'system', 'content': _SYS.replace(_CORPUS_SLOT, corpus_desc or DEFAULT_CORPUS)},
+             {'role': 'user', 'content': intro}],
             schema=_SCHEMA, schema_name='speaker_names', max_tokens=max_tokens)
         for r in (res or {}).get('speakers', []):
             lbl, nm = r.get('label'), r.get('name')
@@ -99,7 +106,8 @@ async def name_speakers(turns: list[dict], registry_names: dict, llm,
     async def _extract():
         try:
             g = await llm.complete_json(
-                [{'role': 'system', 'content': _GUESTS_SYS}, {'role': 'user', 'content': intro}],
+                [{'role': 'system', 'content': _GUESTS_SYS.replace(_CORPUS_SLOT, corpus_desc or DEFAULT_CORPUS)},
+                 {'role': 'user', 'content': intro}],
                 schema=_GUESTS_SCHEMA, schema_name='guests', max_tokens=200)
             return [x.strip() for x in (g or {}).get('guests', [])
                     if isinstance(x, str) and x.strip()

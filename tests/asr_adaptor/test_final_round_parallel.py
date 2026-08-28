@@ -17,7 +17,7 @@ async def test_turns_are_corrected_in_parallel(monkeypatch):
     """Порядок вызовов не важен, важно что они идут одновременно, а не гуськом."""
     inflight, peak = 0, 0
 
-    async def slow_correct(raw, dsum, csum, canon, llm, always=(), recalled=''):
+    async def slow_correct(raw, dsum, csum, canon, llm, always=(), recalled='', **kw):
         nonlocal inflight, peak
         inflight += 1
         peak = max(peak, inflight)
@@ -42,7 +42,7 @@ async def test_concurrency_is_capped(monkeypatch):
     """Потолок соблюдается: провайдер не должен получать залп."""
     inflight, peak = 0, 0
 
-    async def slow_correct(raw, dsum, csum, canon, llm, always=(), recalled=''):
+    async def slow_correct(raw, dsum, csum, canon, llm, always=(), recalled='', **kw):
         nonlocal inflight, peak
         inflight += 1
         peak = max(peak, inflight)
@@ -62,7 +62,7 @@ async def test_concurrency_is_capped(monkeypatch):
 
 async def test_one_failed_turn_does_not_kill_the_episode(monkeypatch):
     """Реплика остаётся сырой, остальные считаются — вместо потери всей аудио-работы."""
-    async def flaky(raw, dsum, csum, canon, llm, always=(), recalled=''):
+    async def flaky(raw, dsum, csum, canon, llm, always=(), recalled='', **kw):
         if 'номер 2 ' in raw:
             raise RuntimeError('402 кончились кредиты')
         return raw + ' [правлено]'
@@ -85,7 +85,7 @@ async def test_one_failed_turn_does_not_kill_the_episode(monkeypatch):
 async def test_short_and_signalless_turns_skip_the_llm(monkeypatch):
     called = 0
 
-    async def counting(raw, dsum, csum, canon, llm, always=(), recalled=''):
+    async def counting(raw, dsum, csum, canon, llm, always=(), recalled='', **kw):
         nonlocal called
         called += 1
         return raw
@@ -111,7 +111,7 @@ async def test_context_gives_neighbouring_turns(monkeypatch):
     """
     seen = []
 
-    async def capture(raw, dsum, context, canon, llm, always=(), recalled=''):
+    async def capture(raw, dsum, context, canon, llm, always=(), recalled='', **kw):
         seen.append(context)
         return raw
 
@@ -159,7 +159,7 @@ async def test_failed_turn_is_retried_once_and_second_try_wins(monkeypatch):
     """
     calls = {'n': 0}
 
-    async def flaky_once(raw, dsum, csum, canon, llm, always=(), recalled=''):
+    async def flaky_once(raw, dsum, csum, canon, llm, always=(), recalled='', **kw):
         calls['n'] += 1
         if calls['n'] == 1:
             raise ValueError('LLM returned invalid JSON')
@@ -182,7 +182,7 @@ async def test_sweep_pass_heals_transient_failure(monkeypatch):
     """Спайк сети/нагрузки: оба захода на месте упали, добивочный проход спустя паузу — прошёл."""
     calls = {'n': 0}
 
-    async def transient(raw, dsum, csum, canon, llm, always=(), recalled=''):
+    async def transient(raw, dsum, csum, canon, llm, always=(), recalled='', **kw):
         calls['n'] += 1
         if calls['n'] <= 1:                       # ретраи ВЫЗОВА — в RetryingLLM, стадия зовёт раз
             raise ValueError('LLM returned invalid JSON')

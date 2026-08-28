@@ -21,8 +21,14 @@ _CYR = re.compile('[а-яёА-ЯЁ]')
 MAX_WAS_WORDS = 3   # гарбл может разъехаться на пару слов («и Селедец»), абзац — не может
 MAX_NOW_WORDS = 6
 
+DEFAULT_CORPUS = 'русскоязычного подкаста про технологии'
+
+# ⚠️ Подставляется .replace(), а НЕ .format(): ниже в промпте есть литеральные фигурные скобки
+# ({"fixes":…}), и format() на них падает KeyError.
+_CORPUS_SLOT = '@CORPUS@'
+
 _CORRECT_SYS = (
-    'Ты вычитываешь черновую ASR-расшифровку фрагмента русскоязычного подкаста про технологии. '
+    f'Ты вычитываешь черновую ASR-расшифровку фрагмента {_CORPUS_SLOT}. '
     'Найди НЕВЕРНО РАСПОЗНАННЫЕ имена собственные, названия компаний, моделей, продуктов, '
     'технические термины и аббревиатуры — и верни СПИСОК ЗАМЕН, а не исправленный текст.\n'
     'Для каждой замены: "was" — фраза ИЗ ФРАГМЕНТА ДОСЛОВНО, ровно как она там написана, от одного '
@@ -235,7 +241,7 @@ async def recall_entities(doc_sum: str, text: str, llm) -> str:
 
 
 async def correct(text: str, doc_sum: str, context: str, canonicals, llm, always=(),
-                  recalled: str = '') -> str:
+                  recalled: str = '', corpus_desc: str = DEFAULT_CORPUS) -> str:
     """Правка сущностей: модель ПРЕДЛАГАЕТ замены, применяет их код.
 
     Прозу у модели не берём вовсе — только пары «было → стало» (их проверяет и применяет
@@ -254,7 +260,8 @@ async def correct(text: str, doc_sum: str, context: str, canonicals, llm, always
             f'Известные корректные термины и имена (каноники): {cand}\n\n'
             f'ФРАГМЕНТ, в котором ищем замены:\n{text}')
     res = await llm.complete_json(
-        [{'role': 'system', 'content': _CORRECT_SYS}, {'role': 'user', 'content': body}],
+        [{'role': 'system', 'content': _CORRECT_SYS.replace(_CORPUS_SLOT, corpus_desc or DEFAULT_CORPUS)},
+         {'role': 'user', 'content': body}],
         schema=_FIX_SCHEMA, schema_name='fixes', max_tokens=1500)
 
     fixes = (res or {}).get('fixes') or []

@@ -144,7 +144,8 @@ async def _final_round(turns, dsum: str, gloss, llm, concurrency: int, step,
             async with sem:
                 recalled = await recall_entities(dsum, raw, llm)
                 t['final'] = await correct(raw, dsum, _around(turns, i, CFG.context_turns),
-                                           relevant(raw, gloss), llm, always, recalled)
+                                           relevant(raw, gloss), llm, always, recalled,
+                                           corpus_desc=CFG.corpus_desc)
             ok = True
         except Exception as e:
             t['final'] = raw
@@ -337,7 +338,7 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             step('naming')
             _t = time.monotonic()
             name_map, name_conflicts = await name_speakers(
-                turns, registry.names(CFG.registry_path), llm)
+                turns, registry.names(CFG.registry_path), llm, corpus_desc=CFG.corpus_desc)
             tm['naming_s'] = round(time.monotonic() - _t, 1)
         for t in turns:
             t['speaker_id'] = t['speaker']

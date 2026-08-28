@@ -12,7 +12,11 @@ import requests
 from config import CFG
 
 
-def diarize(wav_path: str, min_spk: int = 1, max_spk: int = 10) -> list[dict]:
+def diarize(wav_path: str, min_spk: int | None = None, max_spk: int | None = None) -> list[dict]:
+    # Диапазон голосов задаётся корпусом (ASR_MIN_SPEAKERS/ASR_MAX_SPEAKERS): у подкаста их 2-4,
+    # у совещания бывает за десяток, и прежний зашитый потолок 10 схлопывал лишние голоса в чужие.
+    min_spk = CFG.min_speakers if min_spk is None else min_spk
+    max_spk = CFG.max_speakers if max_spk is None else max_spk
     headers = {'Authorization': f'Bearer {CFG.diarizer_key}'} if CFG.diarizer_key else {}
     with open(wav_path, 'rb') as f:
         r = requests.post(CFG.diarizer_url, files={'audio': f},
