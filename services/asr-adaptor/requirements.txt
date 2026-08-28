@@ -1,5 +1,5 @@
-# Сервис-специфичные зависимости. morag-core (openai, httpx, tiktoken, pydantic, numpy)
-# ставится отдельно через `pip install /opt/morag/` (Dockerfile) или в venv (Mac-native).
+# Сервис-специфичные зависимости. morag-core (openai, httpx, pydantic, numpy) ставится отдельно
+# через `pip install /opt/morag/` (Dockerfile) или в venv (Mac-native).
 fastapi==0.115.2
 uvicorn==0.30.6
 python-multipart>=0.0.9
@@ -9,4 +9,10 @@ transformers==4.53.0
 # отключается и в глоссарий проходят переводы обычных слов — на корпусе это дало 2069 замен
 # кириллицы на латиницу («агенты»→agents). Зависимость была необъявленной: импорт под try/except.
 wordfreq>=3.0
+# Бюджет initial_prompt считает morag.indexing.token_counter, а тот импортирует tiktoken. В ядре
+# он объявлен в extras `indexing` — вместе с qdrant-client, pymupdf и nltk, которые оркестратору
+# ASR не нужны. Поэтому берём один пакет здесь: без него сервис не стартует вовсе
+# (ModuleNotFoundError в app.py → pipeline → stages/prompt_budget). На давно живущем инстансе
+# его когда-то доставили руками, поэтому дефект не был виден.
+tiktoken>=0.9.0
 
