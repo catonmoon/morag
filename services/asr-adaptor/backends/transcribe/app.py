@@ -25,9 +25,12 @@ from typing import Optional  # noqa: E402
 import mlx_whisper  # noqa: E402
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile  # noqa: E402
 
+# Каталог с MLX-весами. Env `TRANSCRIBE_MODELS_DIR` — чтобы бэкенд разворачивался на машине с
+# другим раскладом каталогов (deploy/mac); дефолт прежний, историческая раскладка Мака.
+MODELS_DIR = Path(os.environ.get('TRANSCRIBE_MODELS_DIR') or (Path.home() / 'llm-stack/models'))
 MODELS = {
-    'whisper-podlodka-turbo': str(Path.home() / 'llm-stack/models/whisper-podlodka-turbo'),
-    'whisper-large-v3-turbo': str(Path.home() / 'llm-stack/models/whisper-large-v3-turbo'),
+    'whisper-podlodka-turbo': str(MODELS_DIR / 'whisper-podlodka-turbo'),
+    'whisper-large-v3-turbo': str(MODELS_DIR / 'whisper-large-v3-turbo'),
 }
 DEFAULT_MODEL = 'whisper-podlodka-turbo'
 API_KEY = os.environ.get('TRANSCRIBE_API_KEY')  # опц. Bearer-защита

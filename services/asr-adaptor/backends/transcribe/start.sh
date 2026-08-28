@@ -1,8 +1,18 @@
 #!/bin/bash
 # Запуск транскрайб-бэкенда на Маке. ffmpeg в PATH обязателен (mlx_whisper зовёт его).
-# venv-whisper должен иметь: mlx-whisper, fastapi, uvicorn, python-multipart.
+# venv должен иметь: mlx-whisper, fastapi, uvicorn, python-multipart.
+#
+# Пути настраиваются окружением (дефолты — историческая раскладка):
+#   TRANSCRIBE_VENV       venv с mlx-whisper           (~/diar-test/.venv-whisper)
+#   TRANSCRIBE_MODELS_DIR каталог с MLX-весами         (~/llm-stack/models) — читает app.py
+#   TRANSCRIBE_PORT       порт                         (8123)
+#   TRANSCRIBE_HOST       адрес прослушивания          (loopback; исторический дефолт — 0.0.0.0)
+#
+# ⚠️ Дефолт host сменён с 0.0.0.0 на loopback: адаптер и так ходит сюда по 127.0.0.1, а бэкенд
+# на ноутбуке в чужой сети — открытый ASR за одним Bearer. Прежнее — TRANSCRIBE_HOST=0.0.0.0.
 set -e
 export PATH=/opt/homebrew/bin:$PATH
 cd "$(dirname "$0")"
 PORT="${TRANSCRIBE_PORT:-8123}"
-exec ~/diar-test/.venv-whisper/bin/uvicorn app:app --host 0.0.0.0 --port "$PORT"
+VENV="${TRANSCRIBE_VENV:-$HOME/diar-test/.venv-whisper}"
+exec "$VENV/bin/uvicorn" app:app --host "${TRANSCRIBE_HOST:-127.0.0.1}" --port "$PORT"

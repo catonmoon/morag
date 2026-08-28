@@ -36,7 +36,9 @@ echo "  port:   $PORT"
 echo "  log:    $LOG_FILE"
 
 cd "$SERVICE_DIR"
-nohup .venv/bin/uvicorn app:app \
+# venv отдельной переменной: на машине с раскладкой deploy/mac он лежит не внутри SERVICE_DIR
+VENV="${DIARIZER_VENV:-$SERVICE_DIR/.venv}"
+nohup "$VENV/bin/uvicorn" app:app \
   --host "$HOST" --port "$PORT" \
   --log-level info \
   >>"$LOG_FILE" 2>&1 &

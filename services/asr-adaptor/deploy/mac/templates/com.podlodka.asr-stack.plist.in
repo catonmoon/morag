@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Один плист на ВЕСЬ стек: launchd зовёт stack.sh, тот поднимает четыре сервиса в правильном
+     порядке. Отдельные плисты на каждый сервис (как было исторически) означали бы
+     четыре копии путей и ключей и свой порядок старта у launchd — диаризатор грузится 90 с,
+     и адаптер, поднявшийся раньше него, отвечает нездоровым health.
+
+     install.sh --launchd подставляет @STACK_HOME@ / @ADAPTOR_DIR@ / @ENV_FILE@ / @HOME@.
+     Секретов в плисте НЕТ: он лежит в ~/Library/LaunchAgents и читается кем угодно; stack.sh
+     берёт их из @ENV_FILE@ с правами 0600. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.podlodka.asr-stack</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@ADAPTOR_DIR@/deploy/mac/stack.sh</string>
+        <string>up</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>@ADAPTOR_DIR@</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>ASR_STACK_ENV</key>
+        <string>@ENV_FILE@</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- KeepAlive НЕТ намеренно: stack.sh поднимает процессы и завершается, а launchd счёл бы
+         выход падением и крутил бы перезапуск вечно. Сторожит процессы сам stack.sh. -->
+    <key>StandardOutPath</key>
+    <string>@STACK_HOME@/logs/launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>@STACK_HOME@/logs/launchd.log</string>
+</dict>
+</plist>
