@@ -71,11 +71,11 @@ ASR_BASE=http://127.0.0.1:8082 SEASON=2 ./transcribe.sh 34
 | что | зачем | откуда | доступ |
 |---|---|---|---|
 | **whisper-podlodka-turbo** (1.5 ГиБ) | распознавание речи, оба прохода | [`chukanov/whisper-podlodka-turbo-mlx`](https://huggingface.co/chukanov/whisper-podlodka-turbo-mlx) — MLX-конверсия [`bond005/whisper-podlodka-turbo`](https://huggingface.co/bond005/whisper-podlodka-turbo) | свободно |
-| **pyannote segmentation-3.0** (6 МиБ) | границы речи | `pyannote/segmentation-3.0` | **gated**: HF-токен + принятые условия |
-| **pyannote speaker-diarization-3.1** (конфиг) | сборка пайплайна диаризации | `pyannote/speaker-diarization-3.1` | **gated**, там же |
-| **wespeaker-voxceleb-resnet34-LM** (26 МиБ) | эмбеддер голосов для диаризации | `pyannote/wespeaker-voxceleb-resnet34-LM` | свободно |
-| **CAM++ onnx** (27 МиБ) | центроиды голосов для реестра `Speaker_N` | [релизы sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models) — ONNX-сборка 3D-Speaker | свободно |
-| **MMS_FA** (~1.3 ГБ) | пословное выравнивание | бандл `torchaudio` | качается сам при первом выравнивании |
+| **pyannote segmentation-3.0** (6 МиБ) | границы речи | [`pyannote/segmentation-3.0`](https://huggingface.co/pyannote/segmentation-3.0) | **gated**: HF-токен + принятые условия |
+| **pyannote speaker-diarization-3.1** (конфиг) | сборка пайплайна диаризации | [`pyannote/speaker-diarization-3.1`](https://huggingface.co/pyannote/speaker-diarization-3.1) | **gated**, там же |
+| **wespeaker-voxceleb-resnet34-LM** (26 МиБ) | эмбеддер голосов для диаризации | [`pyannote/wespeaker-voxceleb-resnet34-LM`](https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM) | свободно |
+| **CAM++ onnx** (27 МиБ) | центроиды голосов для реестра `Speaker_N` | [релизы sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models) — ONNX-сборка [3D-Speaker](https://github.com/modelscope/3D-Speaker) | свободно |
+| **MMS_FA** (~1.3 ГБ) | пословное выравнивание | [бандл `torchaudio`](https://docs.pytorch.org/audio/stable/generated/torchaudio.pipelines.MMS_FA.html) | качается сам при первом выравнивании |
 
 Всё, кроме MMS_FA, приносит `./fetch-models.sh` — он идемпотентен и уже скачанное не трогает.
 MMS_FA приезжает сам, поэтому первое выравнивание дольше на четверть часа.

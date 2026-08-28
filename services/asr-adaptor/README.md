@@ -51,12 +51,12 @@ audio → диаризация (pyannote) → пасс-1 Whisper целым фа
 
 | модель | зачем | источник | конверсия |
 |---|---|---|---|
-| [`bond005/whisper-podlodka-turbo`](https://huggingface.co/bond005/whisper-podlodka-turbo) | распознавание русской разговорной речи, оба прохода | автор модели, свободно | для Apple Silicon нужна MLX-раскладка — готовая лежит в [`chukanov/whisper-podlodka-turbo-mlx`](https://huggingface.co/chukanov/whisper-podlodka-turbo-mlx) (float16), собрана `mlx-examples/whisper/convert.py` |
-| `pyannote/segmentation-3.0` | границы речи | авторы pyannote, **gated** (токен + принятые условия) | нет, берётся как есть |
-| `pyannote/speaker-diarization-3.1` | конфигурация пайплайна диаризации | авторы pyannote, **gated** | нет; весов не содержит, ссылается на две модели выше и ниже |
-| `pyannote/wespeaker-voxceleb-resnet34-LM` | эмбеддер голосов внутри диаризации | авторы pyannote, свободно | нет |
-| `3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx` | эмбеддинги голоса для кросс-эпизодного реестра | [релизы sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models) | ONNX-сборка модели 3D-Speaker, сделана проектом sherpa-onnx |
-| `MMS_FA` | пословное выравнивание (ADR-0019) | бандл `torchaudio` | нет; качается сам при первом выравнивании (~1.3 ГБ) |
+| [`bond005/whisper-podlodka-turbo`](https://huggingface.co/bond005/whisper-podlodka-turbo) | распознавание русской разговорной речи, оба прохода | автор модели, свободно | для Apple Silicon нужна MLX-раскладка — готовая лежит в [`chukanov/whisper-podlodka-turbo-mlx`](https://huggingface.co/chukanov/whisper-podlodka-turbo-mlx) (float16), собрана [`mlx-examples/whisper/convert.py`](https://github.com/ml-explore/mlx-examples/tree/main/whisper) |
+| [`pyannote/segmentation-3.0`](https://huggingface.co/pyannote/segmentation-3.0) | границы речи | авторы pyannote, **gated** (токен + принятые условия) | нет, берётся как есть |
+| [`pyannote/speaker-diarization-3.1`](https://huggingface.co/pyannote/speaker-diarization-3.1) | конфигурация пайплайна диаризации | авторы pyannote, **gated** | нет; весов не содержит, ссылается на две модели выше и ниже |
+| [`pyannote/wespeaker-voxceleb-resnet34-LM`](https://huggingface.co/pyannote/wespeaker-voxceleb-resnet34-LM) | эмбеддер голосов внутри диаризации | авторы pyannote, свободно | нет |
+| `3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx` | эмбеддинги голоса для кросс-эпизодного реестра | [релизы sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models) | ONNX-сборка модели [3D-Speaker](https://github.com/modelscope/3D-Speaker), сделана проектом sherpa-onnx |
+| [`MMS_FA`](https://docs.pytorch.org/audio/stable/generated/torchaudio.pipelines.MMS_FA.html) | пословное выравнивание (ADR-0019) | бандл `torchaudio` | нет; качается сам при первом выравнивании (~1.3 ГБ) |
 
 Скачать всё, кроме `MMS_FA`, — `deploy/mac/fetch-models.sh`. Единственное, чего нет в сети, —
 `speaker_registry.json`: это не модель, а состояние корпуса (ADR-0018), и у нового корпуса он
