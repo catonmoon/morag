@@ -64,8 +64,14 @@ class Config:
     mode: str = field(default_factory=lambda: _env('ASR_MODE', 'async'))  # async | sync
     whisper_tokenizer: str = field(default_factory=lambda: _env('ASR_WHISPER_TOKENIZER', 'openai/whisper-large-v3'))
     prompt_budget: int = field(default_factory=lambda: int(_env('ASR_PROMPT_BUDGET', '200')))
-    # авто-наминг Speaker_N → имя (интро-LLM + реестр). off → транскрипт остаётся в Speaker_N
-    enable_naming: bool = field(default_factory=lambda: _flag('ASR_ENABLE_NAMING'))
+    # Авто-наминг Speaker_N → имя (интро-LLM + реестр). off → транскрипт остаётся в Speaker_N.
+    # ⚠️ ВЫКЛЮЧЕН ПО УМОЛЧАНИЮ. Стадия исходит из подкастового допущения «ведущий представляет
+    # гостя в начале», и вне него подписывает не того: на записи митапа докладчицу благодарят по
+    # имени в КОНЦЕ, и имя досталось тому, кто эти слова произнёс (15 секунд эфира), а настоящая
+    # докладчица (701 секунда) осталась безымянной. Ошибка системная, не случайная. Имя живого
+    # человека — не та вещь, которую движок вправе угадывать молча, поэтому по умолчанию имён не
+    # ищем вовсе; кому наминг подходит — включает `ASR_ENABLE_NAMING=1` осознанно.
+    enable_naming: bool = field(default_factory=lambda: _flag('ASR_ENABLE_NAMING', '0'))
 
     # --- покрытие звука расшифровкой (потери речи, см. stages/coverage.py) ---
     # hole_min_s — с какой длины считать непокрытый промежуток дырой (и добирать его чанками);

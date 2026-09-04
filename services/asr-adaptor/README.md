@@ -17,7 +17,7 @@ audio → диаризация (pyannote) → пасс-1 Whisper целым фа
       → глоссарий [LLM]: неканоничные термины → НАБОРЫ гипотез
       → пасс-2 Whisper по кускам ≤28с + каноники в initial_prompt → выбор ПО ЗВУКУ
       → склейка реплик → финал-раунд [LLM]: правка имён/терминов по контексту (raw-сайдкар цел)
-      → Speaker_N (реестр голосов CAM++) → авто-наминг [LLM] из интро записи
+      → Speaker_N (реестр голосов CAM++) → авто-наминг [LLM] из интро записи (по умолчанию OFF)
       → выравнивание: время каждого слова по звуку (не повторное распознавание)
       → markdown: front-matter + `[Имя] <!-- t:СЕК --> текст`
 ```
@@ -75,7 +75,7 @@ audio → диаризация (pyannote) → пасс-1 Whisper целым фа
 `ASR_DIARIZER_URL` / `ASR_BACKEND_URL` / `ASR_CAMPP_URL` — аудио-бэкенды;
 `ASR_REGISTRY_PATH` — реестр голосов (локальный JSON; **биометрия — в git не класть**);
 `ASR_MATCH_THRESHOLD` (0.55), `ASR_PROMPT_BUDGET` (≤224 токена подсказки Whisper),
-`ASR_ENABLE_NAMING` (авто-наминг из интро, on);
+`ASR_ENABLE_NAMING` (авто-наминг из интро, **off** — движок имён не ищет, пока не попросят);
 `ASR_RETRY_EMPTY` / `ASR_RECOVER_GAPS` (страховка от потери речи, обе on),
 `ASR_HOLE_MIN_S` (5 — с какой длины считать промежуток дырой), `ASR_COVERAGE_WARN_S` (5),
 `ASR_ENABLE_ALIGN` (пословное выравнивание, on) / `ASR_ALIGN_DEVICE` (`mps|cpu|cuda`);

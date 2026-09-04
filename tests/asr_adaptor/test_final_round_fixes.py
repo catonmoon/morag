@@ -9,8 +9,18 @@
 """
 import pytest
 
+from stages import final_round
 from stages.final_round import apply_fixes
 from stages.glossary import _HAS_WF
+
+
+@pytest.fixture
+def guard(monkeypatch):
+    """Защита имён следует за намингом: дефолт движка — имён не искать, значит защита ON.
+    Корпус, который наминг включил (`ASR_ENABLE_NAMING=1`), получает прежнее поведение: на нём
+    защита МЕНЯЕТ результат — замерено на подкасте, 21 отброшенная правка из 3522.
+    Тесты про защиту включают её явно, не полагаясь на дефолт."""
+    monkeypatch.setattr(final_round, "GUARD_NAMES", True)
 
 
 def test_fix_is_applied_verbatim():
@@ -259,3 +269,142 @@ def test_number_preserving_fixes_pass(was, now):
     out, applied, _ = apply_fixes(text, [{'was': was, 'now': now}])
 
     assert now in out and applied == 1
+
+
+# --- выдуманные имена ---------------------------------------------------------
+# Куплено повторным прогоном одного и того же звука: «меня зовут Мих» стало
+# «меня зовут Иван Оселедец», а во второй — «меня зовут Кузнецова». Имя из ПРИМЕРА В ПРОМПТЕ этой же
+# стадии. На корпусе внутренних встреч это подпись живого человека чужой фамилией.
+
+
+def test_invented_name_is_rejected(guard):
+    text = 'Окей, меня зовут Мих. Я работаю аналитиком в команде продуктов'
+
+    out, applied, skipped = apply_fixes(text, [{'was': 'Мих', 'now': 'Иван Оселедец'}])
+
+    assert out == text, 'имени не было в звуке — гарбл честнее выдумки'
+    assert (applied, skipped) == (0, 1)
+
+
+def test_another_invented_name_from_the_same_garble_is_rejected_too(guard):
+    """Тот же обрывок, другой прогон, другое имя — признак выдумки, а не починки."""
+    text = 'меня зовут Мих'
+
+    _, applied, skipped = apply_fixes(text, [{'was': 'Мих', 'now': 'Кузнецова'}])
+
+    assert (applied, skipped) == (0, 1)
+
+
+def test_misheard_name_is_still_repaired(guard):
+    """Починка остаётся: услышанное похоже на верное написание."""
+    text = 'нам рассказал Василедец про разложение'
+
+    out, applied, _ = apply_fixes(text, [{'was': 'Василедец', 'now': 'Оселедец'}])
+
+    assert out == 'нам рассказал Оселедец про разложение' and applied == 1
+
+
+def test_split_garble_of_a_known_name_is_repaired(guard):
+    """Гарбл, разъехавшийся на два слова, — это по-прежнему починка (ep-случай подкаста)."""
+    text = 'выступал и Селедец из Сколтеха'
+
+    out, applied, _ = apply_fixes(text, [{'was': 'и Селедец', 'now': 'Иван Оселедец'}])
+
+    assert out == 'выступал Иван Оселедец из Сколтеха' and applied == 1
+
+
+def test_name_known_to_the_corpus_is_allowed_even_if_unlike(guard):
+    """Если верное написание уже известно корпусу — правка законна, как бы ни звучал гарбл."""
+    text = 'спасибо, Мих, за доклад'
+
+    out, applied, _ = apply_fixes(text, [{'was': 'Мих', 'now': 'Кузнецова'}], canonicals=['Кузнецова'])
+
+    assert out == 'спасибо, Кузнецова, за доклад' and applied == 1
+
+
+def test_name_already_present_in_the_fragment_is_allowed(guard):
+    """Имя звучало рядом — значит оно из звука, а не из головы модели."""
+    text = 'Кузнецова рассказывала про Spark. Спасибо, Мих!'
+
+    out, applied, _ = apply_fixes(text, [{'was': 'Мих', 'now': 'Кузнецова'}])
+
+    assert out.endswith('Спасибо, Кузнецова!') and applied == 1
+
+
+def test_terms_are_not_affected_by_the_name_guard(guard):
+    """Проверка про ИМЕНА и только про них: термины чинятся как чинились."""
+    text = 'если мы сделаем партишн по дню'
+
+    out, applied, _ = apply_fixes(text, [{'was': 'партишн', 'now': 'partition'}])
+
+    assert out == 'если мы сделаем partition по дню' and applied == 1
+
+
+def test_transliteration_repair_is_not_treated_as_an_invented_name(guard):
+    """Замерено на первой партии переноса: латиница против кириллицы даёт сходство 0 всегда,
+    и проверка имён рубила законные починки транслита. Дефект, от которого она защищает,
+    другой формы — русский обрывок превращается в русское имя."""
+    text = 'потом Aretri dogovarivus с командой'
+
+    out, applied, _ = apply_fixes(text, [{'was': 'Aretri dogovarivus', 'now': 'Артём договаривается'}])
+
+    assert out == 'потом Артём договаривается с командой' and applied == 1
+
+
+def test_english_garble_repaired_into_russian_phrase_survives(guard):
+    text = 'это Elite Analyst нашего отдела'
+
+    out, applied, _ = apply_fixes(text, [{'was': 'Elite Analyst', 'now': 'Элитные аналитики'}])
+
+    assert out == 'это Элитные аналитики нашего отдела' and applied == 1
+
+
+def test_russian_garble_into_another_name_is_still_rejected(guard):
+    """Ровно то, ради чего проверка и заведена: «Жень» → «Егор» на живом прогоне."""
+    text = 'Спасибо, Жень, за доклад'
+
+    _, applied, skipped = apply_fixes(text, [{'was': 'Жень', 'now': 'Егор'}])
+
+    assert (applied, skipped) == (0, 1)
+
+
+def test_guard_default_follows_naming():
+    """Дефолт защиты вычисляется из наминга: не ищем имена — не выдумываем их и в правках.
+
+    Явный `ASR_GUARD_NAMES` сильнее обоих случаев: корпус вправе решить сам.
+    """
+    assert final_round._guard_enabled({}) is True, 'дефолт движка: наминга нет → защита есть'
+    assert final_round._guard_enabled({'ASR_ENABLE_NAMING': '1'}) is False, 'наминг включён → как было'
+    assert final_round._guard_enabled({'ASR_ENABLE_NAMING': '1', 'ASR_GUARD_NAMES': '1'}) is True
+    assert final_round._guard_enabled({'ASR_GUARD_NAMES': '0'}) is False
+
+
+def test_corpus_with_naming_keeps_the_old_behaviour(monkeypatch):
+    """У корпуса, который наминг включил, замена применяется, как и применялась."""
+    monkeypatch.setattr(final_round, 'GUARD_NAMES', False)
+
+    out, applied, _ = apply_fixes('меня зовут Мих', [{'was': 'Мих', 'now': 'Кузнецова'}])
+
+    assert out == 'меня зовут Кузнецова' and applied == 1
+
+
+def test_prompt_for_a_naming_corpus_is_byte_identical_to_the_validated_one(monkeypatch):
+    """Промпт этой стадии валидирован на eval_final. У корпуса с включённым намингом он обязан
+    совпадать с прежним ДОСЛОВНО — иначе мы молча меняем чужой корпус."""
+    monkeypatch.setattr(final_round, 'GUARD_NAMES', False)
+
+    prompt = final_round._system_prompt('русскоязычного подкаста про технологии')
+
+    assert '«и Селедец» → «Иван Оселедец»' in prompt, 'пример подкаста должен остаться на месте'
+    assert 'ИМЯ ЧЕЛОВЕКА' not in prompt, 'правило про имена — только по флагу'
+    assert '@' not in prompt, 'слоты подстановки не должны утечь в промпт'
+
+
+def test_prompt_with_the_flag_swaps_the_example_and_adds_the_rule(monkeypatch):
+    monkeypatch.setattr(final_round, 'GUARD_NAMES', True)
+
+    prompt = final_round._system_prompt('записи внутреннего митапа')
+
+    assert '«эйр флоу» → «Airflow»' in prompt, 'пример с именем модель применяла к любому обрывку'
+    assert '«и Селедец»' not in prompt
+    assert 'ИМЯ ЧЕЛОВЕКА' in prompt
