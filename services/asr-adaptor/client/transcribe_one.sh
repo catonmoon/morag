@@ -17,6 +17,7 @@
 #   OUT_DIR           (default ./transcripts/season${SEASON})   куда класть epN.{md,json}
 #   CACHE_DIR         (default ./media_cache/season${SEASON})   кэш скачанного аудио
 #   TITLE_TEMPLATE    (default 'Episode {pfx}{n}')              title для front-matter адаптера
+#   HINTS_FILE        (optional)                                json {terms,names,about} — верные написания
 set -euo pipefail
 
 # Большие аплоады (50-100МБ) через корп-CONNECT-прокси таймаутят — ходим напрямую.
@@ -87,9 +88,16 @@ if [ ! -s "$AUDIO" ]; then
 fi
 echo "[$EPID] $(stat -f%z "$AUDIO" 2>/dev/null || stat -c%s "$AUDIO") bytes; submit (upload ~1 min)..."
 
+# Знание об этой записи, известное ДО расшифровки (`{terms, names, about}`): заведомо верные
+# написания терминов и фамилий. Единственный пер-джобовый канал, влияющий на качество, — всё
+# остальное настраивается на КОРПУС и читается один раз при старте адаптера. Нет файла — поле
+# пустое, конвейер прежний.
+HINTS=""
+[ -n "${HINTS_FILE:-}" ] && [ -s "${HINTS_FILE:-}" ] && HINTS=$(cat "$HINTS_FILE")
+
 RESP=$(curl -fsS --max-time 600 -X POST "$BASE/v1/audio/transcriptions" \
   -F "file=@${AUDIO};type=audio/mpeg" -F "mode=async" -F "episode=${EPID}" \
-  -F "title=${TITLE}" -F "url=${SRC}")
+  -F "title=${TITLE}" -F "url=${SRC}" -F "hints=${HINTS}")
 JID=$(printf '%s' "$RESP" | python3 -c 'import sys,json;print(json.load(sys.stdin)["job_id"])')
 echo "[$EPID] job $JID; polling..."
 

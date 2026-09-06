@@ -15,7 +15,8 @@
 # (подкаст), а этот — произвольные файлы, у которых есть только имя.
 #
 # Настройки корпуса (описание материала, термины, свой реестр голосов) живут в окружении адаптера,
-# а не здесь — см. deploy/mac/README.md, раздел про профили.
+# а не здесь — см. deploy/mac/README.md, раздел про профили. А знание об ОДНОЙ записи (верные
+# написания её терминов и фамилий) кладётся файлом рядом: `<имя>.hints.json`.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -67,8 +68,15 @@ for f in "${todo[@]}"; do
   # transcribe_one.sh кладёт результат как ep<N>.{md,json} в OUT_DIR и требует номер. Даём ему
   # временный каталог и номер 1, а потом переносим под ИМЯ файла: у записей нет нумерации, и
   # «ep1.md» рядом с «Планёрка 12 марта.mp4» ничего не сказал бы.
+  # Подсказки записи — файл рядом со звуком: `Планёрка.mp4` → `Планёрка.hints.json`. Расширение
+  # выбрано так, чтобы не спутать клиента: сам он ищет только аудио, а готовность проверяет по
+  # `<имя>.json` — `<имя>.hints.json` для него ни запись, ни артефакт.
+  hints="$dir/$stem.hints.json"
+  [ -s "$hints" ] && echo "    подсказки: $(basename "$hints")"
+
   work="$(mktemp -d)"
   if OUT_DIR="$work/out" CACHE_DIR="$work/cache" TITLE_TEMPLATE="$stem" SEASON=0 SEASON_PREFIX="" \
+     HINTS_FILE="$hints" \
      bash "$HERE/transcribe_one.sh" 1 "$f"; then
     for ext in md json; do
       [[ -f "$work/out/ep1.$ext" ]] && mv "$work/out/ep1.$ext" "$dir/$stem.$ext"

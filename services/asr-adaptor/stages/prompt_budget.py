@@ -49,7 +49,8 @@ def fit_prompt(terms, counter: WhisperTokenCounter, budget: int = 200, prefix: s
 
 
 def build_prompt(canonicals, counter: WhisperTokenCounter, budget: int = 200,
-                 always: tuple[str, ...] | list[str] = ()) -> str:
+                 always: tuple[str, ...] | list[str] = (),
+                 hinted: frozenset[str] | set[str] = frozenset()) -> str:
     """Промпт для podlodka: постоянные термины корпуса + латино-каноники куска.
 
     `always` — то, что не надо переоткрывать в каждом выпуске: имена ведущих, повторяющиеся
@@ -62,7 +63,18 @@ def build_prompt(canonicals, counter: WhisperTokenCounter, budget: int = 200,
     Колодезев». Смешанная подсказка (имена + латинские термины) тоже не ломает ни то, ни другое.
     Постоянные термины идут ПЕРВЫМИ: бюджет ≤200 whisper-токенов, и лучше потерять хвост
     случайных канонико́в куска, чем фамилию ведущего.
+
+    `hinted` — каноники, подтверждённые seed-проходом (`stages/hints.py`): их пускаем МИМО фильтра
+    латиницы. ⚠️ Это главное содержательное изменение схемы, и вот почему оно понадобилось: на
+    закрытом корпусе рабочих встреч **34 из 43 подтверждённых правок (79%) кириллические** —
+    имена внутренних систем и восемь фамилий, — и через фильтр они не проходили ВОВСЕ. То есть
+    глоссарий термин находил, а до подсказки он не доезжал, и следующий кусок ломался снова.
+    Освобождение узкое: каноник обязан пройти четыре звена (снаружи предложили → LLM подтвердила
+    искажение в черновике → отбор по вхождению локализовал его в ЭТОТ кусок → гейт редкости).
+    Порядок `always → hinted → латиница куска` — по убыванию доказанности.
+    ⓘ Пустой `hinted` → выражение тождественно прежнему.
     """
-    latin = [c for c in canonicals if _LAT.search(c)]
-    terms = list(dict.fromkeys([t for t in always if t] + latin))
+    hint = [c for c in canonicals if c.casefold() in hinted]
+    latin = [c for c in canonicals if _LAT.search(c) and c.casefold() not in hinted]
+    terms = list(dict.fromkeys([t for t in always if t] + hint + latin))
     return fit_prompt(terms, counter, budget)

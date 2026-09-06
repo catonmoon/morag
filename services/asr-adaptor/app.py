@@ -9,6 +9,7 @@ mode=async (дефолт) → 202 {job_id}, поллинг GET /v1/jobs/{id}. mo
 """
 from __future__ import annotations
 
+import json
 import logging
 import tempfile
 from pathlib import Path
@@ -64,15 +65,32 @@ def models():
 @app.post('/v1/audio/transcriptions')
 async def transcribe(file: UploadFile = File(...), model: str = Form('asr-adaptor'),
                      response_format: str = Form('verbose_json'), mode: str = Form(''),
-                     episode: str = Form(''), title: str = Form(''), url: str = Form('')):
+                     episode: str = Form(''), title: str = Form(''), url: str = Form(''),
+                     hints: str = Form('')):
     suffix = Path(file.filename or 'audio').suffix or '.mp3'
     tmp = tempfile.mktemp(suffix=suffix)
     Path(tmp).write_bytes(await file.read())
 
+    # `hints` — единственный пер-джобовый канал, влияющий на КАЧЕСТВО: заведомо верные написания
+    # этой записи (`{terms, names, about}`). Настройки корпуса живут в окружении и читаются один
+    # раз при старте, подменить их на одну запись физически нельзя — а знание о записи у домена
+    # обычно есть, и до сих пор оно пропадало. ⚠️ Битый JSON НЕ роняет расшифровку: без подсказок
+    # запись выйдет ровно такой, какой выходила раньше.
+    known = {}
+    if hints.strip():
+        try:
+            known = json.loads(hints)
+            if not isinstance(known, dict):
+                raise ValueError('ожидался объект')
+        except Exception as e:
+            logging.getLogger('asr').warning('hints не разобраны (%s) — иду без них', e)
+            known = {}
+
     async def job(progress):
         try:
             return _enriched(await run_pipeline(
-                tmp, _LLM, episode=episode, title=title, url=url, progress=progress))
+                tmp, _LLM, episode=episode, title=title, url=url, hints=known,
+                progress=progress))
         finally:
             Path(tmp).unlink(missing_ok=True)
 

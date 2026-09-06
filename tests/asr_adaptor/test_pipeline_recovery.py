@@ -86,12 +86,15 @@ def backend(monkeypatch, wav) -> FakeBackend:
     monkeypatch.setattr(pipeline, 'name_speakers', no_names)
     monkeypatch.setattr(pipeline, 'WhisperTokenCounter', lambda model: None)
     monkeypatch.setattr(pipeline, 'build_prompt',
-                        lambda terms, counter, budget, always=(): 'каноники')
+                        lambda terms, counter, budget, always=(), hinted=(): 'каноники')
     return fake
 
 
 async def test_gap_left_by_pass1_is_recovered_into_the_transcript(backend, wav):
     r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+
+    # Отпечаток установки едет в артефакте: через год видно, чем сделана эта расшифровка.
+    assert r['env'].get('host') and r['env'].get('packages')
 
     cov = r['coverage']
     assert cov['pass1_holes'] == [[20.0, 50.0]]
