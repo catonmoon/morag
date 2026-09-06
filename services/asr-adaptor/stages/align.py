@@ -15,8 +15,10 @@
 """
 from __future__ import annotations
 
+import difflib
 import logging
 import re
+import time
 
 from .coverage import turn_windows
 
@@ -25,9 +27,21 @@ log = logging.getLogger('asr')
 SR = 16000
 FORMAT = 'morag-words-v1'
 
-# Звук режем только для расчёта акустики: сам поиск пути идёт по всей реплике.
+# Звук режем только для расчёта акустики: сам поиск пути идёт по всей реплике (см. split_turn).
 CHUNK = 30.0    # кусок для модели — больше не влезает в память внимания
 OVERLAP = 2.0   # нахлёст: края куска модель считает без контекста и врёт
+
+# Сколько секунд реплики уходит в ОДИН поиск пути. Цена растёт как «кадры × токены», причём на
+# длинной реплике сверхлинейно: матрица пути перестаёт помещаться в кэш. Замерено на M4 Pro
+# (MMS_FA, доклад одним говорящим): 240 с звука — 2.9 с, 480 — 6.0, 960 — 13.0, а на 1440 с стенд
+# не закончил за 8.5 минуты; доклад целиком (реплика 1953 с) не закончил в конвейере за 68 минут.
+# 240 с — там, где цена ещё линейна по длине, а матрица пути весит десятки мегабайт.
+MAX_TURN = 240.0
+# Короче — не пауза: в разрез должна укладываться погрешность границ сегментов ASR.
+MIN_PAUSE = 0.4
+# Как часто стадия говорит, что жива. Десять секунд — чтобы на 13-минутной записи (стадия
+# идёт 10 с) строк не было вовсе, а на часовой они шли редко и по делу.
+PROGRESS_EVERY = 10.0
 
 _ALIGNER = None
 
@@ -124,12 +138,13 @@ class Aligner:
         return stacked, wave.size(1) / stacked.size(0) / SR
 
     def turn(self, wave, t0: float, t1: float, words: list[str]) -> list[list]:
-        """Слова одной реплики с временами — ОДНИМ проходом по всей реплике.
+        """Слова куска реплики с временами — ОДНИМ проходом по всему куску.
 
         Порциями по окнам выравнивать нельзя: порция слов обязана лечь в своё окно, лишнего места
         нет, и на пропуске речи (см. stages/coverage.py) всё дальнейшее уезжает. Замерено на живом
         выпуске: сдвиг −36 с, карточка показывала текст из другого места разговора. Здесь путь
-        ищется по всей реплике сразу, поэтому пропуск просто поглощается (−36 с → доли секунды).
+        ищется по всему куску сразу, поэтому пропуск просто поглощается (−36 с → доли секунды).
+        Куском по умолчанию идёт вся реплика; длинную режет split_turn — строго по паузам.
         """
         a, b = int(max(0, t0) * SR), int(min(t1, wave.size(1) / SR) * SR)
         piece = wave[:, a:b]
@@ -182,6 +197,90 @@ class Aligner:
         return out
 
 
+def _raw_to_final(raw: list[str], final: list[str]) -> list[int]:
+    """Индекс слова в СЫРОМ тексте → индекс в финальном.
+
+    Паузы известны про сегменты ASR, то есть про сырой текст, а выравниваем мы финальный: его уже
+    поправил финал-раунд («пост грез» → «Postgres», «кэш-то-кэш» → «C2C»). Правки локальные, и
+    хватает словесного диффа; внутри изменённого куска индекс размазывается линейно, и промах в
+    слово-другое стоит долей секунды у границы куска, а не сдвига всей реплики.
+    """
+    def key(words):
+        return [re.sub(r'\W', '', w.lower()) for w in words]
+
+    pos = [len(final)] * (len(raw) + 1)  # хвост по умолчанию — конец финального текста
+    ops = difflib.SequenceMatcher(a=key(raw), b=key(final), autojunk=False).get_opcodes()
+    for _, i1, i2, j1, j2 in ops:
+        for i in range(i1, i2):
+            pos[i] = j1 + (j2 - j1) * (i - i1) // max(1, i2 - i1)
+    return pos
+
+
+def _pauses(segments, t0: float, t1: float) -> list[tuple[float, float, int]]:
+    """Внутренние паузы реплики: (середина, длина, сколько сырых слов сказано до неё).
+
+    Пауза — промежуток между соседними сегментами ASR: речи там нет ни по одной версии событий.
+    Дыра в покрытии (потерянная речь, stages/coverage.py) попадает сюда же — и резать по ней даже
+    безопаснее прочего: слов в ней нет, а значит и увезти нечего.
+    """
+    out, said = [], 0
+    for prev, nxt in zip(segments, segments[1:]):
+        said += len(prev['text'].split())
+        gap = float(nxt['start']) - float(prev['end'])
+        mid = float(prev['end']) + gap / 2
+        if gap >= MIN_PAUSE and t0 < mid < t1:
+            out.append((mid, gap, said))
+    return out
+
+
+def split_turn(turn, t0: float, t1: float, words: list[str]) -> list[tuple[float, float, int, int]]:
+    """Длинная реплика → куски (окно звука, слова [i:j]). Режем ТОЛЬКО по паузам.
+
+    Порциями по окнам резать нельзя (см. Aligner.turn). По паузе — можно: ни одно слово не
+    пересекает границу, потому что в паузе слов нет. Границу ставим в СЕРЕДИНУ паузы, чтобы
+    погрешность времён сегментов ни у кого не отрезала начало или хвост слова.
+
+    Из пауз в досягаемости берём САМУЮ ДЛИННУЮ, а не ближайшую к капу: длинная пауза — это конец
+    мысли, там разрез дешевле всего. Реплики короче капа не трогаем вовсе: у подкаста медиана
+    61 с, и его выравнивание обязано остаться прежним.
+    """
+    whole = [(t0, t1, 0, len(words))]
+    if t1 - t0 <= MAX_TURN or not words:
+        return whole
+    segments = turn.get('segments') or []
+    cuts = _pauses(segments, t0, t1)
+    if not cuts:  # реплика без сегментов (чужой вызов) или сплошная речь — идём как раньше
+        log.warning('align: реплика %.0f с на %.0f-й секунде, пауз для разреза нет — целиком',
+                    t1 - t0, t0)
+        return whole
+    final = _raw_to_final([w for s in segments for w in s['text'].split()], words)
+
+    pieces, a, i = [], t0, 0
+    while t1 - a > MAX_TURN:
+        # в окне капа пауз может не оказаться — тогда тянемся до ближайшей следующей: кусок выйдет
+        # длиннее капа, но резать не по паузе нельзя ни при каких обстоятельствах
+        # кусок короче эмиссионного (CHUNK) резать незачем, а короче секунды модель не примет
+        # и слова остались бы без времён вовсе
+        left = [c for c in cuts if c[0] > a + CHUNK]
+        reach = [c for c in left if c[0] <= a + MAX_TURN] or left[:1]
+        if not reach:
+            log.warning('align: после %.0f-й секунды пауз нет — остаток %.0f с идёт целиком',
+                        a, t1 - a)
+            break
+        mid, _, said = max(reach, key=lambda c: (c[1], c[0]))  # длиннейшая, при равных — поздняя
+        j = min(max(final[said], i), len(words))
+        pieces.append((a, mid, i, j))
+        a, i = mid, j
+    pieces.append((a, t1, i, len(words)))
+    if len(pieces) > 1 and t1 - a < CHUNK:  # огрызок в хвосте — к предыдущему куску
+        (a0, _, i0, _), (_, b1, _, j1) = pieces[-2], pieces[-1]
+        pieces[-2:] = [(a0, b1, i0, j1)]
+    pieces = [p for p in pieces if p[3] > p[2]]  # кусок без слов модели не отдаём
+    log.info('align: реплика %.0f с (t=%.0f) разрезана по паузам на %d кусков',
+             t1 - t0, t0, len(pieces))
+    return pieces
+
+
 def enforce_order(turns) -> int:
     """Порядок слов по времени — обязательство перед потребителем: караоке ищет текущее слово
     двоичным поиском и на неотсортированном врёт молча. Счётчик сквозной: собеседники перебивают
@@ -224,13 +323,29 @@ def align_turns(wav_path: str, turns, audio_sec: float, *, episode: str = '',
     dev = _device(device)
     aligner = _get_aligner(dev)
     wave = _read_wav(wav_path)
+    started = last_said = time.monotonic()
+    log.info('align: %d реплик, %.0f с звука, устройство %s', len(turns), audio_sec, dev)
 
     out = []
     for turn, (a, b) in zip(turns, turn_windows(turns, audio_sec)):
         words = (turn.get('text') or '').split()
+        timed: list[list] = []
+        for wa, wb, i, j in (split_turn(turn, a, b, words) if words else []):
+            timed += aligner.turn(wave, wa, wb, words[i:j])
         out.append({'start': round(a, 2), 'end': round(b, 2), 'speaker': turn.get('speaker', ''),
-                    'words': aligner.turn(wave, a, b, words) if words else []})
+                    'words': timed})
+        # Прогресс: стадия идёт десятки секунд и до сих пор не говорила ни слова — в логе
+        # она была неотличима от зависшей джобы, а именно так она однажды и провисела
+        # 68 минут. Раз в PROGRESS_EVERY секунд, а не на каждой реплике: у длинного доклада
+        # реплик тридцать, у планёрки — три сотни.
+        now = time.monotonic()
+        if now - last_said >= PROGRESS_EVERY:
+            last_said = now
+            log.info('align: %.0f%% (%.0f из %.0f с звука) за %.0f с',
+                     100 * b / max(audio_sec, 1), b, audio_sec, now - started)
     fixed = enforce_order(out)
+    log.info('align: готово за %.1f с, слов %d, порядок правился %d раз',
+             time.monotonic() - started, sum(len(t['words']) for t in out), fixed)
 
     return {'format': FORMAT, 'episode': episode, 'duration_sec': round(audio_sec, 2),
             'words_total': sum(len(t['words']) for t in out), 'reordered': fixed,

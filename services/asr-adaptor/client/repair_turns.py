@@ -70,8 +70,12 @@ async def repair(path: Path, at: list[float], dry: bool) -> None:
         t = turns[i]
         raw = t.get('raw', '')
         recalled = await recall_entities(dsum, raw, llm)
+        # ⚠️ `corpus_desc` обязателен: без него офлайн-долечивание идёт с ДЕФОЛТНЫМ описанием
+        # корпуса, то есть чужой промпт правит чужой материал. Прогон в конвейере его передаёт,
+        # а этот путь до сих пор не передавал — расхождение ловилось на корпусе митапов.
         fixed = await correct(raw, dsum, _context(turns, i, CFG.context_turns),
-                              relevant(raw, gloss), llm, CFG.always_terms, recalled)
+                              relevant(raw, gloss), llm, CFG.always_terms, recalled,
+                              corpus_desc=CFG.corpus_desc)
         mark = '≠' if fixed != t['text'] else '='
         print(f"  {t['start']:>8.1f}с {mark} {'(dry-run)' if dry else ''}")
         if dry:

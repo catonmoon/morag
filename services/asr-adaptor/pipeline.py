@@ -20,10 +20,13 @@ from pathlib import Path
 import audio_clients
 from config import CFG
 from stages import align, coverage, registry
+from stages.chunking import MIN_S as chunking_min_s
 from stages.chunking import chunk as chunk_fn
 from stages.chunking import gap_chunks
 from stages.final_round import correct, doc_summary, has_entity_signal, recall_entities
+from fingerprint import one_line, stack_fingerprint
 from stages.glossary import build_glossary, relevant
+from stages.hints import build_hints, hinted as hinted_canonicals, merge as merge_hints
 from stages.namer import name_speakers
 from stages.prompt_budget import WhisperTokenCounter, build_prompt
 
@@ -206,7 +209,11 @@ async def _decode(wav: str, sl: str, c: dict, prompt: str, audio_sec: float) -> 
 
 
 async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = '',
-                       url: str = '', progress=None) -> dict:
+                       url: str = '', hints: dict | None = None, progress=None) -> dict:
+    """`hints` — знание об ЭТОЙ записи, известное ДО расшифровки: `{terms: [...], names: [...],
+    about: str}`. Форма нарочно generic: движок принимает «заведомо верные написания», а откуда
+    домен их взял (презентация, метки, каталог) — его дело. Пусто → конвейер прежний.
+    """
     t0 = time.monotonic()
     tmp = Path(tempfile.mkdtemp(prefix='asr_'))
     tm: dict = {}
@@ -217,6 +224,8 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             progress(m)
 
     try:
+        env = stack_fingerprint()
+        log.info('стек: %s', one_line(env))
         wav = str(tmp / 'in.wav')
         await asyncio.to_thread(_to_wav, audio_path, wav)
 
@@ -245,11 +254,32 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
 
         step('glossary')
         _t = time.monotonic()
-        gloss = await build_glossary(full_text, llm)
+        # Свободный проход (гипотезы по черновику) и seed-проход (сверка известных написаний с тем
+        # же черновиком) независимы — идут ПАРАЛЛЕЛЬНО, лишнего времени стадия не стоит.
+        h = hints or {}
+        gloss, seed = await asyncio.gather(
+            build_glossary(full_text, llm),
+            build_hints(full_text, llm, terms=h.get('terms') or (), names=h.get('names') or (),
+                        about=h.get('about') or title))
+        gloss = merge_hints(seed, gloss)
+        hint_set = hinted_canonicals(seed)
         tm['glossary_s'] = round(time.monotonic() - _t, 1)
         tm['n_glossary'] = len(gloss)  # размер глоссария — чем кормим подсказку пасса-2 (бюджет ≤200 ток.)
+        if seed:
+            tm['n_hints'] = len(seed)
+            log.info('hints: подтверждено %d известных написаний из %d предложенных',
+                     len(seed), len(h.get('terms') or ()) + len(h.get('names') or ()))
 
         chunks = chunk_fn(words, spans)
+        # ⚠️ Пасс-1 умеет отдавать времена ЗА КОНЦОМ записи — известная беда whisper на длинных
+        # файлах. Чанк с началом за пределом звука режется в пустоту, пасс-2 отдаёт пусто, а
+        # повтор с паддингом зовёт уже `-ss 4006.52 -to 4000.00` (конец клампится по длине, начало
+        # нет) и роняет ВСЮ запись. Поймано на переносе: 67-минутная запись умерла на 260-м чанке
+        # из 261, после девяти минут работы.
+        chunks = [c for c in chunks if c['start'] < audio_sec]
+        for c in chunks:
+            c['end'] = min(c['end'], audio_sec)
+        chunks = [c for c in chunks if c['end'] - c['start'] >= chunking_min_s]
         # Звук, которого пасс-2 НЕ услышит, — это дыры между ЧАНКАМИ, а не между сегментами
         # пасса-1: чанк переслушивается целиком, [start, end], поэтому дыра пасса-1 внутри чанка
         # уже покрыта. Добор по сегментам дублировал бы текст — замерено на ep2-10: фраза
@@ -269,14 +299,35 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
 
         step('pass2')
         _t = time.monotonic()
+        n_broken = n_hinted_chunks = 0
         for i, c in enumerate(chunks):
             src = c['text'] or _neighbour_text(chunks, i)
-            prompt = build_prompt(relevant(src, gloss), counter, CFG.prompt_budget, CFG.always_terms)
-            await _decode(wav, str(tmp / f'c{i}.wav'), c, prompt, audio_sec)
+            canon = relevant(src, gloss)
+            if any(c.casefold() in hint_set for c in canon):
+                n_hinted_chunks += 1
+            prompt = build_prompt(canon, counter, CFG.prompt_budget, CFG.always_terms, hint_set)
+            try:
+                await _decode(wav, str(tmp / f'c{i}.wav'), c, prompt, audio_sec)
+            except Exception as error:
+                # ОДИН плохой чанк не должен стоить всей записи. До этой обработки любое падение
+                # ffmpeg или whisper на одном куске уносило час работы вместе с диаризацией и
+                # пассом-1 (ловили дважды за день). Пустой чанк честно виден в coverage как
+                # неуслышанный звук — это лучше, чем потерянная запись.
+                log.warning('pass2: чанк %d (%.1f-%.1f с) не расшифрован: %s: %s',
+                            i, c['start'], c['end'], type(error).__name__, error)
+                c['raw'], c['segments'] = '', []
+                n_broken += 1
             if (i + 1) % 20 == 0:
                 step(f'pass2 {i + 1}/{len(chunks)}')
         tm['pass2_s'] = round(time.monotonic() - _t, 1)
         tm['n_chunks'] = len(chunks)
+        if seed:
+            # Сколько кусков реально получили подтверждённый каноник — это и есть работа канала.
+            tm['n_chunks_hinted'] = n_hinted_chunks
+        if n_broken:
+            tm['n_broken_chunks'] = n_broken
+            log.warning('pass2: %d чанк(ов) из %d не расшифрованы — запись собрана без них',
+                        n_broken, len(chunks))
 
         # группировка подряд идущих чанков одного кластера в реплики
         turns = []
@@ -302,8 +353,12 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         dsum = await doc_summary(full_text, llm)
         for t in turns:
             t['raw'] = ' '.join(c['raw'] for c in t['chunks'] if c['raw']).strip()
+        # Подтверждённые каноники идут в финал-раунд как ЗАЩИТА: замена, ломающая уже верный
+        # термин, отбрасывается. Защищаем только подтверждённые, а не весь список снаружи —
+        # `_term_survives` перебирает `always` на каждую замену.
+        protect = list(CFG.always_terms) + [c for h in seed for c in h['canonicals']]
         n_round, n_failed = await _final_round(turns, dsum, gloss, llm, CFG.round_concurrency,
-                                              step, CFG.always_terms)
+                                              step, protect)
         raw_side = {f"{t['start']:.1f}": {'raw': t['raw'], 'final': t['final']}
                     for t in turns if t['final'] != t['raw']}
         tm['round_s'] = round(time.monotonic() - _t, 1)
@@ -383,6 +438,9 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
                 'raw_sidecar': raw_side, 'timing': tm, 'speaker_map': mapping,
                 'speaker_names': name_map, 'name_conflicts': name_conflicts,
                 'coverage': cov, 'words': words_doc,
+                # Чем и на чём сделана расшифровка. В артефакте, а не в отдельной команде: через
+                # год «почему на той машине вышло иначе» отвечается из самого файла (fingerprint.py).
+                'env': env,
                 # глоссарий и сводка — в артефакт: офлайн-долечивание реплик без пересчёта
                 'glossary': gloss, 'doc_summary': dsum}
     finally:

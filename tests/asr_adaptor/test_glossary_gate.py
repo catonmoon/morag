@@ -128,3 +128,67 @@ async def test_glossary_unions_passes_and_survives_failed_batch():
 
     assert llm.calls == 2
     assert {t['heard'] for t in out} == {'гарблик2'}
+
+
+class _DeadLLM:
+    """Эндпоинт лежит: каждый вызов срывается после всех ретраев RetryingLLM."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def complete_json(self, messages, **kw):
+        self.calls += 1
+        raise ConnectionError('endpoint unreachable')
+
+
+class _SilentLLM:
+    """Эндпоинт жив, но терминов в тексте не нашёл — это НЕ отказ."""
+
+    async def complete_json(self, messages, **kw):
+        return {'terms': []}
+
+
+async def test_glossary_raises_when_every_call_failed():
+    """Мёртвый эндпоинт обязан ронять джобу, а не отдавать пустой глоссарий.
+
+    Пустой глоссарий неотличим от «терминов не нашлось», а последствия разные: без подсказок
+    пасса-2 и каноников финал-раунда запись выходит заметно хуже, но по виду нормальной (на
+    корпусе митапов глоссарий чинит 74% доменных гарблов). Упавшая джоба не оставляет `.json`,
+    поэтому `run_folder.sh` возьмёт запись заново на следующем прогоне — без человека.
+    """
+    from stages.glossary import build_glossary
+    llm = _DeadLLM()
+
+    with pytest.raises(RuntimeError, match='все .* вызовов LLM сорвались'):
+        await build_glossary('Одно предложение про гарблик.', llm, passes=2)
+    assert llm.calls == 2  # оба прохода честно попробованы
+
+
+async def test_glossary_survives_when_most_but_not_all_calls_failed():
+    """Порога «сорвалось больше половины» нет намеренно: уцелевший вызов лучше, чем ничего."""
+    from stages.glossary import build_glossary
+
+    class _MostlyDead:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete_json(self, messages, **kw):
+            self.calls += 1
+            if self.calls < 4:
+                raise ConnectionError('endpoint unreachable')
+            return {'terms': [{'heard': 'гарблик', 'canonicals': ['Garblic']}]}
+
+    llm = _MostlyDead()
+    # Четыре прохода по одному батчу: три вызова мертвы, четвёртый жив — глоссарий из него.
+    out = await build_glossary('Одно предложение про гарблик.', llm, passes=4)
+
+    assert llm.calls == 4
+    assert {t['heard'] for t in out} == {'гарблик'}
+
+
+async def test_glossary_empty_result_is_not_a_failure():
+    """Живой эндпоинт, не нашедший терминов, джобу ронять не должен: у короткой бытовой записи
+    пустой глоссарий — законный исход."""
+    from stages.glossary import build_glossary
+
+    assert await build_glossary('Привет, как дела.', _SilentLLM(), passes=2) == []
