@@ -18,6 +18,14 @@ ENV_FILE="${ASR_STACK_ENV:-$HOME/.asr-stack.env}"
 [[ -f "$ENV_FILE" ]] || { echo "нет $ENV_FILE — сначала ./install.sh" >&2; exit 1; }
 set -a; source "$ENV_FILE"; set +a
 
+# Профиль корпуса проекта (ADR-0023): доменное — описание материала, постоянные термины, потолок
+# голосов — живёт в git репозитория проекта, а секреты остаются здесь. Читается ПОСЛЕ env-файла и
+# перекрывает его: профиль отвечает за «что за материал», env-файл — за «чем и куда ходить».
+[[ -n "${ASR_PROFILE:-}" ]] && {
+  [[ -f "$ASR_PROFILE" ]] || { echo "ASR_PROFILE указывает в никуда: $ASR_PROFILE" >&2; exit 1; }
+  set -a; source "$ASR_PROFILE"; set +a
+}
+
 STACK_HOME="${ASR_STACK_HOME:-$HOME/asr-stack}"
 VENVS="$STACK_HOME/venvs"
 LOGS="$STACK_HOME/logs"; RUN="$STACK_HOME/run"

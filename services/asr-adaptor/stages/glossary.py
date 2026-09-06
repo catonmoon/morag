@@ -138,10 +138,13 @@ def _sentence_batches(text: str, max_chars: int = 8000):
         yield ' '.join(cur)
 
 
-async def _one_batch(llm, batch: str, tag: str) -> list[dict]:
+async def _one_batch(llm, batch: str, tag: str) -> list[dict] | None:
     """Один батч. Ретраи (битый JSON деген-петли, спайки) — в RetryingLLM (config.py), не здесь:
     политика одна на все стадии. Исчерпал попытки → батч скипается с логом, дедуп по второму
-    проходу страхует."""
+    проходу страхует.
+
+    ⚠️ `None` — это «сорвалось», а `[]` — «терминов не нашлось». Разница несущая: по ней
+    `build_glossary` отличает живой эндпоинт от мёртвого (см. там)."""
     try:
         res = await llm.complete_json(
             [{'role': 'system', 'content': _SYS}, {'role': 'user', 'content': batch}],
@@ -150,7 +153,7 @@ async def _one_batch(llm, batch: str, tag: str) -> list[dict]:
     except Exception as e:
         logging.getLogger('asr').warning(
             'glossary: батч %s пропущен — %s: %s', tag, type(e).__name__, str(e)[:120])
-        return []
+        return None
 
 
 async def build_glossary(full_text: str, llm, passes: int = 2) -> list[dict]:
@@ -168,8 +171,25 @@ async def build_glossary(full_text: str, llm, passes: int = 2) -> list[dict]:
              for p in range(1, max(1, passes) + 1) for i, b in enumerate(batches, 1)]
     results = await asyncio.gather(*(_one_batch(llm, b, tag) for tag, b in calls))
 
+    # Сорвались ВСЕ вызовы — это не «терминов не нашлось», а мёртвый эндпоинт, и молчать про это
+    # нельзя: без глоссария пасс-2 идёт без подсказок, а финал-раунд без каноников. Замерено на
+    # корпусе митапов — глоссарий чинит 74% доменных гарблов, то есть запись выйдет заметно хуже,
+    # но по виду нормальной. Роняем джобу: `run_folder.sh` не положит `.json`, запись останется в
+    # очереди и перегонится на следующем прогоне сама, без человека.
+    # ⚠️ Порога «сорвалось больше половины» тут НЕТ намеренно. Отказ бьёт по всем вызовам разом —
+    # они уходят параллельно и повторяются в ногу, — поэтому середина «умерло 20 из 26» пока лишь
+    # теоретическая. Появится в логах (построчное предупреждение выше) — тогда и поставим порог
+    # по замеру, а не наугад.
+    failed = sum(1 for r in results if r is None)
+    if results and failed == len(results):
+        raise RuntimeError(f'глоссарий: все {failed} вызовов LLM сорвались — см. предупреждения выше')
+    if failed:
+        logging.getLogger('asr').warning(
+            'glossary: сорвалось %d вызовов из %d — терминов меньше, чем есть в записи',
+            failed, len(results))
+
     seen, out = set(), []
-    for terms in results:
+    for terms in (batch for batch in results if batch):
         for r in terms:
             if not (isinstance(r, dict) and r.get('heard') and r.get('canonicals')):
                 continue

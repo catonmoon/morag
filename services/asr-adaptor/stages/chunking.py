@@ -6,11 +6,20 @@
 """
 from __future__ import annotations
 
+import logging
 import math
 from collections import defaultdict
 
+log = logging.getLogger('asr')
+
 MAX_S = 28.0
 SHORT_S = 2.0  # короче — бэкчэннел/обрывок; клеим к соседу, если влезает в MAX_S
+# ⚠️ Чанк короче этого звука не несёт, а ломает прогон целиком: конвейер режет его через
+# `ffmpeg -ss %.2f -to %.2f`, и на такой длине ГРАНИЦЫ СХЛОПЫВАЮТСЯ ОКРУГЛЕНИЕМ до одного
+# значения — ffmpeg отвечает «Invalid argument» и падает вся запись. Поймано на живом переносе:
+# 115-минутный доклад умер на чанке `-ss 222.36 -to 222.36` после девяти минут работы.
+# Пасс-2 на таком куске всё равно вернул бы пусто: слышать там нечего.
+MIN_S = 0.05
 
 
 def load_words(words):
@@ -87,6 +96,15 @@ def _merge_short(chunks, max_s=MAX_S, short=SHORT_S):
     return res
 
 
+def _drop_silent(chunks):
+    """Выбросить чанки короче MIN_S: звука в них нет, а прогон они роняют (см. MIN_S)."""
+    kept = [c for c in chunks if c['end'] - c['start'] >= MIN_S]
+    if len(kept) != len(chunks):
+        log.warning('chunking: выброшено %d чанк(ов) короче %.2f с — звука в них нет',
+                    len(chunks) - len(kept), MIN_S)
+    return kept
+
+
 def chunk(words, spans, max_s: float = MAX_S):
     """words (пасс-1) + spans (диаризация) → [{start,end,speaker,text}], single-speaker, ≤max_s."""
     ws = load_words(words)
@@ -116,7 +134,7 @@ def chunk(words, spans, max_s: float = MAX_S):
     if cur:
         for s, e, txt in _split_turn(cur, max_s):
             out.append({'start': s, 'end': e, 'speaker': cur_spk, 'text': txt})
-    return _merge_short(out, max_s)
+    return _drop_silent(_merge_short(out, max_s))
 
 
 def gap_chunks(holes, spans, max_s: float = MAX_S) -> list[dict]:
@@ -142,7 +160,7 @@ def gap_chunks(holes, spans, max_s: float = MAX_S) -> list[dict]:
                 s, e = s0 + k * step, s0 + (k + 1) * step
                 out.append({'start': s, 'end': e, 'speaker': speaker_of(s, e, spans) or 'unknown',
                             'text': '', 'recovered': True})
-    return out
+    return _drop_silent(out)
 
 
 def _speech_parts(a: float, b: float, spans) -> list[tuple[float, float]]:
