@@ -59,3 +59,16 @@ def test_one_line_survives_a_failed_fingerprint():
 def test_one_line_is_comparable_between_machines():
     line = one_line(stack_fingerprint())
     assert line != '—' and 'wordfreq' in line
+
+
+def test_fingerprint_survives_the_http_layer():
+    """⚠️ `x_enriched` собирается по ЯВНОМУ списку полей — новое поле там легко потерять.
+
+    Ровно это и случилось: отпечаток доезжал до результата `run_pipeline`, тест на него смотрел
+    и был зелёным, а в артефакт поле не попадало. Проверять надо ту границу, которая уходит
+    наружу.
+    """
+    from app import _enriched
+    r = {'text': '', 'turns': [], 'markdown': '', 'raw_sidecar': {}, 'timing': {},
+         'speaker_map': {}, 'env': {'host': 'x', 'packages': {'wordfreq': '3.1.1'}}}
+    assert _enriched(r)['x_enriched']['env'] == r['env']

@@ -48,7 +48,12 @@ def _enriched(r: dict) -> dict:
                        'coverage': r.get('coverage', {}),
                        'words': r.get('words'),
                        'glossary': r.get('glossary', []),
-                       'doc_summary': r.get('doc_summary', '')},
+                       'doc_summary': r.get('doc_summary', ''),
+                       # ⚠️ Отпечаток установки обязан дойти до АРТЕФАКТА, а не только до
+                       # результата конвейера: `x_enriched` собирается по явному списку полей,
+                       # и новое поле здесь легко забыть. Так и вышло — тест проверял результат
+                       # `run_pipeline`, то есть не ту границу, и молчал.
+                       'env': r.get('env', {})},
     }
 
 
