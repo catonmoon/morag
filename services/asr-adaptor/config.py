@@ -136,16 +136,37 @@ class Config:
     enable_align: bool = field(default_factory=lambda: _flag('ASR_ENABLE_ALIGN'))
     align_device: str = field(default_factory=lambda: _env('ASR_ALIGN_DEVICE'))  # '' → mps|cuda|cpu
 
+    # Ожидание перезагрузки модели на эндпоинте. Ядро умеет ждать (`_is_model_unavailable` ловит
+    # «Model not found» и пустой ответ), но адаптер этим не пользовался: без этих полей клиент
+    # получает 0 попыток и цикл ожидания выключен.
+    # ⚠️ Куплено ночным прогоном: лекция на 199 минут погибла на ФИНАЛ-РАУНДЕ от 400 «Model not
+    # found» — эндпоинт на секунду перезагружал модель. Тридцать четыре минуты работы (диаризация,
+    # два прохода whisper, выравнивание) выброшены из-за паузы, которую достаточно переждать.
+    # ⚠️ 400 не ретраится обычной политикой: по HTTP это ошибка клиента, а не транзиент.
+    llm_model_wait_s: int = field(default_factory=lambda: int(_env('ASR_LLM_MODEL_WAIT_S', '20')))
+    llm_model_wait_retries: int = field(
+        default_factory=lambda: int(_env('ASR_LLM_MODEL_WAIT_RETRIES', '3')))
+
+    # Штраф за повтор для стадий со structured output. Пусто → не шлём (поведение прежнее).
+    # ⚠️ Не украшение: деген-петля — известный отказ этой схемы, и на КВАНТОВАННОЙ модели она
+    # куда вероятнее. Замерено на одном и том же батче и промпте: 8-битная сборка отвечает за
+    # 7.7 с, 4-битная той же модели уходит в цикл (один и тот же термин сотни раз) и рвёт JSON о
+    # потолок в 8000 токенов. 1.05 не помогает, 1.15 снимает петлю начисто — 0.4 с.
+    llm_repetition_penalty: float = field(
+        default_factory=lambda: float(_env('ASR_LLM_REPETITION_PENALTY') or 0) or None)
+
     def build_llm(self) -> 'RetryingLLM':
         """morag LLMClient + прикладной RetryPolicy. SDK-ретраи (max_retries) закрывают транспорт,
         политика поверх — битый JSON деген-петель и спайки; max_concurrent — общий потолок
         одновременных вызовов через реестр семафоров ядра (важен при ASR_MAX_JOBS > 1)."""
         client = LLMClient(base_url=self.llm_base_url, model=self.llm_model, api_key=self.llm_key,
                            enable_thinking=_enable_thinking(), timeout=180, max_retries=4,
-                           max_concurrent=self.llm_max_concurrent)
+                           max_concurrent=self.llm_max_concurrent,
+                           model_wait_seconds=self.llm_model_wait_s,
+                           model_wait_retries=self.llm_model_wait_retries)
         policy = RetryPolicy(max_retries=max(0, self.llm_attempts - 1),
                              delay=self.llm_retry_delay, backoff=1.0)
-        return RetryingLLM(client, policy)
+        return RetryingLLM(client, policy, self.llm_repetition_penalty)
 
 
 class RetryingLLM:
@@ -154,17 +175,31 @@ class RetryingLLM:
     Ретраи живут ЗДЕСЬ, а не россыпью по стадиям: глоссарий, правка, наминг получают их
     автоматически и одинаково. Остальные атрибуты (context_window и пр.) — сквозные."""
 
-    def __init__(self, client: LLMClient, policy: RetryPolicy) -> None:
+    def __init__(self, client: LLMClient, policy: RetryPolicy,
+                 repetition_penalty: float | None = None) -> None:
         self._client = client
         self._policy = policy
+        self._rep = repetition_penalty
+
+    def _with_rep(self, kwargs: dict) -> dict:
+        """Подмешать штраф за повтор, если стадия не задала параметры сама.
+
+        Стадии зовут `complete_json` без `params`, и другого места приложить настройку корпуса
+        нет: клиент ядра сливает с дефолтами только `enable_thinking` и `seed`."""
+        if self._rep and kwargs.get('params') is None:
+            from morag.llm.client import GenerationParams
+            kwargs = dict(kwargs, params=GenerationParams(repetition_penalty=self._rep))
+        return kwargs
 
     def __getattr__(self, name):
         return getattr(self._client, name)
 
     async def complete(self, *args, **kwargs):
+        kwargs = self._with_rep(kwargs)
         return await self._policy.call(lambda: self._client.complete(*args, **kwargs), 'complete')
 
     async def complete_json(self, *args, **kwargs):
+        kwargs = self._with_rep(kwargs)
         return await self._policy.call(
             lambda: self._client.complete_json(*args, **kwargs), 'complete_json')
 
