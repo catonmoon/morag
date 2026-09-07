@@ -29,6 +29,25 @@ def diarize(wav_path: str, min_spk: int | None = None, max_spk: int | None = Non
     return d.get('spans') or d.get('segments') or next((v for v in d.values() if isinstance(v, list)), [])
 
 
+# Пасс-1 слушает файл ЦЕЛИКОМ, поэтому его таймаут обязан расти с длиной записи. Прежний
+# фиксированный потолок в 300 с молча резал ровно длинные лекции: замерено на курсе QA — шесть
+# записей от 172 до 328 минут сорвались на `Read timed out`, и все шесть после конвейера.
+# ⚠️ Делитель взят по ЗАМЕРУ, а не наугад: на этой машине пасс-1 идёт 31-34× реального времени
+# (самая медленная из 27 записей — 31.2×). Берём 8× как «худший мыслимый случай» — четырёхкратный
+# запас к измеренному. Записи на 328 минут это даёт 41 минуту потолка при нужных десяти.
+# ⓘ Пол в 300 с оставлен для коротких кусков пасса-2: там время уходит не на счёт, а на очередь.
+_ASR_TIMEOUT_MIN = 300
+_ASR_WORST_SPEED = 8
+
+
+def _asr_timeout(wav_path: str) -> int:
+    try:
+        from stages.coverage import wav_duration
+        return max(_ASR_TIMEOUT_MIN, int(wav_duration(wav_path) / _ASR_WORST_SPEED))
+    except Exception:      # не смогли прочесть заголовок — прежнее поведение
+        return _ASR_TIMEOUT_MIN
+
+
 def asr(wav_path: str, prompt: str = '') -> dict:
     """podlodka через transcribe_backend, всегда verbose_json → {'text', 'segments'}.
 
@@ -42,7 +61,8 @@ def asr(wav_path: str, prompt: str = '') -> dict:
         data['prompt'] = prompt
     headers = {'Authorization': f'Bearer {CFG.asr_key}'} if CFG.asr_key else {}
     with open(wav_path, 'rb') as f:
-        r = requests.post(CFG.asr_url, data=data, files={'file': f}, headers=headers, timeout=300)
+        r = requests.post(CFG.asr_url, data=data, files={'file': f}, headers=headers,
+                          timeout=_asr_timeout(wav_path))
     r.raise_for_status()
     j = r.json()
     return {'text': (j.get('text') or '').strip(), 'segments': j.get('segments') or []}
