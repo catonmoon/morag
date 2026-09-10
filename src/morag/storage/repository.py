@@ -28,6 +28,16 @@ def _doc_id_to_point_id(doc_id: str) -> str:
     return str(uuid.uuid5(_DOC_NAMESPACE, doc_id))
 
 
+def doc_point_id(doc_id: str) -> str:
+    """Публичный вход к тому же вычислению для команд обслуживания.
+
+    ⚠️ Namespace-UUID существует ЕДИНСТВЕННЫМ экземпляром здесь — от него зависит адрес каждой
+    точки в базе. Копия уже есть в консоли (`services/console/routes/retrieval.py`), и это долг:
+    разъедутся — консоль начнёт «не находить» существующие документы. Новых копий не заводим.
+    """
+    return _doc_id_to_point_id(doc_id)
+
+
 def _payload_to_document(payload: dict) -> Document:
     """Восстановить Document из Qdrant payload."""
     core_keys = {'id', 'path', 'text', 'updated_at', 'source_type', 'size', 'title', 'url', 'indexed_at', 'creator', 'created_at', 'parent_doc_ids', 'structural'}
@@ -243,6 +253,35 @@ class DocRepository:
             if offset is None:
                 break
         return ids
+
+    async def fetch_short_ids(self) -> dict[str, str]:
+        """Уже выданные короткие коды документов: `{код: doc_id}`.
+
+        Нужна дважды: индексатору — чтобы новый документ не занял чужой код, и резолву — чтобы
+        развернуть код агента в `doc_id`. Скролл берёт ДВА поля payload, а не документы целиком:
+        на корпусе в тысячи записей полный payload — это сотни мегабайт (в нём лежит `text`).
+
+        Документы без кода просто отсутствуют в ответе: инстанс без миграции,
+        обязан работать, а код для печати выводится из `doc_id` чистой функцией.
+        """
+        out: dict[str, str] = {}
+        offset = None
+        while True:
+            points, offset = await self._client.scroll(
+                collection_name=self._collection,
+                limit=256,
+                offset=offset,
+                with_payload=['id', 'short_id'],
+                with_vectors=False,
+            )
+            for point in points:
+                pl = point.payload or {}
+                code, doc_id = pl.get('short_id'), pl.get('id')
+                if code and doc_id:
+                    out[str(code)] = str(doc_id)
+            if offset is None:
+                break
+        return out
 
     async def scroll_all(self, exclude_source_types: list[str] | None = None) -> list[Document]:
         """Вернуть все документы. Опционально исключить по source_type."""

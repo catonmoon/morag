@@ -193,8 +193,10 @@ SPECS = [
                 'doc_id': {
                     'type': 'string',
                     'description': (
-                        'ID документа из результатов find_section/search '
-                        '(полный prefixed id вида `<kind>:<name>:<external_id>`).'
+                        'ID документа из результатов find_section или из перечня документов '
+                        'в выдаче search (полный prefixed id вида '
+                        '`<kind>:<name>:<external_id>`). Копировать дословно: идентификатор, '
+                        'собранный по аналогии из заголовка или пути, не найдётся.'
                     ),
                 },
                 'query': {

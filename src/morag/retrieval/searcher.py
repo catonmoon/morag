@@ -28,6 +28,7 @@ from qdrant_client.models import (
     SparseVector,
 )
 
+from morag import shortid
 from morag.indexing.bm25 import tokenize, tokenize_trigram, to_sparse_vector
 from morag.indexing.embedder import Embedder, SparseEmbedder
 
@@ -124,6 +125,10 @@ class HybridSearcher:
         self._doc_titles: dict[str, str] = {}
         self._cluster_membership: dict[str, list[str]] | None = None
         self._knowledge_map: str | None = None
+        # Короткие коды документов (ADR-0025), двусторонне. Живут в том же корпус-снапшот кэше,
+        # что дерево и заголовки: у них один жизненный цикл — «состав корпуса на сейчас».
+        self._short_to_doc: dict[str, str] | None = None
+        self._doc_to_short: dict[str, str] | None = None
         # TTL корпус-снапшот кэшей (KM/doc_tree/membership/titles). Без него
         # долгоживущий pipelines-процесс месяцами отвечает по KM и дереву
         # документов с момента своего старта, игнорируя cron-переиндексации
@@ -146,6 +151,8 @@ class HybridSearcher:
         self._cluster_membership = None
         self._doc_tree = None
         self._indexed_doc_ids = None
+        self._short_to_doc = None
+        self._doc_to_short = None
         self._doc_titles.clear()
         self._sparse_vector_names_cache.clear()
 
@@ -584,6 +591,62 @@ class HybridSearcher:
             logger.warning('fetch_knowledge_map failed: %s', exc)
             self._knowledge_map = ''
         return self._knowledge_map
+
+    async def fetch_short_id_maps(self) -> tuple[dict[str, str], dict[str, str]]:
+        """`(код → doc_id, doc_id → код)` по всему корпусу. Кеш с TTL, один скролл.
+
+        Источник истины — поле `short_id` в payload. У документов без него код ВЫВОДИТСЯ из
+        `doc_id` тем же алгоритмом, что у индексатора: поэтому инстанс, который ещё не прошёл
+        миграцию, работает как обычно, а смешанное состояние (часть записей с полем, часть без)
+        не даёт ни дублей, ни пропаж.
+
+        ⚠️ Порядок вывода — по возрастанию `doc_id`, и он значим: при коллизии код удлиняется у
+        того, кто пришёл позже, а «позже» здесь задаётся именно сортировкой. Иначе два процесса
+        морага на одном корпусе разошлись бы в кодах для той доли документов, что удлинилась.
+        """
+        self._maybe_expire_caches()
+        if self._short_to_doc is not None and self._doc_to_short is not None:
+            return self._short_to_doc, self._doc_to_short
+        stored: dict[str, str] = {}       # код → doc_id, как записано индексатором
+        structural: dict[str, bool] = {}  # doc_id → структурный ли (для буквы типа)
+        derive: list[str] = []            # doc_id без кода в payload
+        offset = None
+        try:
+            while True:
+                points, offset = await self._qdrant.scroll(
+                    collection_name=self._docs_collection,
+                    limit=256, offset=offset,
+                    with_payload=['id', 'short_id', 'structural'], with_vectors=False,
+                )
+                for pt in points:
+                    pl = pt.payload or {}
+                    doc_id = pl.get('id')
+                    if not doc_id:
+                        continue
+                    structural[str(doc_id)] = bool(pl.get('structural'))
+                    code = pl.get('short_id')
+                    if code:
+                        stored[str(code)] = str(doc_id)
+                    else:
+                        derive.append(str(doc_id))
+                if offset is None:
+                    break
+        except Exception as exc:
+            logger.warning('fetch_short_id_maps failed: %s', exc)
+            self._short_to_doc, self._doc_to_short = {}, {}
+            return self._short_to_doc, self._doc_to_short
+        for doc_id in sorted(derive):
+            stored[shortid.assign(
+                doc_id, structural=structural.get(doc_id, False), taken=stored,
+            )] = doc_id
+        self._short_to_doc = stored
+        self._doc_to_short = {doc: code for code, doc in stored.items()}
+        if derive:
+            logger.info(
+                'short ids: %d from payload, %d derived on the fly (run backfill-short-ids)',
+                len(stored) - len(derive), len(derive),
+            )
+        return self._short_to_doc, self._doc_to_short
 
     async def fetch_cluster_membership(self) -> dict[str, list[str]]:
         """cluster_membership из knowledge_map collection (для flat_topics). Кеш с TTL."""

@@ -140,6 +140,11 @@ class DocReranker:
             logger.warning('doc_rerank batch failed, keeping all in batch: %s', exc)
             return [c['order'] for c in batch]
         if 'none' in answer.lower():
+            # ⚠️ Отличать «модель сказала none» от «сбой LLM» обязательно: сбой выше отдаёт ВСЕ
+            # чанки (fail-open), а здесь документ честно объявлен нерелевантным. По прежнему логу
+            # оба случая выглядели одинаково — «ни один фрагмент не релевантен», — и было непонятно,
+            # чинить конфиг или ждать шлюз.
+            logger.info('[doc_rerank] model answered none for %d chunks', len(batch))
             return []
         indices = [int(x) for x in re.findall(r'\d+', answer)]
         # Маппим i (позиция в батче) → order (позиция в документе)
@@ -147,6 +152,10 @@ class DocReranker:
         for i in indices:
             if 0 <= i < len(batch):
                 keep.append(batch[i]['order'])
+        if not keep:
+            logger.info(
+                '[doc_rerank] no usable indices in answer %r (%d chunks)', answer[:120], len(batch),
+            )
         return keep
 
     async def rerank(

@@ -30,6 +30,7 @@ from morag.retrieval import (
     find_section,
 )
 from morag.retrieval.tools import REGISTRY, build_tool_schema
+from morag import shortid
 from morag.retrieval.prompt import build_system_prompt
 from morag.retrieval.tools.core import CORE_EXECUTION_METHODOLOGY
 
@@ -365,6 +366,10 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
         # не финалится сразу — одноразовый впрыск требования сделать search.
         'require_search_before_answer': bool(
             getattr(features, 'require_search_before_answer', False)) if features else False,
+        # Показ `doc_id` агенту (config-only, off). Без него схема get_doc требует
+        # идентификатор, которого в выдаче моментов нет, и агент его выдумывает.
+        'doc_ids_in_results': str(
+            getattr(features, 'doc_ids_in_results', 'grouped') or 'grouped') if features else 'grouped',
 
         'http_timeout': _int_or(
             v.HTTP_TIMEOUT, retr.http_timeout if retr else None, default=300,
@@ -743,6 +748,9 @@ class Pipeline:
         tool_call_count = 0
         search_count = 0
         catalog_used = False
+        # Подпись последнего УДАЧНОГО вызова — против зацикливания на повторе (см. ниже).
+        last_ok_call: tuple[str, str] | None = None
+        last_ok_call_id = ''      # его tool_call_id — чтобы узнать, не урезали ли его результат
         searched_section_ids: set[str] = set()
         diversity_nudge_sent = False
         zero_search_nudge_sent = False  # nudge «поиск перед ответом» — одноразовый
@@ -770,6 +778,8 @@ class Pipeline:
         # {tool_call_id, chunks(ранжированные)}. _budget_agent_context фьюзит их по RRF,
         # дедупит и держит под agent_context_window целыми чанками. Сброс per-pipe().
         self._retrieval_entries: list[dict] = []
+        # tool_call_id результатов, которые бюджет контекста урезал (см. `_budget_agent_context`).
+        self._shrunk_tool_calls: set[str] = set()
 
         logger.info('=' * 70)
         logger.info('[agent] query: %r', last_content[:200])
@@ -959,14 +969,34 @@ class Pipeline:
                     icon = '🛠️'
                 yield self._emit_status(icon, status_text, False)
 
+                # ⚠️ Повтор ТОГО ЖЕ вызова с теми же аргументами исполнять незачем: результат
+                # дословно лежит строкой выше в этом же диалоге. Замерено 10.09: агент позвал
+                # `catalog args={}` ДЕСЯТЬ раз подряд, сжёг весь лимит итераций и ответил по
+                # одним названиям из каталога, без единой цитаты. Инструмент без аргументов
+                # особенно уязвим: повторять его буквально нечем иначе.
+                # ⓘ Сравнивается только с ПРЕДЫДУЩИМ вызовом и только с удачным: ветка
+                # транзиентного сбоя ниже сама просит агента повторить вызов, и запрещать
+                # этот повтор нельзя.
+                repeat_sig = _call_signature(fn_name, fn_args)
+                if repeat_sig == last_ok_call and last_ok_call_id not in self._shrunk_tool_calls:
+                    logger.info('[agent] repeated call to %s with same args — answered inline',
+                                fn_name)
+                    yield self._emit_status('↺', f'{fn_name}: повтор того же вызова', False)
+                    agent_messages.append({
+                        'role': 'tool', 'tool_call_id': call_id,
+                        'content': _repeat_note(fn_name),
+                    })
+                    continue
                 try:
                     result, chunks = self._execute_tool(fn_name, fn_args)
+                    last_ok_call, last_ok_call_id = repeat_sig, call_id
                 except Exception as exc:  # noqa: BLE001 — транзиентные сбои провайдеров
                     # Ошибка тула НЕ должна убивать pipe()-генератор: обрыв посреди
                     # SSE OWUI показывает как TransferEncodingError. Отдаём ошибку
                     # агенту текстом — он повторит вызов (сбой обычно транзиентный,
                     # напр. пустой embeddings-ответ OpenRouter) или сменит ход.
                     logger.warning('[tool] %s failed: %s', fn_name, exc, exc_info=True)
+                    last_ok_call = None  # сбой — повтор разрешён, о нём просит текст ниже
                     yield self._emit_status('⚠️', f'{fn_name}: временный сбой, продолжаю', False)
                     result, chunks = (
                         f'Инструмент {fn_name} временно недоступен '
@@ -1126,20 +1156,151 @@ class Pipeline:
             }
         return doc_id, {'doc_id': doc_id, 'label': None, 'url': doc_url}
 
+    def _ids_offered_hint(self) -> str:
+        """Перечень идентификаторов, УЖЕ отданных агенту в этом ходе, — для отказа get_doc.
+
+        Берётся из `_cite_units` (то, что реально напечатано в tool-результатах этого `pipe()`),
+        поэтому подсказка не может позвать в документ, которого агент не видел. Пусто, пока
+        ретрив ничего не вернул: тогда отказ остаётся прежним текстом.
+        """
+        seen = list(dict.fromkeys(
+            self._code_of((m or {}).get('doc_id') or key)
+            for key, m in self._cite_units.items()))
+        if not seen:
+            return ''
+        shown = seen[:_IDS_HINT_CAP]
+        tail = f'\n… и ещё {len(seen) - len(shown)}' if len(seen) > len(shown) else ''
+        return ('\nИдентификаторы, которые уже были в выдаче этого хода (скопируй один из них '
+                'дословно):\n' + '\n'.join(shown) + tail)
+
     def _cite_label(self, key: str) -> str:
         """Человекочитаемая метка единицы [N]: сохранённая (аудио-момент) либо title дока."""
         m = self._cite_units.get(key) or {}
         return m.get('label') or self._get_doc_title(m.get('doc_id') or key)
 
+    # ── Короткие коды документов (ADR-0025) ───────────────────────────────────
+
+    def _short_maps(self) -> tuple[dict[str, str], dict[str, str]]:
+        """`(код → doc_id, doc_id → код)`. Кэш живёт в searcher, здесь только мост sync↔async."""
+        return self._run(self._searcher.fetch_short_id_maps())
+
+    def _code_of(self, doc_id: str) -> str:
+        """Код документа для ПЕЧАТИ агенту. Нет в таблице (live-fetch, свежий документ) — выводим
+        из `doc_id` чистой функцией: показать длинный id значило бы вернуть ровно ту форму, ради
+        ухода от которой всё и делается."""
+        _, doc_to_short = self._short_maps()
+        code = doc_to_short.get(doc_id)
+        if code:
+            return code
+        return shortid.make(doc_id, structural=shortid.is_structural_doc_id(doc_id))
+
+    def _resolve_id_arg(self, ref: str, *, want: str) -> tuple[str | None, str | None]:
+        """Аргумент агента → `(doc_id, причина отказа)`. Принимает и код, и длинный `doc_id`.
+
+        ⚠️ Имя `_resolve_ref` уже занято — там разбор ССЫЛОК ИЗ ВОПРОСА человека (URL, page id).
+        Разные вещи с похожими названиями: то — про то, что человек вставил в текст, это — про то,
+        что агент передал в аргументе. Ловилось: одноимённый метод молча затенял чужой.
+
+        Отказы РАЗНЫЕ, и это главное: агенту на них нужно разное действие, а сегодня он видит одно
+        «не найдено» и отвечает на него повтором того же испорченного идентификатора (замерено —
+        четыре раза подряд).
+
+        `want` — какого типа объект ждёт параметр: 'doc' (get_doc, search.doc_ids) или
+        'section' (search.section_ids). Несовпадение типа — тоже отдельный отказ: раньше раздел,
+        переданный в `doc_ids`, давал пустой фильтр и обвинение агенту в выдумывании.
+        """
+        ref = (ref or '').strip()
+        if not ref:
+            return None, 'пустой идентификатор'
+        parsed = shortid.parse(ref)
+        if parsed is None:
+            if shortid.looks_like_code(ref):
+                return None, (
+                    f'Код {ref} испорчен при переписывании — контрольный знак не сошёлся. '
+                    'Скопируй код из выдачи дословно.'
+                )
+            return ref, None   # не код по форме → длинный doc_id, прежнее поведение
+        kind, _ = parsed
+        short_to_doc, _ = self._short_maps()
+        doc_id = short_to_doc.get(ref)
+        if doc_id is None:
+            return None, (
+                f'Код {ref} составлен верно, но такого документа в корпусе нет. '
+                'Значит его не было и в выдаче — найди его через search.'
+            )
+        if want == 'doc' and kind == shortid.SECTION:
+            return None, (
+                f'{ref} — это РАЗДЕЛ, а не документ. Разделы передаются в '
+                'search(section_ids=[…]), где разворачиваются во все свои записи.'
+            )
+        if want == 'section' and kind == shortid.DOC:
+            # Обратное сочетание безвредно: документ в section_ids просто сужает поиск до него
+            # самого (потомков у него нет). Ошибкой не считаем и молчим.
+            return doc_id, None
+        return doc_id, None
+
+    def _normalize_tool_ids(self, name: str, args: dict) -> tuple[dict, list[str]]:
+        """Развернуть коды в `doc_id` ДО вызова инструмента. Возвращает `(аргументы, отказы)`.
+
+        ⚠️⚠️ Разворот обязан случиться здесь, а не внутри инструмента: `get_descendant_doc_ids`
+        кладёт переданный `section_id` в результат СТРОКОЙ, без всякой проверки, — нерезолвнутый
+        код прошёл бы там за валидный `doc_id`, отфильтровал бы выдачу в ноль, и агент получил бы
+        обвинение «идентификаторы не собираются по аналогии» на код, который мы сами напечатали.
+        """
+        args = dict(args)
+        notes: list[str] = []
+        if name == 'get_doc' and args.get('doc_id'):
+            raw = str(args['doc_id'])
+            doc_id, note = self._resolve_id_arg(raw, want='doc')
+            self._log_id_arg(name, 'doc_id', raw, doc_id, note)
+            if note:
+                notes.append(note)
+            args['doc_id'] = doc_id or args['doc_id']
+        for key, want in (('doc_ids', 'doc'), ('section_ids', 'section')):
+            refs = args.get(key)
+            if not isinstance(refs, list):
+                continue
+            resolved: list[str] = []
+            for ref in refs:
+                doc_id, note = self._resolve_id_arg(str(ref), want=want)
+                self._log_id_arg(name, key, str(ref), doc_id, note)
+                if note:
+                    notes.append(note)
+                elif doc_id:
+                    resolved.append(doc_id)
+            args[key] = resolved
+        return args, notes
+
+    @staticmethod
+    def _log_id_arg(tool: str, param: str, raw: str, doc_id: str | None, note: str | None) -> None:
+        """Что агент передал в идентификаторе и чем это кончилось.
+
+        Единственное место, где видно СЫРОЙ аргумент модели. Без него доля испорченных кодов
+        считается сверкой с корпусом руками, а разбор чужого случая невозможен: в остальных логах
+        идентификатор уже развёрнут.
+        """
+        if note:
+            logger.info('[ids] %s.%s=%r REFUSED: %s', tool, param, raw, note.split('.')[0])
+        elif doc_id == raw:
+            logger.info('[ids] %s.%s=%r (long id, passed through)', tool, param, raw)
+        else:
+            logger.info('[ids] %s.%s=%r resolved to %s', tool, param, raw, doc_id)
+
     # ── Tool execution ────────────────────────────────────────────────────────
 
     def _execute_tool(self, name: str, args: dict) -> tuple[str, list[dict]]:
         """Выполнить tool, вернуть (текстовый результат для LLM, список чанков)."""
+        args, notes = self._normalize_tool_ids(name, args)
+        # Идентификатор не развернулся: для get_doc это и есть весь результат (звать инструмент
+        # незачем), для search — сужение потеряло часть скоупа, но искать по остальному надо.
+        if notes and name == 'get_doc':
+            return '\n'.join(notes) + self._ids_offered_hint(), []
         if name == 'search':
-            return self._tool_search(
+            text, chunks = self._tool_search(
                 args['query'], args.get('limit'),
                 args.get('section_ids'), args.get('doc_ids'),
             )
+            return ('\n'.join([*notes, '', text]) if notes else text), chunks
         elif name == 'find_section':
             return self._tool_find_section(args['query'])
         elif name == 'get_doc':
@@ -1259,6 +1420,7 @@ class Pipeline:
 
         # Фильтрация: section_ids → рекурсивно (раздел + потомки); doc_ids → точечно.
         filtered_applied = False
+        scope_missed = False
         allowed_doc_ids: set[str] = set()
         if section_ids:
             allowed_doc_ids |= self._get_descendant_doc_ids(section_ids)
@@ -1273,6 +1435,12 @@ class Pipeline:
             if filtered:
                 chunks = filtered
                 filtered_applied = True
+            else:
+                # ⚠️ Сужение не сматчило НИ ОДНОГО чанка — обычно это несуществующий id
+                # (агент собрал его по аналогии). Раньше здесь был молчаливый откат к поиску
+                # по всему корпусу: агент не узнавал, что его scope выброшен, и промах
+                # проявлялся не отказом, а деградацией качества. Теперь скажем.
+                scope_missed = True
 
         # LLM reranker — отфильтровать нерелевантные чанки
         rerank_in = len(chunks)
@@ -1315,7 +1483,15 @@ class Pipeline:
                     i, did, len(dcs), dcs[0].get('source_type'), max(c['score'] for c in dcs),
                 )
 
-        return self._render_chunks_block(chunks), chunks
+        block = self._render_chunks_block(chunks)
+        if scope_missed:
+            block = (
+                'Сужение не дало совпадений: ни один из переданных section_ids/doc_ids не '
+                'нашёлся в корпусе — искал по всему корпусу. Идентификаторы не собираются по '
+                'аналогии: бери их из выдачи find_section или из перечня документов ниже.\n\n'
+                + block
+            )
+        return block, chunks
 
     def _render_chunks_block(self, chunks: list[dict], header: str | None = None) -> str:
         """Рендер retrieval-результата из чанков: группировка по документу,
@@ -1332,8 +1508,18 @@ class Pipeline:
                 units[key] = {'meta': meta, 'chunks': []}
                 order_keys.append(key)
             units[key]['chunks'].append(c)
+        # Показ идентификаторов агенту: 'grouped' (умолчание) | 'inline' | 'none'.
+        mode = str(self._s.get('doc_ids_in_results') or 'grouped')
+        # ⚠️ Порядок ПЕЧАТИ вычисляем ДО раздачи номеров. `grouped` печатает моменты по
+        # документам, а `_cite_register` нумерует в порядке обхода — разойдясь, они дают блок
+        # с номерами вразнобой («[1] [2] [3] [4] [6] [8] [5]…»), где номер под моментом уже
+        # ничего не значит для читающей его модели. Стабильность номера между ходами при этом
+        # сохраняется: она держится на ключе в `_cite_register`, а не на порядке обхода.
+        order_keys = _print_order(order_keys, units, mode)
         parts = []
         has_moment = False
+        docs_seen: dict[str, str] = {}      # doc_id → title, в порядке первого появления
+        moment_text: dict[str, str] = {}    # ключ момента → его отрендеренный кусок (для grouped)
         for key in order_keys:
             meta = units[key]['meta']
             cs = units[key]['chunks']
@@ -1341,12 +1527,17 @@ class Pipeline:
             if meta.get('start_sec') is not None:
                 # Аудио-момент: одна пронумерованная реплика «Выпуск · MM:SS · Спикер».
                 has_moment = True
-                lines = [f'[{n}] {meta["label"]}']
+                doc_id = meta.get('doc_id') or key
+                if doc_id not in docs_seen:
+                    docs_seen[doc_id] = cs[0].get('title') or self._get_doc_title(doc_id)
+                lines = [_moment_head(n, meta['label'], self._code_of(doc_id), mode)]
                 for c in cs:
                     if c.get('context'):
                         lines.append(f'Контекст: {c["context"]}')
                     lines.append(c.get('text', ''))
-                parts.append('\n'.join(lines))
+                block = '\n'.join(lines)
+                moment_text[key] = block
+                parts.append(block)
                 continue
             # Документ (прежнее поведение): [N] Документ: title + путь/мета + чанки.
             cs = sorted(cs, key=lambda x: x.get('order', 0))
@@ -1368,13 +1559,29 @@ class Pipeline:
                 lines.append(c.get('text', ''))
                 lines.append('')
             parts.append('\n'.join(lines))
+        # `grouped`: моменты уже идут по документам (`_print_order`), осталось надеть шапки.
+        # Только когда блок целиком из моментов: смешанную выдачу (моменты + документы)
+        # перестраивать нельзя, там порядок несёт релевантность.
+        if mode == 'grouped' and has_moment and len(moment_text) == len(order_keys):
+            parts = []
+            for doc_id, keys in _group_by_doc(order_keys, units):
+                title = docs_seen.get(doc_id) or ''
+                # ⚠️ Идентификатор ОТДЕЛЬНОЙ строкой с ключом, а не в скобках после заголовка.
+                # Замерено на живом прогоне: из формы «Документ: Заголовок (id: …)» модель
+                # копировала в get_doc ВСЮ строку целиком — заголовок вместе со скобкой, — и
+                # документ не находился. Форма «ключ: значение» на своей строке повторяет то,
+                # как выводится «Путь:» в документной ветке, и не склеивается.
+                code = self._code_of(doc_id)
+                head = f'Документ: {title}\nid: {code}' if title else f'id: {code}'
+                parts.append('\n\n'.join([head, *[moment_text[k] for k in keys]]))
         if header is None:
             if has_moment:
                 header = f'Найдено {_plural(len(order_keys), "фрагмент", "фрагмента", "фрагментов")}:'
             else:
                 header = f'Найдено {_plural(len(order_keys), "документ", "документа", "документов")}:'
         prefix = (header + '\n\n') if header else ''
-        return prefix + '\n\n---\n\n'.join(parts)
+        body = prefix + '\n\n---\n\n'.join(parts)
+        return body
 
     # ── Section-level retrieval (find_section) ────────────────────────────────
 
@@ -1416,7 +1623,10 @@ class Pipeline:
         lines = [f'Релевантные разделы (топ-{len(result.refined)}):']
         for i, e in enumerate(result.refined, 1):
             type_label = 'раздел рекурсивно' if e.kind == 'section' else 'страница точечно'
-            lines.append(f'[{i}] {e.title} ({type_label}, id={e.section_id}, {e.votes} dom doc(s))')
+            lines.append(
+                f'[{i}] {e.title} ({type_label}, id={self._code_of(e.section_id)}, '
+                f'{e.votes} dom doc(s))'
+            )
             if e.summary:
                 snippet = (e.summary[:300] + '…') if len(e.summary) > 300 else e.summary
                 lines.append(f'    {snippet}')
@@ -1425,7 +1635,10 @@ class Pipeline:
             lines.append('')
             lines.append('Дополнительно — топ-документы по прямому score (страховка):')
             for i, d in enumerate(result.extra_docs, 1):
-                lines.append(f"[T{i}] {d.title} (страница точечно, id={d.doc_id}, score={d.score:.3f})")
+                lines.append(
+                    f'[T{i}] {d.title} (страница точечно, id={self._code_of(d.doc_id)}, '
+                    f'score={d.score:.3f})'
+                )
                 if d.summary:
                     snippet = (d.summary[:300] + '…') if len(d.summary) > 300 else d.summary
                     lines.append(f'    {snippet}')
@@ -1433,9 +1646,11 @@ class Pipeline:
         lines.append('')
         call_parts = ['search(query="..."']
         if result.section_ids:
-            call_parts.append(f'section_ids={json.dumps(result.section_ids, ensure_ascii=False)}')
+            codes = [self._code_of(s) for s in result.section_ids]
+            call_parts.append(f'section_ids={json.dumps(codes, ensure_ascii=False)}')
         if result.doc_ids:
-            call_parts.append(f'doc_ids={json.dumps(result.doc_ids, ensure_ascii=False)}')
+            codes = [self._code_of(d) for d in result.doc_ids]
+            call_parts.append(f'doc_ids={json.dumps(codes, ensure_ascii=False)}')
         lines.append('Готово к использованию: ' + ', '.join(call_parts) + ')')
         return '\n'.join(lines), []
 
@@ -1492,7 +1707,13 @@ class Pipeline:
         used = 0
         for p in sorted(pool.values(), key=lambda x: x['score'], reverse=True):
             c = p['chunk']
-            cost = self._count_tokens((c.get('context') or '') + '\n' + (c.get('text') or '')) + 60
+            # +60 — шапка единицы («[N] метка», разделители). При `inline` к шапке
+            # добавляется идентификатор документа: длинный prefixed id с двоеточиями и
+            # дефисами токенизируется дробно, поэтому закладываем ещё 20. Без этого
+            # расчёт занижен на каждой единице, а единиц в аудио-выдаче десятки.
+            overhead = 60 + (20 if self._s.get('doc_ids_in_results') == 'inline' else 0)
+            cost = self._count_tokens(
+                (c.get('context') or '') + '\n' + (c.get('text') or '')) + overhead
             if survivors and used + cost > budget:
                 continue  # целый чанк не лезет — пропускаем (но ≥1 чанк всегда оставляем)
             survivors.setdefault(p['owner'], []).append(c)
@@ -1503,23 +1724,44 @@ class Pipeline:
             m.get('tool_call_id'): m for m in agent_messages if m.get('role') == 'tool'
         }
         dropped = 0
+        # ⚠️ Что осталось в диалоге ХОТЬ ГДЕ-ТО. Дедуп между сообщениями — не потеря: чанк
+        # показывается один раз, под первым поиском, где встретился. Потеря — это вытеснение по
+        # бюджету, когда чанка не осталось нигде.
+        kept_chunk_ids = {
+            c.get('chunk_id') for surv in survivors.values() for c in surv
+        }
         for ei, entry in enumerate(entries):
             msg = id_to_msg.get(entry['tool_call_id'])
             if msg is None:
                 continue
             surv = survivors.get(ei, [])
             dropped += len(entry['chunks']) - len(surv)
+            if any(c.get('chunk_id') not in kept_chunk_ids for c in entry['chunks']):
+                # ⚠️ Помечаем результаты, у которых часть чанков ВЫТЕСНЕНА из диалога. Это нужно
+                # гейту против зацикливания: он отказывает в повторе словами «результат выше в
+                # диалоге», а после вытеснения выше лежит неполный блок — отказ стал бы враньём.
+                # Повтор такого вызова законен: агент возвращает то, что у него забрали.
+                self._shrunk_tool_calls.add(entry['tool_call_id'])
             if surv:
                 msg['content'] = self._render_chunks_block(surv)
             else:
                 msg['content'] = (
-                    '(результаты этого поиска вытеснены как менее релевантные — '
-                    'более релевантные документы см. в других результатах поиска)'
+                    # ⚠️ Формулировка намеренно не «нерелевантные»: бюджет о релевантности не
+                    # судит вовсе. Он наследует порядок, выданный реранкером в момент поиска, и
+                    # складывает позиции по RRF. Сказать агенту «нерелевантно» значило бы приписать
+                    # решение тому, кто его не принимал.
+                    '(фрагменты этого поиска не поместились в контекст: по сумме мест в выдачах '
+                    'они оказались ниже других — см. остальные результаты поиска)'
                 )
         if dropped:
+            # ⚠️ `dropped` суммирует потери ПО СООБЩЕНИЯМ и включает дедуп между ними (чанк
+            # принадлежит первому поиску, где встретился). Поэтому «kept = pool − dropped» врало и
+            # уходило в минус — замерено −15 и −16 на живом прогоне. Считаем выживших напрямую.
+            kept = sum(len(v) for v in survivors.values())
             logger.info(
-                '[ctx-budget] pool=%d chunks, kept=%d, dropped=%d (budget=%d, used=%d tokens)',
-                len(pool), len(pool) - dropped, dropped, budget, used,
+                '[ctx-budget] pool=%d chunks, kept=%d, dropped=%d incl. cross-message dedup '
+                '(budget=%d, used=%d tokens)',
+                len(pool), kept, dropped, budget, used,
             )
 
     def _tool_get_doc(self, doc_id: str, query: str) -> tuple[str, list[dict]]:
@@ -1532,16 +1774,36 @@ class Pipeline:
         4. Полные чанки этих order'ов из БД.
         5. Форматирование как обычный search-результат для агента.
         """
-        logger.info('[get_doc] doc_id=%s q=%r', doc_id, query[:80])
+        # Оба идентификатора: код — то, что видел и передал агент, длинный id — то, что
+        # ищется в базе. По одному длинному непонятно, что именно пришло от модели.
+        logger.info(
+            '[get_doc] code=%s doc_id=%s q=%r', self._code_of(doc_id), doc_id, query[:80],
+        )
         # 1. Метаданные документа
         doc = self._run(self._doc_repo.get_by_id(doc_id))
         if doc is None:
-            return f'Документ {doc_id} не найден.', []
+            # ⚠️ Говорим не только «нет», но и ЧТО ДЕЛАТЬ. Замерено на живом корпусе: получив
+            # голое «не найден», агент звал тот же несуществующий id трижды подряд, переставляя
+            # в нём слова, — он пытался угадать документ, которого не было в выдаче, и подсказки
+            # к восстановлению у него не было.
+            # ⚠️⚠️ Одного объяснения мало. Замерено 10.09 после того, как id появился в выдаче
+            # search: агент перестал ВЫДУМЫВАТЬ идентификаторы, но начал их ИСКАЖАТЬ при
+            # переписывании — из длинного транслитерированного пути выпадают буквы, — и на
+            # отказ звал тот же испорченный id четыре раза подряд. Он не знает, что опечатался.
+            # Поэтому перечисляем идентификаторы, КОТОРЫЕ УЖЕ БЫЛИ ОТДАНЫ в этом ходе: это не
+            # догадка по похожести (её мы намеренно не делаем), а эхо собственной выдачи.
+            return (
+                f'Документ {self._code_of(doc_id)} не найден. Идентификаторы не собираются по аналогии из '
+                'заголовка или пути и не пишутся по памяти: бери их из выдачи find_section либо '
+                'из строки «id:» в результатах search и копируй дословно, целиком.'
+                + self._ids_offered_hint() +
+                '\nЕсли нужного документа в выдаче не было — сделай search по его теме.'
+            ), []
 
         # 2. Lite-чанки (без context, в порядке order)
         lite = self._run(self._searcher.fetch_doc_chunks_lite(doc_id))
         if not lite:
-            return f'У документа {doc_id} нет проиндексированных чанков.', []
+            return f'У документа {self._code_of(doc_id)} нет проиндексированных чанков.', []
         logger.info('[get_doc] lite chunks=%d', len(lite))
 
         # 3. DocReranker
@@ -1550,7 +1812,7 @@ class Pipeline:
         )
         if not useful_orders:
             return (
-                f'Документ найден ({doc.title or doc_id}), '
+                f'Документ найден ({doc.title or self._code_of(doc_id)}), '
                 f'но ни один из {len(lite)} фрагментов не релевантен запросу. '
                 'Попробуй другой документ или search() без doc_ids.'
             ), []
@@ -1562,9 +1824,29 @@ class Pipeline:
         )
 
         # 5. Формат как search-результат (с глобальной нумерацией документов)
+        code = self._code_of(doc_id)
+        # ⚠️⚠️ При включённых моментах рендерим ТЕМ ЖЕ блоком, что и search. Иначе нумерация
+        # расходится с цитатами: этот метод регистрировал ДОКУМЕНТНЫЙ ключ и печатал «[N] Документ:»
+        # с фрагментами «[order=…]», а события цитат ключуют те же чанки как МОМЕНТЫ — номера у них
+        # не оказывалось, `citation_number` уходил пустым, и клиент нумеровал карточки сам. То есть
+        # номер, который агент видел, карточки не имел, а карточки получали номера, которых агент
+        # не видел. Замерено на живых прогонах (ADR-0025).
+        # ⓘ Документные корпуса не затронуты: ветка ниже прежняя, гарантия ADR-0015 держится на
+        # том же флаге.
+        moments = (
+            bool(self._s.get('timestamp_citations'))
+            and bool(full_chunks)
+            and all(c.get('start_sec') is not None for c in full_chunks)
+        )
+        if moments:
+            return self._render_chunks_block(
+                full_chunks,
+                header=f'Релевантных фрагментов: {len(full_chunks)} из {len(lite)}',
+            ), full_chunks
         n = self._global_doc_id(doc_id)
-        path_display = ' | '.join(doc.path) if doc.path else doc_id
-        lines = [f'[{n}] Документ: {doc.title or doc_id}', f'Путь: {path_display}']
+        path_display = ' | '.join(doc.path) if doc.path else code
+        lines = [f'[{n}] Документ: {doc.title or code} (id: {code})',
+                 f'Путь: {path_display}']
         if doc.updated_at:
             lines.append(f'Обновлён: {doc.updated_at.isoformat()}')
         if doc.url:
@@ -1896,6 +2178,12 @@ class Pipeline:
         return self._run(self._searcher.fetch_cluster_membership())
 
     def _get_doc_title(self, doc_id: str) -> str:
+        # ⚠️ Сюда приходит и КОД: статус пользователю строится из СЫРЫХ аргументов модели, до их
+        # разворота («глубокое чтение документа: …»). Без этой строки посетитель видел бы в статусе
+        # `D7QK2MV` вместо названия доклада — служебный идентификатор вместо человеческого текста.
+        if shortid.parse(doc_id) is not None:
+            short_to_doc, _ = self._short_maps()
+            doc_id = short_to_doc.get(doc_id, doc_id)
         # live-fetched доки (auto-fetch) не в индексе — searcher вернёт doc_id; их
         # человекочитаемый title кладётся в _live_titles при загрузке.
         live = getattr(self, '_live_titles', {}).get(doc_id)
@@ -2178,6 +2466,69 @@ def _truncate_to_sse_budget(text: str, budget: int) -> str:
         if acc > budget:
             return text[:i].rstrip()
     return text
+
+
+# ── Идентификаторы документов в выдаче агенту ────────────────────────────────
+# Схема `get_doc` требует «ID документа из результатов find_section/search», но при
+# `timestamp_citations` выдача состоит из моментов и идентификатора не содержит. Агенту нечего
+# подставить — и он его выдумывает (замерено: 57% вызовов get_doc в несуществующий документ).
+# Размещение выбирается замером, поэтому вариантов три, и все они — чистые функции: на этот
+# блок в репозитории не было ни одного теста, а без тестируемости замер не воспроизвести.
+
+def _call_signature(name: str, args: dict) -> tuple[str, str]:
+    """Подпись вызова инструмента для сравнения «это тот же вызов».
+
+    `sort_keys` обязателен: модель перечисляет аргументы в произвольном порядке, и без него
+    `{"query": …, "limit": …}` и `{"limit": …, "query": …}` считались бы разными вызовами —
+    то есть гейт против зацикливания молча пропускал бы половину повторов.
+    """
+    return name, json.dumps(args, sort_keys=True, ensure_ascii=False)
+
+
+def _repeat_note(name: str) -> str:
+    """Ответ на повторный вызов: где взять результат и что делать вместо повтора."""
+    return (
+        f'Этот вызов {name} уже был сделан с теми же аргументами — его результат выше в этом '
+        'диалоге, дословно. Повтор ничего не добавит: возьми ответ оттуда, смени аргументы или '
+        'инструмент, либо отвечай по уже собранному.'
+    )
+
+
+# Потолок перечня в отказе get_doc: `unique_docs_cap` у нас 10, столько же документов и в
+# выдаче. Двадцать — с запасом на многошаговый ретрив и заведомо дешевле лишнего хода агента.
+_IDS_HINT_CAP = 20
+
+
+def _moment_head(n: int, label: str, doc_id: str, mode: str) -> str:
+    """Строка-шапка момента. `inline` дописывает идентификатор прямо к ней."""
+    head = f'[{n}] {label}'
+    return f'{head} · id: {doc_id}' if mode == 'inline' else head
+
+
+def _group_by_doc(order_keys: list[str], units: dict[str, dict]) -> list[tuple[str, list[str]]]:
+    """Ключи моментов, сгруппированные по документу, с сохранением порядка релевантности.
+
+    Документ появляется там, где встретился его первый (самый релевантный) момент, — иначе
+    группировка переставила бы выдачу и похоронила лучший фрагмент в середине.
+    """
+    out: dict[str, list[str]] = {}
+    for key in order_keys:
+        doc_id = (units[key]['meta'] or {}).get('doc_id') or key
+        out.setdefault(doc_id, []).append(key)
+    return list(out.items())
+
+
+def _print_order(order_keys: list[str], units: dict[str, dict], mode: str) -> list[str]:
+    """Порядок, в котором единицы попадут в блок, — он же порядок раздачи номеров `[N]`.
+
+    При `grouped` моменты печатаются по документам, значит и нумеровать надо так же. Порядок по
+    существу не меняется: документ встаёт туда, где его самый релевантный момент (`_group_by_doc`).
+    Смешанный блок (моменты + документы) и остальные режимы не трогаем.
+    """
+    moments = [k for k in order_keys if (units[k]['meta'] or {}).get('start_sec') is not None]
+    if mode != 'grouped' or not moments or len(moments) != len(order_keys):
+        return order_keys
+    return [k for _, keys in _group_by_doc(order_keys, units) for k in keys]
 
 
 def _fmt_mmss(seconds: float) -> str:

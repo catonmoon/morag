@@ -1,13 +1,16 @@
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
 
 from morag.indexing.embedder import Embedder, SparseEmbedder
+from morag import shortid
 from morag.indexing.processors import (
     ChunkProcessor,
     DenseEmbeddingProcessor,
     DocumentProcessor,
     PageMarkerProcessor,
+    ShortIdProcessor,
     SparseEmbeddingProcessor,
 )
 from morag.sources.base import Chunk, Document
@@ -319,3 +322,63 @@ class TestPageMarkerProcessor:
         chunk.text = '<!-- page:1 -->\nТекст.'
         result = await processor.process(chunk, make_document())
         assert result.text == 'Текст.'
+
+
+# ---------------------------------------------------------------------------
+# ShortIdProcessor
+# ---------------------------------------------------------------------------
+
+def make_doc(doc_id: str, structural: bool = False) -> Document:
+    return Document(
+        id=doc_id,
+        path=[doc_id],
+        text='' if structural else '# Тест',
+        updated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        source_type='markdown',
+        structural=structural,
+    )
+
+
+class TestShortIdProcessor:
+    async def test_writes_a_valid_code_into_payload(self):
+        taken: dict[str, str] = {}
+        doc = await ShortIdProcessor(taken).process(make_doc('local:demo:a/doc.md'))
+        code = doc.payload['short_id']
+        assert shortid.parse(code) == (shortid.DOC, shortid.body_chars('local:demo:a/doc.md', 5))
+        assert taken[code] == 'local:demo:a/doc.md', 'выданный код обязан стать занятым'
+
+    async def test_structural_document_gets_the_section_letter(self):
+        """Раздел и документ различаются буквой, потому что в базе это один и тот же вид записи, а
+        инструменты у них разные: `search(section_ids=…)` против `get_doc`."""
+        doc = await ShortIdProcessor({}).process(make_doc('local:demo:a/', structural=True))
+        assert doc.payload['short_id'][0] == shortid.SECTION
+
+    async def test_respects_codes_already_taken(self):
+        """⚠️ Занятые коды приходят из базы: документ, проиндексированный год назад, свой код не
+        отдаёт. Иначе ссылки в диалоге и подсказки в отказе начали бы указывать в чужие документы."""
+        doc_id = 'local:demo:a/doc.md'
+        squatted = shortid.make(doc_id)
+        taken = {squatted: 'local:demo:someone/else.md'}
+        doc = await ShortIdProcessor(taken).process(make_doc(doc_id))
+        assert doc.payload['short_id'] != squatted
+        assert taken[squatted] == 'local:demo:someone/else.md'
+
+    async def test_concurrent_documents_never_share_a_code(self):
+        """Инвариант: сколько документов — столько разных кодов, даже когда их обрабатывают вместе.
+
+        ⓘ Тест закрепляет РЕЗУЛЬТАТ, а не механизм: проверено, что он проходит и без замка вокруг
+        выдачи — прерваться там негде, участок синхронный. Механизм охраняется комментарием в
+        процессоре: появится `await` между выдачей и занятием — race вернётся, и этот тест его
+        не поймает.
+        """
+        taken: dict[str, str] = {}
+        processor = ShortIdProcessor(taken)
+        docs = [make_doc(f'local:demo:a/doc{i}.md') for i in range(200)]
+        done = await asyncio.gather(*(processor.process(d) for d in docs))
+        codes = [d.payload['short_id'] for d in done]
+        assert len(set(codes)) == len(codes)
+        assert len(taken) == len(docs)
+
+    async def test_length_is_configurable(self):
+        doc = await ShortIdProcessor({}, length=7).process(make_doc('local:demo:a/doc.md'))
+        assert len(doc.payload['short_id']) == 9  # буква типа + 7 + контрольный знак

@@ -13,8 +13,9 @@ import sys
 from pathlib import Path
 
 from pydantic import BaseModel
-from qdrant_client import AsyncQdrantClient
+from qdrant_client import AsyncQdrantClient, models
 
+from morag import shortid
 from morag.config import Config, DenseEmbedderConfig, PdfConfig, SparseEmbedderConfig, load_config
 from morag.indexing.bm25 import build_bm25_index
 from morag.indexing.chunker import (
@@ -48,6 +49,7 @@ from morag.indexing.processors import (
     LegalDocSummaryProcessor,
     MetadataProcessor,
     PageMarkerProcessor,
+    ShortIdProcessor,
     SparseEmbeddingProcessor,
     TimestampProcessor,
 )
@@ -68,7 +70,7 @@ from morag.storage.collections import (
     frida_vectors_config,
     gte_sparse_vectors_config,
 )
-from morag.storage.repository import ChunkRepository, DocRepository
+from morag.storage.repository import doc_point_id, ChunkRepository, DocRepository
 
 def _build_postprocessors(pdf_config: PdfConfig) -> list[PdfPostProcessor]:
     """Собрать цепочку постпроцессоров по конфигу."""
@@ -224,6 +226,9 @@ logging.basicConfig(
     datefmt='%H:%M:%S',
 )
 logger = logging.getLogger(__name__)
+
+# Сколько операций set_payload уходит в Qdrant одним запросом при миграции кодов.
+_BACKFILL_BATCH = 500
 
 
 # Module-level Pydantic-модели для control-plane (FastAPI ругается если nested
@@ -548,6 +553,12 @@ async def cmd_index(
     sparse_embedder = _make_sparse_embedder(config.indexing.sparse_embedder)
 
     doc_processors = []
+    # Короткий код документа — ПЕРВЫМ: остальные процессоры дороже (LLM, эмбеддинги), и если прогон
+    # прервётся, документ уже уйдёт в базу с кодом. Занятые коды читаются один раз на прогон.
+    doc_processors.append(ShortIdProcessor(
+        taken=await doc_repo.fetch_short_ids(),
+        length=config.indexing.short_id_length,
+    ))
     if config.indexing.doc_title.max_tokens is not None:
         doc_processors.append(DocTitleProcessor(
             llm_client=llm_clients[role_mapping.name_for('doc_title')],
@@ -868,6 +879,108 @@ async def cmd_rebuild_km(
     logger.info('Knowledge Map rebuild complete')
 
 
+async def cmd_backfill_short_ids(config_path: str, dry_run: bool = False) -> None:
+    """Проставить существующим документам короткий код (ADR-0025). БЕЗ переиндексации.
+
+    Переиндексация не нужна и не запускается: точка Qdrant ключуется `uuid5(doc_id)`, а `doc_id`
+    не меняется — трогается только payload, векторы остаются как есть. Коллекция чанков не
+    затрагивается вовсе.
+
+    Идемпотентна: документ с кодом пропускается, повторный запуск — пустой прогон. Прервалась —
+    просто запустить снова.
+
+    ⚠️ Порядок назначения — по возрастанию `doc_id`. Он значим: при коллизии удлиняется код того,
+    кто «пришёл позже», и без сортировки два прогона на одном корпусе разошлись бы.
+    """
+    config = load_config(config_path)
+    length = config.indexing.short_id_length if config.indexing else shortid.DEFAULT_BODY_LEN
+    docs_collection = config.qdrant.collection_docs
+
+    logger.info('Connecting to Qdrant %s:%d', config.qdrant.host, config.qdrant.port)
+    client = AsyncQdrantClient(host=config.qdrant.host, port=config.qdrant.port, timeout=120)
+    try:
+        taken: dict[str, str] = {}          # код → doc_id (уже выданные)
+        structural: dict[str, bool] = {}
+        missing: list[str] = []
+        offset = None
+        total = 0
+        while True:
+            points, offset = await client.scroll(
+                collection_name=docs_collection, limit=256, offset=offset,
+                with_payload=['id', 'short_id', 'structural'], with_vectors=False,
+            )
+            for pt in points:
+                pl = pt.payload or {}
+                doc_id = pl.get('id')
+                if not doc_id:
+                    continue
+                total += 1
+                structural[str(doc_id)] = bool(pl.get('structural'))
+                code = pl.get('short_id')
+                if code:
+                    taken[str(code)] = str(doc_id)
+                else:
+                    missing.append(str(doc_id))
+            if offset is None:
+                break
+
+        assigned: dict[str, str] = {}
+        lengthened = 0
+        for doc_id in sorted(missing):
+            code = shortid.assign(
+                doc_id, structural=structural.get(doc_id, False), taken=taken, length=length,
+            )
+            taken[code] = doc_id
+            assigned[doc_id] = code
+            if len(code) > length + 2:      # буква типа + тело + контрольный знак
+                lengthened += 1
+
+        logger.info(
+            'Documents: %d total, %d already have a code, %d to assign (%d lengthened by collision)',
+            total, total - len(missing), len(assigned), lengthened,
+        )
+        if assigned:
+            sample = list(assigned.items())[:3]
+            logger.info('Sample: %s', ', '.join(f'{c} ← {d}' for d, c in sample))
+        if dry_run:
+            logger.info('Dry run: nothing written')
+            return
+        if not assigned:
+            logger.info('Nothing to do')
+        else:
+            # Одна операция на документ (значение у каждого своё), но батчами в одном запросе.
+            ops = [
+                models.SetPayloadOperation(set_payload=models.SetPayload(
+                    payload={'short_id': code},
+                    points=[doc_point_id(doc_id)],
+                ))
+                for doc_id, code in assigned.items()
+            ]
+            for i in range(0, len(ops), _BACKFILL_BATCH):
+                await client.batch_update_points(
+                    collection_name=docs_collection,
+                    update_operations=ops[i:i + _BACKFILL_BATCH],
+                    wait=False,
+                )
+                logger.info('Written %d/%d', min(i + _BACKFILL_BATCH, len(ops)), len(ops))
+
+        # ⚠️ Индекс на существующей коллекции сам не появится: `ensure_docs_collection` делает
+        # early-return, если коллекция есть, и индексы создаются только при первом создании.
+        try:
+            await client.create_payload_index(
+                collection_name=docs_collection,
+                field_name='short_id',
+                field_schema=models.PayloadSchemaType.KEYWORD,
+            )
+            logger.info('Payload index on short_id is in place')
+        except Exception as exc:  # noqa: BLE001 — «уже существует» тоже прилетает исключением
+            logger.info('Payload index on short_id: %s', exc)
+    finally:
+        await client.close()
+
+    logger.info('Backfill complete. Next: rebuild-km, then restart the pipelines service')
+
+
 async def cmd_serve(config_path: str) -> None:
     """Daemon-режим: индексация по cron-расписанию.
 
@@ -1179,6 +1292,20 @@ def main() -> None:
         help='Путь к конфигу (по умолчанию: env MORAG_CONFIG_PATH или config.yml)',
     )
 
+    backfill_parser = subparsers.add_parser(
+        'backfill-short-ids',
+        help='Проставить документам короткий код для агента (без переиндексации)',
+    )
+    backfill_parser.add_argument(
+        '--config', default=os.environ.get('MORAG_CONFIG_PATH', 'config.yml'),
+        metavar='PATH',
+        help='Путь к конфигу (по умолчанию: env MORAG_CONFIG_PATH или config.yml)',
+    )
+    backfill_parser.add_argument(
+        '--dry-run', action='store_true',
+        help='Посчитать и показать, ничего не записывая',
+    )
+
     serve_parser = subparsers.add_parser('serve', help='Daemon-режим: индексация по расписанию из конфига')
     serve_parser.add_argument(
         '--config', default=os.environ.get('MORAG_CONFIG_PATH', 'config.yml'),
@@ -1204,6 +1331,8 @@ def main() -> None:
         asyncio.run(cmd_index(args.config, reset=args.reset))
     elif args.command == 'rebuild-km':
         asyncio.run(cmd_rebuild_km(args.config))
+    elif args.command == 'backfill-short-ids':
+        asyncio.run(cmd_backfill_short_ids(args.config, dry_run=args.dry_run))
     elif args.command == 'serve':
         asyncio.run(cmd_serve(args.config))
     elif args.command == 'query':

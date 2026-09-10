@@ -171,6 +171,20 @@ def _ratio_in_words(ratio: float) -> str:
     return f'примерно в {ratio:.0f} раз'
 
 
+def _node_id(doc) -> str:
+    """Идентификатор узла для Карты: короткий код, если он есть, иначе длинный `doc_id`.
+
+    ⚠️ Карта уезжает в системный промпт, то есть это ОДНА ИЗ ПОВЕРХНОСТЕЙ, где агент берёт
+    идентификаторы (ADR-0025). Оставить здесь длинный `doc_id`, показав короткий в выдаче search, —
+    значит поселить рядом две формы: замерено, что ровно из такой смеси агент и собирал гибриды
+    «префикс раздела + заголовок».
+    ⓘ Запасной путь на длинный id нужен для корпуса, который ещё не прошёл миграцию: Карта
+    пересобирается своей командой, и порядок «сначала backfill, потом rebuild-km» гарантировать
+    нельзя.
+    """
+    return (doc.payload or {}).get('short_id') or doc.id
+
+
 def _node_title(doc: Document, parent: Document | None = None) -> str:
     """Получить название узла: из поля title или fallback на path."""
     if doc.title:
@@ -349,11 +363,11 @@ class KnowledgeMapGenerator:
             summary = doc.payload.get('doc_summary', '')
 
             if summary:
-                lines.append(f'{prefix} {title} (id: {doc.id})')
+                lines.append(f'{prefix} {title} (id: {_node_id(doc)})')
                 lines.append(summary)
                 lines.append('')
             else:
-                lines.append(f'{prefix} {title} (id: {doc.id})')
+                lines.append(f'{prefix} {title} (id: {_node_id(doc)})')
                 lines.append('')
 
             children = children_map.get(doc.id, [])
@@ -617,7 +631,7 @@ class KnowledgeMapGenerator:
         children = children_map[doc.id]
 
         # Header + строки listing'а — фиксированный overhead (точная оценка по токенизатору)
-        header_overhead = self._counter.count(f'{"#" * min(depth + 1, 4)} {_node_title(doc)} (id: {doc.id})\n\n')
+        header_overhead = self._counter.count(f'{"#" * min(depth + 1, 4)} {_node_title(doc)} (id: {_node_id(doc)})\n\n')
 
         # 1. Provisional распределение между всеми детьми по весу
         total_w = sum(weights[c.id] for c in children) or 1
@@ -657,14 +671,14 @@ class KnowledgeMapGenerator:
 
         async def render_brief_line(c: Document) -> str:
             ctitle = _node_title(c)
-            prefix_tokens = self._counter.count(f'- {ctitle} (id: {c.id}) — ')
+            prefix_tokens = self._counter.count(f'- {ctitle} (id: {_node_id(c)}) — ')
             # На сам hint остаётся _KM_BRIEF_LINE_TOKENS - prefix
             hint_budget = max(_KM_BRIEF_LINE_TOKENS - prefix_tokens, 6)
             text = c.payload.get('doc_summary', '') or ''
             if not text:
-                return f'- {ctitle} (id: {c.id})'
+                return f'- {ctitle} (id: {_node_id(c)})'
             hint = await self._compact_until_fits(ctitle, text, hint_budget)
-            return f'- {ctitle} (id: {c.id}) — {hint}' if hint else f'- {ctitle} (id: {c.id})'
+            return f'- {ctitle} (id: {_node_id(c)}) — {hint}' if hint else f'- {ctitle} (id: {_node_id(c)})'
 
         self_text, big_texts, brief_lines = await asyncio.gather(
             self._compact_until_fits(title, doc.payload.get('doc_summary', '') or '', self_budget),
@@ -673,7 +687,7 @@ class KnowledgeMapGenerator:
         )
 
         prefix = '#' * min(depth + 1, 4)
-        parts = [f'{prefix} {title} (id: {doc.id})', '']
+        parts = [f'{prefix} {title} (id: {_node_id(doc)})', '']
         if self_text:
             parts.extend([self_text, ''])
         parts.extend(big_texts)
@@ -702,7 +716,7 @@ class KnowledgeMapGenerator:
         if description:
             description = await self._compact_until_fits(title, description, budget)
 
-        parts = [f'{prefix} {title} (id: {doc.id})', '']
+        parts = [f'{prefix} {title} (id: {_node_id(doc)})', '']
         if description:
             parts.extend([description, ''])
         return '\n'.join(parts)
@@ -799,7 +813,7 @@ class KnowledgeMapGenerator:
         """
         prefix = '#' * min(depth + 1, 4)
         title = _node_title(doc)
-        lines = [f'{prefix} {title} (id: {doc.id})']
+        lines = [f'{prefix} {title} (id: {_node_id(doc)})']
 
         if doc.id in replacements:
             lines.append(replacements[doc.id])
@@ -1275,7 +1289,7 @@ class KnowledgeMapGenerator:
             ## {cluster.name}
             {cluster.summary}
 
-            - **{doc.title}** (id: {doc.id})
+            - **{doc.title}** (id: {короткий код документа})
             - ...
 
             ## {cluster2.name}
@@ -1293,7 +1307,7 @@ class KnowledgeMapGenerator:
             lines.append('')
             for doc in cl['docs']:
                 title = _node_title(doc)
-                lines.append(f'- **{title}** (id: {doc.id})')
+                lines.append(f'- **{title}** (id: {_node_id(doc)})')
             lines.append('')
         return '\n'.join(lines).rstrip() + '\n'
 
@@ -1324,8 +1338,12 @@ class KnowledgeMapGenerator:
                     parent_doc_ids=payload.get('parent_doc_ids', []),
                     structural=payload.get('structural', False),
                     payload={
+                        # ⚠️ Whitelist: незнакомое поле сюда не попадёт, и `short_id` пришлось
+                        # добавить руками. Забыть его — значит оставить Карту на длинных
+                        # идентификаторах, разойдясь с выдачей search: самый частый маршрут агента
+                        # («взять id из Карты → search(section_ids=…)») перестал бы работать.
                         k: v for k, v in payload.items()
-                        if k in ('doc_summary', 'source_kind', 'source_name')
+                        if k in ('doc_summary', 'source_kind', 'source_name', 'short_id')
                     },
                 ))
             if offset is None:

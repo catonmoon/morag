@@ -8,6 +8,7 @@ from morag.indexing.embedder import Embedder, SparseEmbedder
 from morag.indexing.token_counter import TokenCounter, TiktokenCounter
 from morag.llm.client import GenerationParams, LLMClient
 from morag.sources.base import Chunk, Document
+from morag import shortid
 
 logger = logging.getLogger(__name__)
 
@@ -412,6 +413,43 @@ class DocTitleProcessor(DocumentProcessor):
                 document.id, exc_info=True,
             )
 
+        return document
+
+
+class ShortIdProcessor(DocumentProcessor):
+    """Проставляет документу короткий код для агента — `payload['short_id']`.
+
+    Зачем это в индексаторе, а не в отвечающей части: код обязан быть УНИКАЛЬНЫМ, а уникальность
+    обеспечивается записью (кто занял — держит), а не длиной. Записывать может только тот, кто
+    сохраняет документ.
+
+    ⚠️ `DocRepository.upsert` менять не пришлось: он подмешивает `**document.payload` в payload
+    точки целиком, а `_payload_to_document` возвращает незнакомые поля обратно в `Document.payload`.
+    Поэтому код доживает до следующего прогона сам и не теряется на документах, которые не менялись.
+
+    ⚠️ Инстанс БЕЗ этого процессора (или без миграции) работать не перестаёт: печать выводит код из
+    `doc_id` чистой функцией. Поле нужно для обратного резолва «код → документ» и для коллизий.
+    """
+
+    def __init__(self, taken: dict[str, str], length: int = shortid.DEFAULT_BODY_LEN) -> None:
+        self._taken = taken   # код → doc_id; предзагружается из базы один раз на прогон
+        self._length = length
+
+    async def process(self, document: Document) -> Document:
+        # ⚠️ Выдача кода и его занятие обязаны остаться ОДНИМ синхронным куском, без `await` между
+        # ними. Документы обрабатываются параллельно (`indexing.concurrency`), и в этом месте вся
+        # защита от «двум документам один код» — именно отсутствие точки переключения: цикл событий
+        # однопоточный и прервать синхронный участок не может. Замок здесь стоял и был снят как
+        # ложное обещание — тест на параллельности проходил и без него, потому что прерваться было
+        # негде. Появится `await` (запрос в базу, лог с ожиданием) — race вернётся, и молча.
+        code = shortid.assign(
+            document.id,
+            structural=document.structural,
+            taken=self._taken,
+            length=self._length,
+        )
+        self._taken[code] = document.id
+        document.payload['short_id'] = code
         return document
 
 
