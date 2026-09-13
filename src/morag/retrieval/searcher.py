@@ -126,13 +126,16 @@ class HybridSearcher:
         source_kinds: dict[str, str] | None = None,
         cache_ttl_seconds: float = 300.0,
         annotation_field: str | None = None,
+        annotation_leg: bool = False,
     ) -> None:
         self._qdrant = qdrant
         self._dense = dense_embedder
         self._sparse = sparse_embedder
-        # ADR-0027: поле чанка из аннотаций — доезжает до форматтера и, если в схеме коллекции есть
-        # одноимённый dense-вектор, даёт ногу RRF верхнего уровня тем же вектором запроса.
+        # ADR-0027: поле чанка из аннотаций — доезжает до форматтера; при `annotation_leg` и наличии
+        # одноимённого dense-вектора в схеме коллекции даёт ногу RRF верхнего уровня тем же вектором
+        # запроса (по умолчанию выключено — замерено, что нога шумит титульными слайдами).
         self._annotation_field = annotation_field
+        self._annotation_leg = annotation_leg
         self._extra_fields: tuple[str, ...] = (annotation_field,) if annotation_field else ()
         self._dense_vector_names_cache: dict[str, set[str]] = {}
         self._chunks_collection = chunks_collection
@@ -316,7 +319,7 @@ class HybridSearcher:
         ]
         # ADR-0027: нога по вектору поля аннотаций — ВЕРХНЕГО уровня (свой голос RRF, как у dense
         # речи), тем же вектором запроса; только если вектор есть в схеме коллекции.
-        ann_field = getattr(self, '_annotation_field', None)
+        ann_field = getattr(self, '_annotation_field', None) if getattr(self, '_annotation_leg', False) else None
         if ann_field and ann_field in await self.get_dense_vector_names(collection):
             prefetch.append(Prefetch(
                 query=dense, using=ann_field, limit=limit * 2,

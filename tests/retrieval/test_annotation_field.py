@@ -25,7 +25,7 @@ SCREEN = [{'kind': 'screen', 't0': 498.0, 't1': 517.0, 'sub': 'slide', 'label': 
 
 # --- searcher -----------------------------------------------------------------------------------
 
-def _searcher(dense_names: set[str], field: str | None = 'screen') -> HybridSearcher:
+def _searcher(dense_names: set[str], field: str | None = 'screen', leg: bool = True) -> HybridSearcher:
     s = HybridSearcher.__new__(HybridSearcher)
     s._dense = SimpleNamespace(embed_query=AsyncMock(return_value=[0.1, 0.2]))
     s._sparse = SimpleNamespace(embed_query=AsyncMock(return_value=([1, 2], [0.5, 0.5])))
@@ -33,11 +33,12 @@ def _searcher(dense_names: set[str], field: str | None = 'screen') -> HybridSear
     s.get_dense_vector_names = AsyncMock(return_value=dense_names)
     s._hnsw_ef = 0
     s._annotation_field = field
+    s._annotation_leg = leg
     s._extra_fields = (field,) if field else ()
     return s
 
 
-async def test_leg_only_when_vector_exists_in_schema():
+async def test_leg_only_when_enabled_and_vector_exists_in_schema():
     with_vec = await _searcher({'full', 'screen'})._build_rrf_prefetch('chunks', 'пирамида', 10)
     assert [p.using for p in with_vec if p.using] == ['full', 'screen']   # верхний уровень, свой голос
     assert with_vec[1].query == with_vec[0].query                          # тот же вектор запроса
@@ -45,6 +46,9 @@ async def test_leg_only_when_vector_exists_in_schema():
     assert [p.using for p in old_schema if p.using] == ['full']
     off = await _searcher({'full', 'screen'}, field=None)._build_rrf_prefetch('chunks', 'пирамида', 10)
     assert [p.using for p in off if p.using] == ['full']
+    # умолчание: поле есть, вектор есть, нога выключена — замерено, что она шумит
+    no_leg = await _searcher({'full', 'screen'}, leg=False)._build_rrf_prefetch('chunks', 'пирамида', 10)
+    assert [p.using for p in no_leg if p.using] == ['full']
 
 
 def test_point_to_chunk_carries_the_field_only_when_asked():

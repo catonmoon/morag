@@ -220,7 +220,9 @@ class AnnotationsConfig(BaseModel):
     # генератору контекста вход под подписью `label` (`context`). `max_tokens` — потолок текста
     # элементов на чанк. None — поля нет.
     field: str | None = None
-    vector: bool = True
+    # Отдельный dense-вектор поля: нужен только ноге RRF (`retrieval.features.annotation_leg`),
+    # которая по замеру шумит и выключена; без неё вектор — лишний эмбеддинг на чанк.
+    vector: bool = False
     in_sparse: bool = True
     context: bool = True
     label: str = 'Аннотации'
@@ -576,6 +578,11 @@ class RetrievalFeaturesConfig(BaseModel):
     # None — ничего из этого не происходит; документная ветка выдачи не меняется никогда.
     annotation_field: str | None = None
     annotation_label: str = 'Аннотации'
+    # Нога RRF верхнего уровня по одноимённому dense-вектору поля. ⚠️ Выключена по умолчанию —
+    # замерено на корпусе лекций: ранг нужного чанка она не улучшает (тот же 1-й), а в десятку
+    # тянет короткие титульные слайды, чей текст совпал с ключевым словом вопроса (5 из 10 вместо
+    # 2). Включать только вместе с `indexing.annotations.vector: true` и после своего замера.
+    annotation_leg: bool = False
 
 
 # Дефолтная доменная «роль» агента в начале system prompt. Единый источник истины:
