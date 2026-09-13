@@ -100,9 +100,41 @@ def make_dense_vector_config(size: int, distance: Distance = Distance.COSINE) ->
     return VectorParams(size=size, distance=distance)
 
 
-def frida_vectors_config(dim: int) -> dict[str, VectorParams]:
-    """Конфиг именованных векторов для коллекции чанков с FRIDA-эмбеддингами."""
-    return {'full': VectorParams(size=dim, distance=Distance.COSINE)}
+def frida_vectors_config(dim: int, extra: tuple[str, ...] | list[str] = ()) -> dict[str, VectorParams]:
+    """Конфиг именованных векторов для коллекции чанков с FRIDA-эмбеддингами.
+
+    `extra` — дополнительные dense-векторы того же эмбеддера (ADR-0027: поле чанка из аннотаций
+    получает свой вектор, чтобы не размывать `full`)."""
+    cfg = {'full': VectorParams(size=dim, distance=Distance.COSINE)}
+    for name in extra:
+        cfg[name] = VectorParams(size=dim, distance=Distance.COSINE)
+    return cfg
+
+
+async def missing_dense_vectors(
+    client: AsyncQdrantClient,
+    name: str,
+    expected: set[str],
+) -> set[str]:
+    """Каких именованных dense-векторов нет в СУЩЕСТВУЮЩЕЙ коллекции.
+
+    ⚠️ `ensure_*_collection` у существующей коллекции делает early-return и схему не сверяет, а
+    отпечаток эмбеддера от нового вектора не меняется — включение вектора в конфиге само по себе
+    ни коллекцию не пересоздаст, ни переиндексацию не вызовет. Первый же upsert с незнакомым
+    именем упал бы в Qdrant, поэтому вызывающий выключает запись такого вектора и пишет в лог:
+    нужен --reset. Коллекции нет → пусто: создастся с полной схемой.
+    """
+    existing = {c.name for c in (await client.get_collections()).collections}
+    if name not in existing:
+        return set()
+    info = await client.get_collection(name)
+    vectors = info.config.params.vectors
+    current = set(vectors.keys()) if isinstance(vectors, dict) else set()
+    missing = {v for v in expected if v not in current}
+    if missing:
+        logger.warning('Collection %s lacks dense vectors %s — run with --reset to recreate; '
+                       'they will not be written this run', name, sorted(missing))
+    return missing
 
 
 def gte_sparse_vectors_config() -> dict[str, SparseVectorParams]:

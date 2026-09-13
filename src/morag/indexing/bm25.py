@@ -24,6 +24,7 @@ from qdrant_client.models import PointVectors
 # Единая точка истины для токен-хэша (md5 % _MD5_MOD) — общая с GTE sparse.
 # Если разнести определения — query и document sparse ранжируются по разным
 # индексам и sparse-поиск перестаёт работать. Не дублируем.
+from morag.indexing.annotations import annotation_text
 from morag.indexing.embedder import _word_to_index
 
 logger = logging.getLogger(__name__)
@@ -155,12 +156,37 @@ BM25_VARIANTS: list[tuple[str, callable]] = [
 ]
 
 
+def bm25_text(
+    payload: dict,
+    include_doc_summary: bool = False,
+    include_chunk_context: bool = False,
+    annotation_field: str | None = None,
+) -> str:
+    """Текст чанка для BM25 — та же сборка, что у sparse-процессора: текст (+ контекст,
+    + doc_summary, + аннотации чанка по ADR-0027). Вынесено, чтобы тестировать без Qdrant."""
+    parts = [payload.get('text', '')]
+    if include_chunk_context:
+        ctx = payload.get('context', '')
+        if ctx:
+            parts.append(ctx)
+    if include_doc_summary:
+        doc_summary = payload.get('doc_summary', '')
+        if doc_summary:
+            parts.append(doc_summary)
+    if annotation_field:
+        ann = annotation_text(payload.get(annotation_field) or [])
+        if ann:
+            parts.append(ann)
+    return '\n'.join(parts)
+
+
 async def build_bm25_index(
     client: AsyncQdrantClient,
     collection: str = 'chunks',
     batch_size: int = 64,
     include_doc_summary: bool = False,
     include_chunk_context: bool = False,
+    annotation_field: str | None = None,
 ) -> None:
     """Post-indexing: построить BM25 sparse vectors для всех чанков в коллекции.
 
@@ -194,7 +220,7 @@ async def build_bm25_index(
             collection_name=collection,
             limit=100,
             offset=offset,
-            with_payload=['text', 'doc_summary', 'context'],
+            with_payload=['text', 'doc_summary', 'context'] + ([annotation_field] if annotation_field else []),
             with_vectors=['full'],
         )
         if not points:
@@ -203,16 +229,7 @@ async def build_bm25_index(
             if not p.vector or not p.vector.get('full'):
                 skipped += 1
                 continue
-            parts = [p.payload.get('text', '')]
-            if include_chunk_context:
-                ctx = p.payload.get('context', '')
-                if ctx:
-                    parts.append(ctx)
-            if include_doc_summary:
-                doc_summary = p.payload.get('doc_summary', '')
-                if doc_summary:
-                    parts.append(doc_summary)
-            text = '\n'.join(parts)
+            text = bm25_text(p.payload, include_doc_summary, include_chunk_context, annotation_field)
             all_points.append((p.id, text))
         if offset is None:
             break

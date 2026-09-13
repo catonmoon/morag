@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import re
 
+from morag.indexing.annotations import annotation_text
 from morag.indexing.token_counter import TokenCounter
 from morag.llm.client import GenerationParams, LLMClient
 
@@ -46,8 +47,12 @@ _MIN_BUDGET_TOKENS = 2000
 _SEPARATOR_TOKENS = 5
 
 
-def _format_chunk_item(i: int, c: dict) -> str:
-    """Формат одного chunk-item в rerank-промпте. Используется и для подсчёта токенов."""
+def _format_chunk_item(i: int, c: dict, annotation: tuple[str, str] | None = None) -> str:
+    """Формат одного chunk-item в rerank-промпте. Используется и для подсчёта токенов.
+
+    `annotation = (поле, подпись)` (ADR-0027): элементы поля печатаются строкой `<подпись>: …`
+    перед текстом — иначе отдельный вектор найдёт чанк по экрану, а реранкер, не видя экрана,
+    его выбросит."""
     path_display = ' | '.join(c['path']) if c['path'] else c['doc_id']
     context = c.get('context', '')
     updated_at = c.get('updated_at', '')
@@ -56,6 +61,8 @@ def _format_chunk_item(i: int, c: dict) -> str:
         lines.append(f'Обновлён: {updated_at}')
     if context:
         lines.append(f'Контекст: {context}')
+    if annotation and c.get(annotation[0]):
+        lines.append(f'{annotation[1]}: {annotation_text(c[annotation[0]])}')
     lines.append(c['text'])
     return '\n'.join(lines)
 
@@ -70,6 +77,8 @@ class LLMReranker:
         max_tokens: int = 100,
         enable_thinking: bool | None = False,
         max_input_tokens: int = 0,
+        annotation_field: str | None = None,
+        annotation_label: str = '',
     ) -> None:
         """
         :param token_counter: TokenCounter для подсчёта токенов skeleton + items.
@@ -77,12 +86,14 @@ class LLMReranker:
         :param enable_thinking: reasoning-флаг (None = не отправлять — для xAI Grok).
         :param max_input_tokens: override бюджета на input. 0 = auto от
             `llm.context_window - точные накладные`. >0 = ручной потолок.
+        :param annotation_field: поле чанка из аннотаций (ADR-0027), печатается под `annotation_label`.
         """
         self._llm = llm_client
         self._token_counter = token_counter
         self._max_tokens = max_tokens
         self._enable_thinking = enable_thinking
         self._max_input_tokens_override = max_input_tokens
+        self._annotation = (annotation_field, annotation_label) if annotation_field else None
 
     def _compute_budget(self, query: str) -> int:
         """Бюджет токенов на items (chunks) в одном rerank-вызове."""
@@ -111,7 +122,7 @@ class LLMReranker:
         fitted: list[dict] = []
         used = 0
         for i, c in enumerate(chunks):
-            item_text = _format_chunk_item(i, c)
+            item_text = _format_chunk_item(i, c, self._annotation)
             t = self._token_counter.count(item_text)
             extra = t + (_SEPARATOR_TOKENS if fitted else 0)
             if fitted and used + extra > budget:
@@ -129,7 +140,7 @@ class LLMReranker:
             '[rerank] candidates=%d → fits=%d (dropped %d, budget=%d tokens)',
             len(chunks), len(fitted), dropped, budget,
         )
-        items = [_format_chunk_item(i, c) for i, c in enumerate(fitted)]
+        items = [_format_chunk_item(i, c, self._annotation) for i, c in enumerate(fitted)]
         prompt = _PROMPT_TEMPLATE.format(query=query, items='\n---\n'.join(items))
         try:
             answer = (await self._llm.complete(

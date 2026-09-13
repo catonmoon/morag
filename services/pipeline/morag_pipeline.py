@@ -372,6 +372,11 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
         # идентификатор, которого в выдаче моментов нет, и агент его выдумывает.
         'doc_ids_in_results': str(
             getattr(features, 'doc_ids_in_results', 'grouped') or 'grouped') if features else 'grouped',
+        # Поле чанка из аннотаций (ADR-0027, config-only): строки в ветке момента, у реранкера,
+        # нога RRF по одноимённому вектору. None — ничего не меняется.
+        'annotation_field': (getattr(features, 'annotation_field', None) or None) if features else None,
+        'annotation_label': str(
+            getattr(features, 'annotation_label', 'Аннотации') or 'Аннотации') if features else 'Аннотации',
 
         'http_timeout': _int_or(
             v.HTTP_TIMEOUT, retr.http_timeout if retr else None, default=300,
@@ -584,6 +589,7 @@ class Pipeline:
             hnsw_ef=s['hnsw_ef'],
             source_roles=s['source_roles'],
             source_kinds=s['source_kinds'],
+            annotation_field=s.get('annotation_field'),
         )
         # Реранкеры (search и get_doc) — оба на rerank-LLM + TiktokenCounter.
         # Бюджет input'а считается по `llm.context_window`.
@@ -595,6 +601,8 @@ class Pipeline:
             max_tokens=s['rerank_max_tokens'] or 100,
             enable_thinking=s['rerank_enable_thinking'],
             max_input_tokens=s.get('search_rerank_max_tokens', 0),
+            annotation_field=s.get('annotation_field'),
+            annotation_label=s.get('annotation_label', ''),
         )
         doc_reranker = DocReranker(
             llm_rerank,
@@ -1635,9 +1643,15 @@ class Pipeline:
                 if doc_id not in docs_seen:
                     docs_seen[doc_id] = cs[0].get('title') or self._get_doc_title(doc_id)
                 lines = [_moment_head(n, meta['label'], self._code_of(doc_id), mode)]
+                ann_field = self._s.get('annotation_field')
                 for c in cs:
                     if c.get('context'):
                         lines.append(f'Контекст: {c["context"]}')
+                    # ADR-0027: экран (и указания докладчика на него) — ПЕРЕД речью: сцена, потом
+                    # слова; род и время в подписи, чтобы агент не выдавал окно программы за тезис.
+                    if ann_field and c.get(ann_field):
+                        lines += [_annotation_line(self._s.get('annotation_label', ''), it)
+                                  for it in c[ann_field]]
                     lines.append(c.get('text', ''))
                 block = '\n'.join(lines)
                 moment_text[key] = block
@@ -2635,6 +2649,30 @@ def _print_order(order_keys: list[str], units: dict[str, dict], mode: str) -> li
     if mode != 'grouped' or not moments or len(moments) != len(order_keys):
         return order_keys
     return [k for _, keys in _group_by_doc(order_keys, units) for k in keys]
+
+
+def _annotation_line(label: str, item: dict) -> str:
+    """Строка элемента поля аннотаций в ветке момента (ADR-0027). Чистая функция — тестируется
+    без клиентов, как и остальные помощники рендера.
+
+    Экран: `На экране (8:18, Слайд 4 «Пирамида»): текст`; указание докладчика (`kind: ref`):
+    `На экране · указание (9:18, «вот здесь»): что там было`. Подпись элемента — `label` из
+    сайдкара (корпус знает, как назвать), иначе `sub`; время — из `t0`/`at`, если есть."""
+    kind = item.get('kind')
+    when = item.get('at') if kind == 'ref' else item.get('t0')
+    head = [] if when is None else [_fmt_mmss(float(when))]
+    if kind == 'ref':
+        if item.get('quote'):
+            head.append(f'«{item["quote"]}»')
+        text = str(item.get('text') or '').strip()
+        return f'{label} · указание ({", ".join(head)}): {text}' if head else f'{label} · указание: {text}'
+    what = item.get('label') or item.get('sub') or ''
+    if item.get('title'):
+        what = f'{what} «{item["title"]}»'.strip()
+    if what:
+        head.append(what)
+    text = str(item.get('text') or '').strip().replace('\n', ' ')
+    return f'{label} ({", ".join(head)}): {text}' if head else f'{label}: {text}'
 
 
 def _fmt_mmss(seconds: float) -> str:

@@ -42,6 +42,7 @@ from morag.indexing.status_reporter import (
     StatusReporter,
 )
 from morag.indexing.processors import (
+    AnnotationsProcessor,
     DenseEmbeddingProcessor,
     DocSummaryProcessor,
     DocTitleProcessor,
@@ -70,6 +71,7 @@ from morag.storage.collections import (
     ensure_payload_indexes,
     frida_vectors_config,
     gte_sparse_vectors_config,
+    missing_dense_vectors,
 )
 from morag.storage.repository import doc_point_id, ChunkRepository, DocRepository
 
@@ -421,6 +423,10 @@ async def cmd_index(
     embedder = _make_dense_embedder(config.indexing.dense_embedder)
 
     logger.info('Ensuring collections...')
+    # ADR-0027: поле чанка из аннотаций со СВОИМ dense-вектором — только в коллекции чанков.
+    ann = config.indexing.annotations
+    ann_field = ann.field if ann else None
+    ann_vectors = [ann_field] if (ann_field and ann.vector) else []
     await ensure_docs_collection(
         client, config.qdrant.collection_docs,
         vectors_config=frida_vectors_config(embedder.dim),
@@ -428,9 +434,14 @@ async def cmd_index(
     )
     await ensure_chunks_collection(
         client, config.qdrant.collection_chunks,
-        vectors_config=frida_vectors_config(embedder.dim),
+        vectors_config=frida_vectors_config(embedder.dim, extra=ann_vectors),
         sparse_vectors_config=gte_sparse_vectors_config(),
     )
+    if ann_vectors:
+        # Существующая коллекция без вектора: не писать его в этом прогоне (upsert упал бы),
+        # предупреждение уже в логе — нужен --reset.
+        missing = await missing_dense_vectors(client, config.qdrant.collection_chunks, set(ann_vectors))
+        ann_vectors = [v for v in ann_vectors if v not in missing]
     # Поля фильтра `search` — индексами в обеих коллекциях (чанки — сам поиск, документы —
     # значения для схемы инструмента). Идемпотентно, на каждом запуске.
     filter_fields = [f.field for f in config.retrieval.search.filters] if config.retrieval else []
@@ -614,11 +625,20 @@ async def cmd_index(
         PageMarkerProcessor(),
         TimestampProcessor(),
         MetadataProcessor(),
+    ]
+    if ann_field:
+        # ПЕРЕД эмбеддингами: sparse подмешивает `payload[field]`, dense `full` его не видит.
+        chunk_processors.append(AnnotationsProcessor(
+            ann_field, token_counter=llm_counter, max_tokens=ann.max_tokens,
+            embedder=embedder if ann_field in ann_vectors else None,
+        ))
+    chunk_processors += [
         DenseEmbeddingProcessor(embedder),
         SparseEmbeddingProcessor(
             sparse_embedder,
             include_doc_summary=config.indexing.lexical_doc_summary,
             include_chunk_context=config.indexing.lexical_chunk_context,
+            annotation_field=ann_field if (ann_field and ann.in_sparse) else None,
         ),
     ]
 
@@ -659,6 +679,9 @@ async def cmd_index(
         run_context=run_ctx,
         embedder_fingerprint=embedder_fingerprint,
         reindex_floor=effort_floor,
+        annotation_field=ann_field if (ann_field and ann.context) else None,
+        annotation_label=ann.label if ann else '',
+        annotation_max_tokens=ann.max_tokens if ann else 0,
     )
 
     logger.info(
@@ -764,6 +787,7 @@ async def cmd_index(
                 client, config.qdrant.collection_chunks,
                 include_doc_summary=config.indexing.lexical_doc_summary,
                 include_chunk_context=config.indexing.lexical_chunk_context,
+                annotation_field=ann_field if (ann_field and ann.in_sparse) else None,
             )
             reporter.document_done('bm25_chunks')
             await build_bm25_index(client, config.qdrant.collection_docs)

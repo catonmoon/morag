@@ -4,6 +4,7 @@ import logging
 import re
 from abc import ABC, abstractmethod
 
+from morag.indexing.annotations import annotation_text, select_annotations
 from morag.indexing.embedder import Embedder, SparseEmbedder
 from morag.indexing.token_counter import TokenCounter, TiktokenCounter
 from morag.llm.client import GenerationParams, LLMClient
@@ -94,6 +95,62 @@ class DenseEmbeddingProcessor(ChunkProcessor):
         return chunks
 
 
+class AnnotationsProcessor(ChunkProcessor):
+    """Поле чанка из аннотаций документа (ADR-0027).
+
+    `chunk.payload[field]` — элементы сайдкара `kind == field`, действовавшие на отрезке чанка
+    (`start_sec`..`end_sec` или символьные смещения), и привязки `ref` внутри него, по времени, с
+    потолком `max_tokens` на суммарный текст. При заданном `embedder` — ОТДЕЛЬНЫЙ именованный
+    dense-вектор `field` по `path + текст элементов`: в `full` (речь + контекст) экран не
+    подмешивается — замерено, что дословный слайд размывает вектор речи. Чанк без элементов не
+    трогается: ни поля, ни вектора (точка Qdrant может нести не все именованные векторы).
+    """
+
+    def __init__(self, field: str, token_counter: TokenCounter, max_tokens: int = 400,
+                 embedder: Embedder | None = None) -> None:
+        self._field = field
+        self._counter = token_counter
+        self._max_tokens = max_tokens
+        self._embedder = embedder
+
+    def _select(self, chunk: Chunk, document: Document) -> list[dict]:
+        if not document.annotations:
+            return []
+        return select_annotations(
+            document.annotations, self._field,
+            start_sec=chunk.payload.get('start_sec'), end_sec=chunk.payload.get('end_sec'),
+            char_start=chunk.payload.get('char_offset'),
+            char_end=(chunk.payload.get('char_offset') or 0) + len(chunk.text),
+            counter=self._counter, max_tokens=self._max_tokens,
+        )
+
+    def _vector_text(self, chunk: Chunk, items: list[dict]) -> str:
+        return '\n'.join(chunk.path) + '\n' + annotation_text(items)
+
+    async def process(self, chunk: Chunk, document: Document) -> Chunk:
+        items = self._select(chunk, document)
+        if items:
+            chunk.payload[self._field] = items
+            if self._embedder is not None:
+                chunk.vectors[self._field] = await self._embedder.embed(self._vector_text(chunk, items))
+        return chunk
+
+    async def process_batch(self, chunks: list[Chunk], document: Document) -> list[Chunk]:
+        """Один вызов эмбеддера на документ — только для чанков, у которых элементы есть."""
+        with_items: list[Chunk] = []
+        for chunk in chunks:
+            items = self._select(chunk, document)
+            if items:
+                chunk.payload[self._field] = items
+                with_items.append(chunk)
+        if with_items and self._embedder is not None:
+            vectors = await self._embedder.embed_batch(
+                [self._vector_text(c, c.payload[self._field]) for c in with_items])
+            for chunk, vec in zip(with_items, vectors):
+                chunk.vectors[self._field] = vec
+        return chunks
+
+
 class SparseEmbeddingProcessor(ChunkProcessor):
     """Добавляет sparse-вектор 'keywords' в chunk.vectors.
 
@@ -111,10 +168,14 @@ class SparseEmbeddingProcessor(ChunkProcessor):
         self, embedder: SparseEmbedder,
         include_doc_summary: bool = False,
         include_chunk_context: bool = False,
+        annotation_field: str | None = None,
     ) -> None:
         self._embedder = embedder
         self._include_doc_summary = include_doc_summary
         self._include_chunk_context = include_chunk_context
+        # ADR-0027: текст аннотаций чанка (`payload[field]`) подмешивается в лексику — лексика
+        # аддитивна: идентификатор со слайда становится находимым, размытия, как у dense, нет.
+        self._annotation_field = annotation_field
 
     def _sparse_text(self, chunk: Chunk, document: Document) -> str:
         # Narrative-чанки (table_row_narrative) — точечные search-keys для одной
@@ -130,6 +191,10 @@ class SparseEmbeddingProcessor(ChunkProcessor):
             doc_summary = document.payload.get('doc_summary', '')
             if doc_summary:
                 parts.append(doc_summary)
+        if self._annotation_field:
+            ann = annotation_text(chunk.payload.get(self._annotation_field) or [])
+            if ann:
+                parts.append(ann)
         return '\n'.join(parts)
 
     async def process(self, chunk: Chunk, document: Document) -> Chunk:

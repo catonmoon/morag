@@ -72,3 +72,44 @@ async def test_plain_chunker_gets_plain_call():
 async def test_annotations_without_boundaries_give_nothing():
     calls = await _run(Recording(), [{'kind': 'ref', 'at': 1.0, 'to': 0.0}])
     assert calls == [{}]
+
+
+# --- этап D: экран во входе генератора контекста ----------------------------------------------------
+
+class RecordingContext(NoopContextGenerator):
+    def __init__(self):
+        self.inputs = []
+
+    async def generate(self, doc_text, chunk_text, doc_summary, *, char_offset=0, path=None):
+        self.inputs.append(chunk_text)
+        return ''
+
+
+class Timed(Chunker):
+    async def chunk(self, block):
+        return [block]
+
+    async def chunk_with_metadata(self, text, *, paged=False):
+        return [ChunkResult(text=text, start_sec=90.0, end_sec=120.0)]
+
+
+async def _run_ctx(field, annotations):
+    doc_repo, chunk_repo = _repos()
+    ctx = RecordingContext()
+    pipeline = IndexingPipeline(doc_repo, chunk_repo, chunker=Timed(), context_generator=ctx,
+                                skip_presplit=True, annotation_field=field, annotation_label='На экране',
+                                annotation_max_tokens=400)
+    source = MagicMock(spec=Source)
+    setup_source(source, [make_document(text='[A] <!-- t:90.0 --> Речь.', annotations=annotations)])
+    await pipeline.run(source)
+    return ctx.inputs
+
+
+async def test_context_input_gets_screen_block_before_text():
+    inputs = await _run_ctx('screen', ANN)
+    assert inputs == ['На экране:\nx\n\n[A] <!-- t:90.0 --> Речь.']
+
+
+async def test_context_input_unchanged_without_field_or_items():
+    assert await _run_ctx(None, ANN) == ['[A] <!-- t:90.0 --> Речь.']
+    assert await _run_ctx('screen', [{'kind': 'screen', 't0': 500.0, 't1': 600.0, 'text': 'далеко'}]) == ['[A] <!-- t:90.0 --> Речь.']

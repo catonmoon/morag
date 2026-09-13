@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections import defaultdict, deque
 
+from morag.indexing.annotations import annotation_text, select_annotations
 from morag.indexing.chunker import Chunker, PassthroughChunker
 from morag.indexing.context import ContextGenerator, NoopContextGenerator
 from morag.indexing.processors import ChunkProcessor, DocumentProcessor
@@ -95,9 +96,17 @@ class IndexingPipeline:
         run_context: RunContext | None = None,
         embedder_fingerprint: str | None = None,
         reindex_floor: int | None = None,
+        annotation_field: str | None = None,
+        annotation_label: str = '',
+        annotation_max_tokens: int = 0,
     ) -> None:
         self._doc_repo = doc_repo
         self._chunk_repo = chunk_repo
+        # ADR-0027: аннотации чанка (`kind == field`) дополняют ВХОД генератора контекста под
+        # подписью `label` — справка узнаёт, о чём был экран, без дословного текста в векторе речи.
+        self._annotation_field = annotation_field
+        self._annotation_label = annotation_label
+        self._annotation_max_tokens = annotation_max_tokens
         self._doc_processors = doc_processors or []
         self._chunk_processors = chunk_processors or []
         self._chunker = chunker or PassthroughChunker()
@@ -455,6 +464,21 @@ class IndexingPipeline:
         )
         return merged
 
+    def _context_input(self, document: Document, cr) -> str:
+        """Текст чанка для генератора контекста; при аннотациях (ADR-0027) — с блоком
+        `<label>:` перед ним. Что делать с блоком («тему, не текст»), говорит промпт корпуса."""
+        if not self._annotation_field or not document.annotations:
+            return cr.text
+        items = select_annotations(
+            document.annotations, self._annotation_field,
+            start_sec=cr.start_sec, end_sec=cr.end_sec,
+            char_start=cr.char_offset, char_end=cr.char_offset + len(cr.text),
+            counter=self._token_counter, max_tokens=self._annotation_max_tokens,
+        )
+        if not items:
+            return cr.text
+        return f'{self._annotation_label}:\n{annotation_text(items)}\n\n{cr.text}'
+
     def _boundary_hints(self, document: Document) -> dict:
         """Подсказки границ и привязки из аннотаций документа (ADR-0027) — только чанкеру, который их
         принимает (`supports_boundaries`); иначе пусто, и вызов остаётся прежним."""
@@ -531,7 +555,7 @@ class IndexingPipeline:
             )
             doc_summary = document.payload.get('doc_summary', '')
             context = await self._context_generator.generate(
-                document.text, cr.text, doc_summary,
+                document.text, self._context_input(document, cr), doc_summary,
                 char_offset=cr.char_offset, path=document.path,
             )
 

@@ -215,11 +215,15 @@ class AnnotationsConfig(BaseModel):
     """
     suffix: str = '.annotations.json'
     boundaries: AnnotationsBoundariesConfig = AnnotationsBoundariesConfig()
-    # Этап D ADR-0027 (реализуется после замера границ): kind аннотаций, который становится полем
-    # чанка со своим именованным вектором и подмешивается в лексику.
+    # Этап D ADR-0027: kind аннотаций, который становится полем чанка (`payload[field]`) со своим
+    # именованным dense-вектором (`vector`), подмешивается в sparse/BM25 (`in_sparse`) и даёт
+    # генератору контекста вход под подписью `label` (`context`). `max_tokens` — потолок текста
+    # элементов на чанк. None — поля нет.
     field: str | None = None
     vector: bool = True
     in_sparse: bool = True
+    context: bool = True
+    label: str = 'Аннотации'
     max_tokens: int = 400
 
 
@@ -566,6 +570,12 @@ class RetrievalFeaturesConfig(BaseModel):
     # ⚠️ Документные корпуса не затрагиваются ни при одном значении: ветка документа
     # (ADR-0015) рендерится байт в байт как прежде.
     doc_ids_in_results: Literal['none', 'inline', 'grouped'] = 'grouped'
+    # Поле чанка из аннотаций (ADR-0027, этап D): его элементы печатаются агенту в ветке момента
+    # строками `<label> (MM:SS, <sub> «title»): текст` ПЕРЕД текстом, видны реранкеру, и по его
+    # именованному вектору (если есть в схеме коллекции) строится нога RRF верхнего уровня.
+    # None — ничего из этого не происходит; документная ветка выдачи не меняется никогда.
+    annotation_field: str | None = None
+    annotation_label: str = 'Аннотации'
 
 
 # Дефолтная доменная «роль» агента в начале system prompt. Единый источник истины:

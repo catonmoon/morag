@@ -53,8 +53,11 @@ def build_payload_filter(
     return Filter(must=must or None, must_not=must_not or None)
 
 
-def _point_to_chunk(p: Any) -> dict[str, Any]:
-    """Конвертер Qdrant-point (ScoredPoint/Record/dict) → наш chunk-dict."""
+def _point_to_chunk(p: Any, extra_fields: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Конвертер Qdrant-point (ScoredPoint/Record/dict) → наш chunk-dict.
+
+    `extra_fields` — поля payload, которые обязаны доехать до форматтера сверх белого списка
+    (ADR-0027: поле чанка из аннотаций)."""
     if isinstance(p, dict):
         point_id = p.get('id')
         payload = p.get('payload') or {}
@@ -65,7 +68,9 @@ def _point_to_chunk(p: Any) -> dict[str, Any]:
         score = float(p.score) if getattr(p, 'score', None) is not None else 0.0
     path_raw = payload.get('path', '')
     paths: list[str] = path_raw if isinstance(path_raw, list) else ([path_raw] if path_raw else [])
+    extra = {f: payload.get(f) for f in extra_fields if payload.get(f) is not None}
     return {
+        **extra,
         'chunk_id': str(point_id),
         'doc_id': payload.get('doc_id', ''),
         'path': paths,
@@ -120,10 +125,16 @@ class HybridSearcher:
         source_roles: dict[str, str] | None = None,
         source_kinds: dict[str, str] | None = None,
         cache_ttl_seconds: float = 300.0,
+        annotation_field: str | None = None,
     ) -> None:
         self._qdrant = qdrant
         self._dense = dense_embedder
         self._sparse = sparse_embedder
+        # ADR-0027: поле чанка из аннотаций — доезжает до форматтера и, если в схеме коллекции есть
+        # одноимённый dense-вектор, даёт ногу RRF верхнего уровня тем же вектором запроса.
+        self._annotation_field = annotation_field
+        self._extra_fields: tuple[str, ...] = (annotation_field,) if annotation_field else ()
+        self._dense_vector_names_cache: dict[str, set[str]] = {}
         self._chunks_collection = chunks_collection
         self._docs_collection = docs_collection
         self._km_collection = knowledge_map_collection
@@ -192,6 +203,21 @@ class HybridSearcher:
         except Exception as exc:
             logger.warning('HybridSearcher: sparse vector names for %s failed: %s', collection, exc)
         self._sparse_vector_names_cache[collection] = names
+        return names
+
+    async def get_dense_vector_names(self, collection: str) -> set[str]:
+        """Имена dense-векторов коллекции (кеш per-collection) — по ним решается, есть ли нога
+        для поля аннотаций: старая коллекция без вектора → ноги нет, поиск прежний."""
+        if collection in self._dense_vector_names_cache:
+            return self._dense_vector_names_cache[collection]
+        names: set[str] = set()
+        try:
+            info = await self._qdrant.get_collection(collection)
+            vectors = info.config.params.vectors
+            names = set(vectors.keys()) if isinstance(vectors, dict) else set()
+        except Exception as exc:
+            logger.warning('HybridSearcher: dense vector names for %s failed: %s', collection, exc)
+        self._dense_vector_names_cache[collection] = names
         return names
 
     # ── Search (RRF) ──────────────────────────────────────────────────────────
@@ -288,6 +314,14 @@ class HybridSearcher:
                 params=dense_params, filter=kind_filter,
             ),
         ]
+        # ADR-0027: нога по вектору поля аннотаций — ВЕРХНЕГО уровня (свой голос RRF, как у dense
+        # речи), тем же вектором запроса; только если вектор есть в схеме коллекции.
+        ann_field = getattr(self, '_annotation_field', None)
+        if ann_field and ann_field in await self.get_dense_vector_names(collection):
+            prefetch.append(Prefetch(
+                query=dense, using=ann_field, limit=limit * 2,
+                params=dense_params, filter=kind_filter,
+            ))
         if lexical:
             prefetch.append(Prefetch(
                 prefetch=lexical,
@@ -327,7 +361,7 @@ class HybridSearcher:
             limit=limit,
             with_payload=True,
         )
-        chunks = [_point_to_chunk(p) for p in result.points]
+        chunks = [_point_to_chunk(p, getattr(self, '_extra_fields', ())) for p in result.points]
         return await self._swap_narratives_to_parents(chunks)
 
     async def filter_values(self, fields: list[str]) -> dict[str, list[str]]:
@@ -466,7 +500,7 @@ class HybridSearcher:
             limit=len(orders) + 10,
             with_payload=True,
         )
-        chunks = [_point_to_chunk(r) for r in records]
+        chunks = [_point_to_chunk(r, getattr(self, '_extra_fields', ())) for r in records]
         chunks.sort(key=lambda c: c.get('order', 0))
         return chunks
 
@@ -483,7 +517,7 @@ class HybridSearcher:
             ids=list(chunk_ids),
             with_payload=True,
         )
-        return {str(r.id): _point_to_chunk(r) for r in records}
+        return {str(r.id): _point_to_chunk(r, getattr(self, '_extra_fields', ())) for r in records}
 
     async def _swap_narratives_to_parents(self, chunks: list[dict]) -> list[dict]:
         """Заменить narrative-чанки на их parent table-чанки в выдаче поиска.
