@@ -174,9 +174,16 @@ def build_source_for_instance(
     if kind == 'jira':
         return JiraSource(src_cfg, {}, {})
     if kind == 'local':
-        return LocalDocumentSource(root=src_cfg.path, pdf_converter=None, name=src_cfg.name)
+        return LocalDocumentSource(root=src_cfg.path, pdf_converter=None, name=src_cfg.name,
+                                   annotations_suffix=_annotations_suffix(config))
     logger.warning('build_source_for_instance: неподдержанный kind=%s', kind)
     return None
+
+
+def _annotations_suffix(config: Config) -> str | None:
+    """Суффикс сайдкара аннотаций (ADR-0027); None — секции нет, сайдкары не читаются."""
+    ann = config.indexing.annotations if config.indexing else None
+    return ann.suffix if ann else None
 
 
 def _make_pdf_converter(
@@ -510,10 +517,16 @@ async def cmd_index(
         # аудио-транскрипты: LLM-границы по репликам, не режет поперёк фразы, адаптивный сплит монолога,
         # start_sec/end_sec/speakers в payload. Зафиксировано экспериментом (max_tokens≈900).
         chunker_llm = llm_clients[role_mapping.name_for('chunker')]
+        # Подсказки границ из сайдкара аннотаций (ADR-0027) — только если секция задана и включена.
+        ann = config.indexing.annotations
+        bnd = ann.boundaries if ann else None
         chunker = TranscriptChunker(
             chunker_llm,
             token_counter=llm_counter,
             max_tokens=config.indexing.chunker.max_tokens,
+            boundary_hints=bool(bnd and bnd.enabled),
+            boundary_window_sec=bnd.window_sec if bnd else 12.0,
+            boundary_min_tokens=bnd.min_tokens if bnd else 120,
         )
     elif chunker_mode in ('hybrid', 'section'):
         oversized_cfg = config.indexing.chunker.oversized
@@ -670,6 +683,7 @@ async def cmd_index(
                     root=src_cfg.path,
                     pdf_converter=pdf_converter,
                     name=src_cfg.name,
+                    annotations_suffix=_annotations_suffix(config),
                 )
                 pdf_mode = config.pdf.mode if config.pdf else 'disabled'
                 logger.info('Source: local[%s] path=%s (pdf=%s)',

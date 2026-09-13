@@ -455,6 +455,19 @@ class IndexingPipeline:
         )
         return merged
 
+    def _boundary_hints(self, document: Document) -> dict:
+        """Подсказки границ и привязки из аннотаций документа (ADR-0027) — только чанкеру, который их
+        принимает (`supports_boundaries`); иначе пусто, и вызов остаётся прежним."""
+        if not document.annotations or not getattr(self._chunker, 'supports_boundaries', False):
+            return {}
+        boundaries = [float(a['at']) for a in document.annotations
+                      if a.get('kind') == 'boundary' and a.get('at') is not None]
+        pins = [(float(a['at']), float(a['to'])) for a in document.annotations
+                if a.get('kind') == 'ref' and a.get('at') is not None and a.get('to') is not None]
+        if not boundaries:
+            return {}
+        return {'boundaries': boundaries, 'pins': pins}
+
     async def _chunk_document(self, document: Document, w: str = '') -> None:
         """Разбить документ на чанки и сохранить в Qdrant.
 
@@ -486,7 +499,7 @@ class IndexingPipeline:
             elif hasattr(self._chunker, 'chunk_with_metadata'):
                 logger.info('%s  Hybrid chunking (%d chars, ~%d tokens)...', w, len(document.text), doc_tokens)
                 chunk_results = await self._chunker.chunk_with_metadata(
-                    document.text, paged=document.paged,
+                    document.text, paged=document.paged, **self._boundary_hints(document),
                 )
                 logger.info('%s  -> %d chunk(s)', w, len(chunk_results))
             else:

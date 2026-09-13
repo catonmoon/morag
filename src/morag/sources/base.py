@@ -26,6 +26,9 @@ class Document:
     paged: bool = False                                    # страничный документ (PDF, DOCX, PPTX); чанки обязаны иметь pages
     payload: dict = field(default_factory=dict)  # метаданные от DocumentProcessor-ов
     vectors: dict[str, list[float] | dict] = field(default_factory=dict)  # doc-level именованные векторы (для section-level retrieval через DocVectorProcessor)
+    # Аннотации из сайдкара (ADR-0027): `{kind, at | t0,t1 | offset, …}`. НЕ в payload намеренно —
+    # payload копируется в каждый чанк и в точку Qdrant, список на сотни элементов там не нужен.
+    annotations: list[dict] = field(default_factory=list)
 
 
 @dataclass

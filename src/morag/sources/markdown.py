@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 from morag.sources.base import Document, Source
+
+logger = logging.getLogger(__name__)
 
 _FRONTMATTER_RE = re.compile(r'^---\n(.*?)\n---\n?', re.DOTALL)
 
@@ -58,10 +61,51 @@ class MarkdownSource(Source):
     def source_type(self) -> str:
         return 'markdown'
 
-    def __init__(self, root: Path | str, name: str = 'default') -> None:
+    def __init__(self, root: Path | str, name: str = 'default',
+                 annotations_suffix: str | None = None) -> None:
         self._root = Path(root).resolve()
         self._kind = 'local'
         self._name = name
+        # ADR-0027: сайдкар `<stem><suffix>` рядом с файлом. None — не ищется вовсе.
+        self._annotations_suffix = annotations_suffix
+
+    # --- аннотации (ADR-0027) -------------------------------------------------------------------
+
+    def _sidecar(self, path: Path) -> Path | None:
+        if not self._annotations_suffix:
+            return None
+        side = path.with_name(path.stem + self._annotations_suffix)
+        return side if side.is_file() else None
+
+    def _updated_at(self, path: Path, mtime: float) -> datetime:
+        """mtime документа, но не раньше mtime сайдкара.
+
+        ⚠️ «Изменился ли документ» pipeline решает по updated_at; без этого правка сайдкара не
+        переиндексирует документ. Считается ОДИНАКОВО для заглушки get_metadata и для load_one —
+        разойдись они, документ переиндексировался бы на каждом прогоне.
+        """
+        side = self._sidecar(path)
+        if side is not None:
+            try:
+                mtime = max(mtime, side.stat().st_mtime)
+            except OSError:
+                pass
+        return datetime.fromtimestamp(mtime, tz=timezone.utc)
+
+    def _load_annotations(self, path: Path) -> list[dict]:
+        """Элементы сайдкара как есть (`{kind, …}`); битый файл — предупреждение, документ без них."""
+        side = self._sidecar(path)
+        if side is None:
+            return []
+        try:
+            data = json.loads(side.read_text(encoding='utf-8'))
+            items = data.get('items') if isinstance(data, dict) else None
+            if not isinstance(items, list):
+                raise ValueError('нет списка items')
+        except (OSError, ValueError) as e:
+            logger.warning('Annotations sidecar %s ignored: %s', side, e)
+            return []
+        return [it for it in items if isinstance(it, dict) and it.get('kind')]
 
     async def get_metadata(self) -> list[Document]:
         all_md_files = sorted(self._root.rglob('*.md'))
@@ -94,7 +138,7 @@ class MarkdownSource(Source):
     def _get_file_metadata(self, path: Path) -> Document | None:
         try:
             stat = path.stat()
-            updated_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+            updated_at = self._updated_at(path, stat.st_mtime)
             external = str(path.relative_to(self._root))
             doc_id = self.make_id(external)
             return Document(
@@ -117,7 +161,7 @@ class MarkdownSource(Source):
             stat = path.stat()
             raw = path.read_text(encoding='utf-8')
             meta, text = _parse_frontmatter(raw)
-            updated_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+            updated_at = self._updated_at(path, stat.st_mtime)
             external = str(path.relative_to(self._root))
             doc_id = self.make_id(external)
             return Document(
@@ -125,6 +169,7 @@ class MarkdownSource(Source):
                 path=[external],
                 text=text,
                 updated_at=updated_at,
+                annotations=self._load_annotations(path),
                 source_type='markdown',
                 title=meta.get('title', path.stem),
                 size=stat.st_size,

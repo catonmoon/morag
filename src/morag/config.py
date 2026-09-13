@@ -201,6 +201,28 @@ class DocVectorConfig(BaseModel):
     max_tokens: int = 28672
 
 
+class AnnotationsBoundariesConfig(BaseModel):
+    """Подсказки границ чанкеру из аннотаций `kind: boundary` (ADR-0027)."""
+    enabled: bool = False
+    window_sec: float = 12.0   # допуск притяжения секунды к ближайшему концу предложения
+    min_tokens: int = 120      # отрезок короче — клеится к более короткому соседу
+
+
+class AnnotationsConfig(BaseModel):
+    """Аннотации к документу из сайдкара `<имя>.annotations.json` рядом с ним (ADR-0027).
+
+    Секции нет → сайдкары не читаются, поведение движка байт в байт прежнее.
+    """
+    suffix: str = '.annotations.json'
+    boundaries: AnnotationsBoundariesConfig = AnnotationsBoundariesConfig()
+    # Этап D ADR-0027 (реализуется после замера границ): kind аннотаций, который становится полем
+    # чанка со своим именованным вектором и подмешивается в лексику.
+    field: str | None = None
+    vector: bool = True
+    in_sparse: bool = True
+    max_tokens: int = 400
+
+
 class DenseEmbedderConfig(BaseModel):
     model: str
     tokenizer: str | None = None
@@ -358,6 +380,8 @@ class IndexingConfig(BaseModel):
     # действует только на документы, которые ещё не получали кода.
     short_id_length: int = 5
     knowledge_map: KnowledgeMapConfig = KnowledgeMapConfig()
+    # Сайдкар аннотаций рядом с документом (ADR-0027). None — не читается вовсе.
+    annotations: AnnotationsConfig | None = None
 
 
 # ============================================================================
@@ -981,6 +1005,8 @@ def load_config(path: str | Path = 'config.yml') -> Config:
 
 
 __all__ = [
+    'AnnotationsBoundariesConfig',
+    'AnnotationsConfig',
     'AttachmentsConfig',
     'ChunkerConfig',
     'Config',

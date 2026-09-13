@@ -24,10 +24,12 @@ class LocalDocumentSource:
         root: Path | str,
         pdf_converter: PdfConverter | None = None,
         name: str = 'default',
+        annotations_suffix: str | None = None,
     ) -> None:
         self._root = Path(root).resolve()
         self._pdf_converter = pdf_converter
         self._name = name
+        self._annotations_suffix = annotations_suffix  # ADR-0027; None — сайдкары не читаются
 
     async def run(self, pipeline) -> None:
         logger.info('Indexing local documents [%s] from %s', self._name, self._root)
@@ -36,7 +38,8 @@ class LocalDocumentSource:
         logger.info('Phase 1/3: indexing directories...')
         await pipeline.run(dir_source)
 
-        md_source = MarkdownSource(self._root, name=self._name)
+        md_source = MarkdownSource(self._root, name=self._name,
+                                   annotations_suffix=self._annotations_suffix)
         logger.info('Phase 2/3: indexing markdown files...')
         await pipeline.run(md_source)
 

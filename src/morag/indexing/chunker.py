@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import dataclasses
 import logging
 import re
@@ -803,6 +804,7 @@ class _Unit:
     start: float | None
     end: float | None
     char_offset: int
+    boundary: bool = False  # юнит открывает отрезок по подсказке границы (ADR-0027)
 
 
 class TranscriptChunker(BoundaryChunker):
@@ -814,29 +816,157 @@ class TranscriptChunker(BoundaryChunker):
     середине реплики (спикер/тайминг не теряются), и отдаёт `start_sec`/`end_sec`/`speakers`/`char_offset`.
     Размерный пост-пасс (`_cap_by_size`) добивает затянувшийся монолог одной темы по `max_tokens`.
     Таймкод внутри реплики интерполируется (TODO про тонкий тайминг — adventures/podlodka-asr/CLAUDE.md).
+
+    Подсказки границ (ADR-0027): `chunk_with_metadata(boundaries=[сек…], pins=[(at, to)…])`.
+    Подсказка ПАРТИЦИОНИРУЕТ документ: секунда притягивается к ближайшему концу предложения в окне
+    `boundary_window_sec` (старт реплики — мереное время, конец предложения внутри реплики —
+    интерполяция); привязка `(at, to)` — «текст в `at` относится к экрану, начавшемуся в `to`» — сильнее
+    окна: кандидат не может отделить предложение с `at` от `to`. Отрезок короче `boundary_min_tokens`
+    клеится к более короткому соседу; отрезок ≤ `max_tokens` — один сегмент без LLM; длиннее — LLM
+    режет его как прежде, индексы внутри отрезка. Без подсказок — прежний единственный вызов, байт в байт.
     """
 
     _boundary_prompt = _TRANSCRIPT_PROMPT
 
     def __init__(self, client, token_counter: TokenCounter, max_tokens: int = 900,
-                 max_retries: int = 1, unit_max_tokens: int = 400) -> None:
+                 max_retries: int = 1, unit_max_tokens: int = 400, *,
+                 boundary_hints: bool = False, boundary_window_sec: float = 12.0,
+                 boundary_min_tokens: int = 120) -> None:
         super().__init__(client, token_counter, max_tokens, max_retries)
         self._unit_max = unit_max_tokens
+        # pipeline передаёт подсказки только чанкеру с этим признаком (ADR-0027)
+        self.supports_boundaries = boundary_hints
+        self._window = boundary_window_sec
+        self._min_tokens = boundary_min_tokens
 
-    async def chunk_with_metadata(self, text: str, *, paged: bool = False) -> list[ChunkResult]:
+    async def chunk_with_metadata(self, text: str, *, paged: bool = False,
+                                  boundaries: list[float] | None = None,
+                                  pins: list[tuple[float, float]] | None = None) -> list[ChunkResult]:
         turns = self._parse_turns(text)
         if not turns:
             return []
-        units = self._build_units(turns)
+        cuts = self._snap_boundaries(turns, boundaries or [], pins or []) if boundaries else set()
+        units = self._build_units(turns, cuts)
         if not units:
             return []
         if len(units) == 1:
             return [self._materialize(units)]
-        segments = await self._get_boundaries([f'[{u.speaker}] {u.text}' for u in units])
-        if segments is None:
-            segments = self._fallback_segments([u.text for u in units])
+        if cuts:
+            segments = await self._segments_by_stretches(units)
+        else:
+            segments = await self._get_boundaries([f'[{u.speaker}] {u.text}' for u in units])
+            if segments is None:
+                segments = self._fallback_segments([u.text for u in units])
         segments = self._cap_by_size(units, segments)
         return [self._materialize(units[s - 1:e]) for s, e in segments]
+
+    # --- подсказки границ (ADR-0027) --------------------------------------------------------------
+
+    @staticmethod
+    def _sentences(t: dict) -> list[str]:
+        """Предложения реплики, один раз на реплику (нужны и сетке, и разрезу на юниты)."""
+        if 'sents' not in t:
+            t['sents'] = split_sentences(t['text']) or [t['text']]
+        return t['sents']
+
+    def _sentence_grid(self, turns: list[dict]) -> list[tuple[float, int, int]]:
+        """Кандидаты границы: `(время, реплика, предложение)`. Предложение 0 — старт реплики (мереное
+        время), k>0 — начало k-го предложения (интерполяция по позиции той же арифметикой, что в
+        `_split_turn`, чтобы время кандидата совпадало со стартом будущего юнита байт в байт)."""
+        grid: list[tuple[float, int, int]] = []
+        for i, t in enumerate(turns):
+            t0, t1 = t['start'], t['end']
+            if t0 is None or t1 is None:
+                continue
+            sents = self._sentences(t)
+            length = max(1, len(t['text']))
+            cpos = 0
+            for k, s in enumerate(sents):
+                grid.append((round(t0 + (cpos / length) * (t1 - t0), 1) if k else t0, i, k))
+                cpos += len(s) + 1
+        return grid
+
+    def _snap_boundaries(self, turns: list[dict], hints: list[float],
+                         pins: list[tuple[float, float]]) -> set[tuple[int, int]]:
+        grid = self._sentence_grid(turns)
+        if not grid:
+            return set()
+        times = [g[0] for g in grid]
+
+        def sentence_start(at: float) -> float:
+            """Время начала предложения, в котором звучит `at`."""
+            idx = bisect.bisect_right(times, at) - 1
+            return times[idx] if idx >= 0 else times[0]
+
+        pin_starts = [(sentence_start(at), to) for at, to in pins]
+
+        def separates(tc: float, h: float) -> bool:
+            # Предложение привязки и её экран обязаны остаться по одну сторону разреза. Сторона
+            # предложения — по времени кандидата (обе величины из сетки); сторона экрана — по
+            # СЕКУНДЕ ПОДСКАЗКИ: `to` — та же смена, что и `h`, а кандидат уже сдвинут притяжением.
+            return any((ts < tc) != (to < h - 1e-3) for ts, to in pin_starts)
+
+        cuts: set[tuple[int, int]] = set()
+        for h in hints:
+            order = sorted(grid, key=lambda g: (abs(g[0] - h), g[0]))
+            in_win = [g for g in order if abs(g[0] - h) <= self._window]
+            if not in_win:
+                continue  # речь идёт сквозь смену темы, резать нечего
+            ok = [g for g in in_win if not separates(g[0], h)]
+            if not ok:
+                # все кандидаты окна рвут привязку → ближайший удовлетворяющий вне окна:
+                # привязка — мереный факт, окно — допуск
+                ok = [g for g in order if not separates(g[0], h)]
+                if not ok:
+                    continue
+            _, i, k = ok[0]
+            if (i, k) != (0, 0):
+                cuts.add((i, k))
+        if hints:
+            logger.info('TranscriptChunker: %d boundary hint(s), %d pin(s) → %d cut(s)',
+                        len(hints), len(pins), len(cuts))
+        return cuts
+
+    async def _segments_by_stretches(self, units: list[_Unit]) -> list[tuple[int, int]]:
+        """Отрезки между подсказками → сегменты: короткий клеится к соседу, длинный режет LLM."""
+        toks = [self._counter.count(u.text) for u in units]
+        stretches: list[tuple[int, int]] = []
+        start = 1
+        for i in range(2, len(units) + 1):
+            if units[i - 1].boundary:
+                stretches.append((start, i - 1))
+                start = i
+        stretches.append((start, len(units)))
+
+        def size(seg: tuple[int, int]) -> int:
+            return sum(toks[seg[0] - 1:seg[1]])
+
+        while len(stretches) > 1:  # клейка коротких: к более короткому соседу
+            short = next((j for j, s in enumerate(stretches) if size(s) < self._min_tokens), None)
+            if short is None:
+                break
+            left, right = short - 1, short + 1
+            if left < 0 or (right < len(stretches) and size(stretches[right]) < size(stretches[left])):
+                a, b = short, right
+            else:
+                a, b = left, short
+            stretches[a:b + 1] = [(stretches[a][0], stretches[b][1])]
+
+        segments: list[tuple[int, int]] = []
+        llm_calls = 0
+        for s, e in stretches:
+            if size((s, e)) <= self._max_tokens:
+                segments.append((s, e))
+                continue
+            part = units[s - 1:e]
+            llm_calls += 1
+            local = await self._get_boundaries([f'[{u.speaker}] {u.text}' for u in part])
+            if local is None:
+                local = self._fallback_segments([u.text for u in part])
+            segments.extend((a + s - 1, b + s - 1) for a, b in local)
+        logger.info('TranscriptChunker: %d stretch(es) → %d segment(s), %d LLM call(s)',
+                    len(stretches), len(segments), llm_calls)
+        return segments
 
     def _parse_turns(self, text: str) -> list[dict]:
         turns, pos = [], 0
@@ -859,32 +989,39 @@ class TranscriptChunker(BoundaryChunker):
                 t['start'] + len(t['text'].split()) / 2.5 if t['start'] is not None else None)
         return turns
 
-    def _build_units(self, turns: list[dict]) -> list[_Unit]:
+    def _build_units(self, turns: list[dict], cuts: set[tuple[int, int]] = frozenset()) -> list[_Unit]:
         units: list[_Unit] = []
-        for t in turns:
-            if self._counter.count(t['text']) <= self._unit_max:
-                units.append(_Unit(t['text'], t['speaker'], t['start'], t['end'], t['char_offset']))
+        for i, t in enumerate(turns):
+            forced = sorted(k for (ti, k) in cuts if ti == i and k > 0)
+            if not forced and self._counter.count(t['text']) <= self._unit_max:
+                units.append(_Unit(t['text'], t['speaker'], t['start'], t['end'], t['char_offset'],
+                                   boundary=(i, 0) in cuts))
             else:
-                units.extend(self._split_turn(t))
+                units.extend(self._split_turn(t, forced, first_boundary=(i, 0) in cuts))
         return units
 
-    def _split_turn(self, t: dict) -> list[_Unit]:
-        """Длинную реплику → суб-юниты по предложениям ≤unit_max, таймкод интерполируется по позиции."""
+    def _split_turn(self, t: dict, forced: list[int] = (), first_boundary: bool = False) -> list[_Unit]:
+        """Длинную реплику → суб-юниты по предложениям ≤unit_max, таймкод интерполируется по позиции.
+        `forced` — номера предложений, с которых обязан начаться новый юнит (подсказки границ)."""
         groups, cur, cur_tok = [], [], 0
-        for s in split_sentences(t['text']):
+        flags: list[bool] = []
+        sents = self._sentences(t) if forced else split_sentences(t['text'])
+        for k, s in enumerate(sents):
             st = self._counter.count(s)
-            if cur and cur_tok + st > self._unit_max:
+            if cur and (k in forced or cur_tok + st > self._unit_max):
                 groups.append(' '.join(cur)); cur, cur_tok = [], 0
+            if not cur:
+                flags.append(k in forced or (k == 0 and first_boundary))
             cur.append(s); cur_tok += st
         if cur:
             groups.append(' '.join(cur))
         length = max(1, len(t['text']))
         t0, t1 = t['start'], t['end']
         out, cpos = [], 0
-        for g in groups:
+        for g, flag in zip(groups, flags):
             start = (t0 + (cpos / length) * (t1 - t0)) if (t0 is not None and t1 is not None) else t0
             out.append(_Unit(g, t['speaker'], round(start, 1) if start is not None else None,
-                             None, t['char_offset'] + cpos))
+                             None, t['char_offset'] + cpos, boundary=flag))
             cpos += len(g) + 1
         for i, u in enumerate(out):
             u.end = out[i + 1].start if i + 1 < len(out) else t1
