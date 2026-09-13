@@ -183,9 +183,15 @@ def split_sentences(text: str) -> list[str]:
     if cyrillic >= latin:
         from razdel import sentenize
         return [s.text.strip() for s in sentenize(text) if s.text.strip()]
-    else:
+    try:
         from nltk.tokenize import sent_tokenize
         return [s.strip() for s in sent_tokenize(text) if s.strip()]
+    except LookupError:
+        # nltk без скачанного `punkt` (образ индексатора его не содержит) бросает LookupError,
+        # и ДОКУМЕНТ ЦЕЛИКОМ выпадал из индекса — ловилось на транскрипте с длинным блоком кода
+        # (латиница > кириллицы) в одной реплике. Запасной разрез — по концу предложения/строки.
+        parts = re.split(r'(?<=[.!?])\s+|\n+', text)
+        return [p.strip() for p in parts if p.strip()]
 
 
 def _top_level_blocks(text: str) -> list[tuple[str, int, int]]:

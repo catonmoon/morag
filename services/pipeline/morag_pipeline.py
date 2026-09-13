@@ -314,6 +314,8 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
         ),
 
         'search_limit': _int_or(v.SEARCH_LIMIT, search.limit if search else None, default=100),
+        # Поля payload, по которым агент сужает search (см. RetrievalSearchFilterConfig).
+        'search_filters': [f.model_dump() for f in search.filters] if search else [],
         'hnsw_ef': _int_or(v.HNSW_EF, search.hnsw_ef if search else None, default=0),
         'search_rerank_max_tokens': search.rerank_max_tokens if search else 0,
         'get_doc_rerank_batch_max_tokens': (
@@ -1299,6 +1301,7 @@ class Pipeline:
             text, chunks = self._tool_search(
                 args['query'], args.get('limit'),
                 args.get('section_ids'), args.get('doc_ids'),
+                filters=args.get('filters'),
             )
             return ('\n'.join([*notes, '', text]) if notes else text), chunks
         elif name == 'find_section':
@@ -1399,22 +1402,28 @@ class Pipeline:
         limit: int | None = None,
         section_ids: list[str] | None = None,
         doc_ids: list[str] | None = None,
+        filters: dict | None = None,
     ) -> tuple[str, list[dict]]:
         limit = min(limit or self._s['search_limit'], self._s['search_limit'])
+        filters, filter_notes = self._check_filters(filters)
         # scope_active = есть какие-то фильтры от агента → не отрезаем supplementary
         # (descendants раздела естественно тянут привязанные тикеты).
-        scope_active = bool(section_ids or doc_ids)
+        scope_active = bool(section_ids or doc_ids or filters)
         logger.info(
-            '[search] q=%r scope=%s section_ids=%d doc_ids=%d limit=%d',
+            '[search] q=%r scope=%s section_ids=%d doc_ids=%d filters=%s limit=%d',
             query[:100], scope_active,
-            len(section_ids or []), len(doc_ids or []), limit,
+            len(section_ids or []), len(doc_ids or []), filters or {}, limit,
         )
-        chunks = self._search(query, limit, scope_active=scope_active)
+        chunks = self._search(query, limit, scope_active=scope_active, filters=filters)
         logger.info(
             '[search] retrieved %d chunks; by source_type=%s',
             len(chunks), _count_by(chunks, 'source_type'),
         )
+        applied = '; '.join(f'{k}: {", ".join(v)}' for k, v in (filters or {}).items())
         if not chunks:
+            if filters:
+                return ('\n'.join([*filter_notes, f'Поиск с фильтром ({applied}) не дал результатов. '
+                                  'Попробуй другую формулировку или сними фильтр.']).strip(), [])
             return 'Поиск не дал результатов. Попробуй другую формулировку.', []
         raw_chunks = chunks  # полный нефильтрованный набор — понадобится для auto-fallback
 
@@ -1456,7 +1465,9 @@ class Pipeline:
             reranked = self._rerank(query, raw_chunks)
             logger.info('[search] rerank fallback result: %d chunks', len(reranked))
         if not reranked:
-            return 'Поиск дал результаты, но ни один не оказался релевантным. Попробуй другую формулировку.', []
+            tail = f' Фильтр был: {applied} — возможно, стоит его снять.' if applied else ''
+            return ('Поиск дал результаты, но ни один не оказался релевантным. '
+                    'Попробуй другую формулировку.' + tail), []
         chunks = reranked
 
         # Группировка по документу для LLM — в порядке прихода из reranker
@@ -1491,7 +1502,100 @@ class Pipeline:
                 'аналогии: бери их из выдачи find_section или из перечня документов ниже.\n\n'
                 + block
             )
+        # Агент обязан ВИДЕТЬ, что фильтр применён (и какой): иначе он не отличит «в этой
+        # категории про это не говорили» от «не нашлось вообще» — и не поймёт, почему выдача
+        # уже, чем ожидал. Замечания о снятых фильтрах — тем же блоком, сверху.
+        head = [*filter_notes]
+        if applied:
+            head.append(f'Фильтр: {applied}.')
+        if head:
+            block = '\n'.join(head) + '\n\n' + block
         return block, chunks
+
+    # ── search filters ────────────────────────────────────────────────────────
+
+    def _filter_fields(self) -> dict[str, dict]:
+        return {f['field']: f for f in self._s.get('search_filters') or []}
+
+    def _filter_values(self) -> dict[str, list[str]]:
+        """Допустимые значения enum-полей — из коллекции документов, кэш searcher'а по TTL."""
+        fields = [name for name, f in self._filter_fields().items() if f.get('enum', True)]
+        if not fields:
+            return {}
+        try:
+            return self._run(self._searcher.filter_values(fields))
+        except Exception as exc:  # noqa: BLE001 — без значений инструмент остаётся строкой
+            logger.warning('[search] filter values unavailable: %s', exc)
+            return {}
+
+    def _tools_for_request(self) -> list[dict]:
+        """Схема инструментов для ЭТОГО запроса: у `search` параметр `filters` со свежими
+        значениями. Без настроенных фильтров — схема как есть."""
+        fields = self._filter_fields()
+        if not fields:
+            return self._tools
+        values = self._filter_values()
+        props: dict[str, dict] = {}
+        for name, f in fields.items():
+            item: dict = {'type': 'string'}
+            vals = values.get(name) or []
+            if f.get('enum', True) and vals and len(vals) <= int(f.get('max_values') or 60):
+                item['enum'] = vals
+            desc = f.get('description') or f'Значения поля «{name}»'
+            if vals and 'enum' not in item:
+                desc += f'. Примеры: {", ".join(vals[:8])}'
+            props[name] = {'type': 'array', 'items': item, 'description': desc}
+        filters_param = {
+            'type': 'object',
+            'description': (
+                'Опционально: сузить поиск по полям записи — ТОЛЬКО когда поле названо в вопросе '
+                '(год, раздел, категория, тема). Несколько значений одного поля — ИЛИ, разные поля — И. '
+                'Без фильтра ищется весь корпус.'
+            ),
+            'properties': props,
+            'additionalProperties': False,
+        }
+        out = []
+        for tool in self._tools:
+            if tool['function']['name'] != 'search':
+                out.append(tool)
+                continue
+            tool = json.loads(json.dumps(tool))  # копия: шаблон параметров общий на реестр
+            tool['function']['parameters']['properties']['filters'] = filters_param
+            out.append(tool)
+        return out
+
+    def _check_filters(self, filters: dict | None) -> tuple[dict[str, list[str]], list[str]]:
+        """Аргумент агента → чистый фильтр и замечания: незнакомое поле или значение снимается
+        по-человечески («нет такого значения; есть: …»), остальной поиск идёт. Значение
+        сверяется без учёта регистра — модель пишет как в вопросе, а не как в схеме."""
+        fields = self._filter_fields()
+        if not filters or not isinstance(filters, dict) or not fields:
+            return {}, []
+        known = self._filter_values()
+        clean: dict[str, list[str]] = {}
+        notes: list[str] = []
+        for name, raw in filters.items():
+            if name not in fields:
+                notes.append(f'Фильтр «{name}» не поддерживается; доступны: {", ".join(fields)}.')
+                continue
+            wanted = [str(v).strip() for v in (raw if isinstance(raw, list) else [raw]) if str(v).strip()]
+            if not wanted:
+                continue
+            allowed = known.get(name) or []
+            if allowed:
+                by_key = {v.lower(): v for v in allowed}
+                good = [by_key[w.lower()] for w in wanted if w.lower() in by_key]
+                bad = [w for w in wanted if w.lower() not in by_key]
+                if bad:
+                    notes.append(
+                        f'У поля «{name}» нет значений: {", ".join(bad)}. Есть: {", ".join(allowed[:40])}'
+                        + (' …' if len(allowed) > 40 else '') + '.'
+                    )
+                wanted = good
+            if wanted:
+                clean[name] = list(dict.fromkeys(wanted))
+        return clean, notes
 
     def _render_chunks_block(self, chunks: list[dict], header: str | None = None) -> str:
         """Рендер retrieval-результата из чанков: группировка по документу,
@@ -2042,7 +2146,7 @@ class Pipeline:
         """
         return self._run(self._llm_agent.complete_with_tools(
             messages,
-            tools=self._tools,
+            tools=self._tools_for_request(),
             params=GenerationParams(
                 temperature=self._s['agent_temperature'],
                 top_p=self._s['agent_top_p'],
@@ -2159,8 +2263,10 @@ class Pipeline:
 
     # ── Qdrant + retrieval — тонкие sync-обёртки над HybridSearcher ──────────
 
-    def _search(self, text: str, limit: int, scope_active: bool = False) -> list[dict]:
-        return self._run(self._searcher.search_chunks(text, limit, scope_active=scope_active))
+    def _search(self, text: str, limit: int, scope_active: bool = False,
+                filters: dict[str, list[str]] | None = None) -> list[dict]:
+        return self._run(self._searcher.search_chunks(
+            text, limit, scope_active=scope_active, filters=filters or None))
 
     def _fetch_doc_summaries(self, doc_ids: list[str]) -> dict[str, str]:
         return self._run(self._searcher.fetch_doc_summaries(doc_ids))

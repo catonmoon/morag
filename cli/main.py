@@ -67,6 +67,7 @@ from morag.sources.pdf_postprocess import CodeFencePostProcessor, DeduplicatePos
 from morag.storage.collections import (
     ensure_chunks_collection,
     ensure_docs_collection,
+    ensure_payload_indexes,
     frida_vectors_config,
     gte_sparse_vectors_config,
 )
@@ -423,6 +424,13 @@ async def cmd_index(
         vectors_config=frida_vectors_config(embedder.dim),
         sparse_vectors_config=gte_sparse_vectors_config(),
     )
+    # Поля фильтра `search` — индексами в обеих коллекциях (чанки — сам поиск, документы —
+    # значения для схемы инструмента). Идемпотентно, на каждом запуске.
+    filter_fields = [f.field for f in config.retrieval.search.filters] if config.retrieval else []
+    if filter_fields:
+        for name in (config.qdrant.collection_docs, config.qdrant.collection_chunks):
+            await ensure_payload_indexes(client, name, filter_fields)
+        logger.info('Payload indexes for search filters: %s', ', '.join(filter_fields))
 
     doc_repo = DocRepository(client, config.qdrant.collection_docs)
     chunk_repo = ChunkRepository(client, config.qdrant.collection_chunks)

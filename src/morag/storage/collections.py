@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import logging
+
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, PayloadSchemaType, SparseVectorParams, VectorParams
+
+logger = logging.getLogger(__name__)
 
 
 async def ensure_docs_collection(
@@ -64,6 +68,31 @@ async def ensure_chunks_collection(
         field_name='doc_id',
         field_schema=PayloadSchemaType.KEYWORD,
     )
+
+
+async def ensure_payload_indexes(
+    client: AsyncQdrantClient,
+    collection: str,
+    fields: list[str],
+) -> None:
+    """Keyword-индексы на поля payload, по которым фильтрует `search`.
+
+    ⚠️ Зовётся на КАЖДОМ запуске индексатора, а не при создании коллекции: `ensure_*_collection`
+    делает early-return у существующей коллекции, и индекс на новое поле сам не появится
+    (грабли `backfill-short-ids`). «Уже существует» Qdrant отдаёт исключением — это норма.
+    """
+    for field in fields:
+        try:
+            await client.create_payload_index(
+                collection_name=collection,
+                field_name=field,
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # «Уже есть» — норма; всё остальное (нет коллекции, нет связи) — в лог, но не
+            # ронять индексацию: без индекса фильтр медленнее, а не сломан.
+            if 'already' not in str(exc).lower():
+                logger.warning('payload index %s.%s: %s', collection, field, exc)
 
 
 def make_dense_vector_config(size: int, distance: Distance = Distance.COSINE) -> VectorParams:

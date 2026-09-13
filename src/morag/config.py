@@ -456,7 +456,26 @@ class RetrievalGetDocConfig(BaseModel):
     rerank_batch_max_tokens: int = 0
 
 
+class RetrievalSearchFilterConfig(BaseModel):
+    """Поле payload, по которому агент может сузить `search` (параметр `filters`).
+
+    Поле — любой ключ front-matter документа: он и так лежит в payload каждого чанка. Значения
+    для схемы инструмента (`enum`) собираются из коллекции документов сами и обновляются по TTL
+    кэшей searcher'а — агент видит допустимые значения, а не угадывает их. Полей со многими
+    значениями (`max_values` и больше) в enum не бывает: они остаются строкой с описанием.
+    """
+    field: str
+    description: str = ''
+    enum: bool = True
+    max_values: int = 60
+
+
 class RetrievalSearchConfig(BaseModel):
+    # Поля payload, по которым агент может фильтровать `search`. Пусто — параметра у
+    # инструмента нет вовсе, поведение прежнее. ⚠️ Это Qdrant-фильтр ВНУТРИ гибридного поиска
+    # (на каждом Prefetch), а не пост-фильтр по top-N, как section_ids/doc_ids: сужение не
+    # зависит от того, попали ли нужные чанки в общую выборку.
+    filters: list[RetrievalSearchFilterConfig] = []
     # Максимум кандидатов из Qdrant RRF до rerank'а. Не «сколько отдать агенту» —
     # реранкер дальше обрежет по токен-бюджету и оставит сколько влезает в окно.
     # Большое значение увеличивает шанс что нужный чанк попадёт в кандидаты;

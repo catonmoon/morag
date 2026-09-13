@@ -116,6 +116,14 @@ def _search_status(cfg: dict, args: dict, resolve_title) -> str:
         scope.append('в разделах: ' + ', '.join(resolve_title(sid) for sid in args['section_ids']))
     if args.get('doc_ids'):
         scope.append('на страницах: ' + ', '.join(resolve_title(did) for did in args['doc_ids']))
+    # Фильтр по полям (ADR-0026) — тоже часть охвата: посетитель видит, что поиск сужен,
+    # а не гадает, почему в ответе один год.
+    filters = args.get('filters')
+    if isinstance(filters, dict):
+        parts = [f"{k}: {', '.join(map(str, v)) if isinstance(v, list) else v}"
+                 for k, v in filters.items() if v]
+        if parts:
+            scope.append('фильтр ' + '; '.join(parts))
     return f'[{query}] ' + ('; '.join(scope) if scope else 'по всей базе')
 
 

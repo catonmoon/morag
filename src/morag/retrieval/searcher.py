@@ -35,6 +35,24 @@ from morag.indexing.embedder import Embedder, SparseEmbedder
 logger = logging.getLogger(__name__)
 
 
+def build_payload_filter(
+    exclude_source_names: list[str] | None,
+    filters: dict[str, list[str]] | None,
+) -> Filter | None:
+    """Один Qdrant Filter на все Prefetch'и: исключённые источники (must_not) и сужение
+    агента (must, по полю — MatchAny по списку значений). Пусто — None, поведение прежнее."""
+    must = [
+        FieldCondition(key=field, match=MatchAny(any=[str(v) for v in values]))
+        for field, values in (filters or {}).items() if values
+    ]
+    must_not = [
+        FieldCondition(key='source_name', match=MatchAny(any=exclude_source_names)),
+    ] if exclude_source_names else []
+    if not must and not must_not:
+        return None
+    return Filter(must=must or None, must_not=must_not or None)
+
+
 def _point_to_chunk(p: Any) -> dict[str, Any]:
     """Конвертер Qdrant-point (ScoredPoint/Record/dict) → наш chunk-dict."""
     if isinstance(p, dict):
@@ -135,6 +153,9 @@ class HybridSearcher:
         # (реальный кейс: prod держал KM двухнедельной давности). 0 = кэш вечный.
         self._cache_ttl = cache_ttl_seconds
         self._cache_expires_at = 0.0
+        # Значения полей payload для схемы `search(filters=…)`: собираются из коллекции
+        # документов, живут по TTL — после переиндексации новая категория появится сама.
+        self._filter_values: dict[str, list[str]] = {}
 
     def _maybe_expire_caches(self) -> None:
         """Сбросить корпус-снапшот кэши по TTL — следующий доступ перечитает из Qdrant.
@@ -155,6 +176,7 @@ class HybridSearcher:
         self._doc_to_short = None
         self._doc_titles.clear()
         self._sparse_vector_names_cache.clear()
+        self._filter_values.clear()
 
     # ── Schema helpers ────────────────────────────────────────────────────────
 
@@ -214,6 +236,7 @@ class HybridSearcher:
         text: str,
         limit: int,
         exclude_source_names: list[str] | None = None,
+        filters: dict[str, list[str]] | None = None,
     ) -> list[Prefetch]:
         """Двухуровневый RRF: dense `full` (1 голос) vs nested-RRF по sparse (1 голос).
 
@@ -224,14 +247,16 @@ class HybridSearcher:
         (до RRF-мерджа): исключённые источники не отбирают слотов у остальных
         в top-N каналов. Применяется к dense Prefetch и к каждому lexical
         sub-Prefetch внутри nested-RRF.
+
+        `filters` — сужение агента `{поле: [значения]}` по payload чанка: тем же
+        Filter'ом, на тех же Prefetch'ах, до слияния. Поле-список (например, темы)
+        совпадает, если совпал хотя бы один элемент — так работает MatchAny в Qdrant.
         """
         dense = await self._dense.embed_query(text)
         indices, values = await self._sparse.embed_query(text)
         available_sparse = await self.get_sparse_vector_names(collection)
 
-        kind_filter = Filter(must_not=[
-            FieldCondition(key='source_name', match=MatchAny(any=exclude_source_names)),
-        ]) if exclude_source_names else None
+        kind_filter = build_payload_filter(exclude_source_names, filters)
 
         lexical: list[Prefetch] = []
         if 'keywords' in available_sparse:
@@ -277,6 +302,7 @@ class HybridSearcher:
         limit: int,
         kinds: list[str] | None = None,
         scope_active: bool = False,
+        filters: dict[str, list[str]] | None = None,
     ) -> list[dict]:
         """RRF-поиск по chunks collection. Возвращает до `limit` chunk-dict'ов.
 
@@ -292,6 +318,7 @@ class HybridSearcher:
         prefetch = await self._build_rrf_prefetch(
             self._chunks_collection, text, limit,
             exclude_source_names=self._excluded_source_names(kinds, scope_active),
+            filters=filters,
         )
         result = await self._qdrant.query_points(
             collection_name=self._chunks_collection,
@@ -302,6 +329,38 @@ class HybridSearcher:
         )
         chunks = [_point_to_chunk(p) for p in result.points]
         return await self._swap_narratives_to_parents(chunks)
+
+    async def filter_values(self, fields: list[str]) -> dict[str, list[str]]:
+        """Различные значения полей payload по коллекции ДОКУМЕНТОВ (структурные узлы не в счёт).
+
+        Идут в схему инструмента `search` как `enum`: агент выбирает из того, что есть, а не
+        угадывает написание. Кэш по TTL — после переиндексации значения подъедут сами.
+        """
+        self._maybe_expire_caches()
+        missing = [f for f in fields if f not in self._filter_values]
+        if missing:
+            found: dict[str, set[str]] = {f: set() for f in missing}
+            offset = None
+            while True:
+                points, offset = await self._qdrant.scroll(
+                    collection_name=self._docs_collection,
+                    limit=256, offset=offset,
+                    with_payload=[*missing, 'structural'], with_vectors=False,
+                )
+                for pt in points:
+                    payload = pt.payload or {}
+                    if payload.get('structural'):
+                        continue
+                    for f in missing:
+                        value = payload.get(f)
+                        for v in (value if isinstance(value, list) else [value]):
+                            if v not in (None, ''):
+                                found[f].add(str(v))
+                if offset is None:
+                    break
+            for f, vals in found.items():
+                self._filter_values[f] = sorted(vals)
+        return {f: list(self._filter_values.get(f, [])) for f in fields}
 
     async def search_docs(
         self,
