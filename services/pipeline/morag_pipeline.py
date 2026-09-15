@@ -397,11 +397,29 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
         'final_instructions': (
             getattr(prompts, 'final_instructions', '') if prompts else ''
         ),
+        # Подсказка при автозагрузке ссылок из вопроса (`_auto_fetch_note`). Пусто → дефолт.
+        'auto_fetch_note': (
+            getattr(prompts, 'auto_fetch_note', '') if prompts else ''
+        ),
 
         # Инстансы агентских тулов (model_dump — handler'ы/билдеры работают с dict).
         'tools': [t.model_dump() for t in tools_cfg],
     }
     return s
+
+
+# Подсказка при автозагрузке ссылок из вопроса (см. `Pipeline._auto_fetch_note`). Дефолт написан
+# под документные корпуса, где загруженная страница — отправная точка для поиска вокруг неё.
+_AUTO_FETCH_NOTE = (
+    'СИСТЕМА (не от пользователя): из вопроса распознаны ссылки — '
+    'соответствующие страницы ЗАГРУЖЕНЫ целиком ниже. Это ОТПРАВНАЯ ТОЧКА, '
+    'а НЕ готовый ответ. Учти их содержимое И по умолчанию ДОИЩИ в базе '
+    'контекст вокруг них (связанные задачи/страницы, стандарты, предысторию, '
+    'смежные решения) — это почти всегда обогащает и проверяет ответ. '
+    'Пропусти поиск ТОЛЬКО если вопрос — буквальный пересказ загруженного '
+    '(что это / какой статус). Для анализа, ревью, декомпозиции, вопросов '
+    '«как аналитик», сравнений — поиск по базе ОБЯЗАТЕЛЕН.'
+)
 
 
 class Pipeline:
@@ -814,14 +832,7 @@ class Pipeline:
                 agent_messages.append({
                     'role': 'user',
                     'content': (
-                        'СИСТЕМА (не от пользователя): из вопроса распознаны ссылки — '
-                        'соответствующие страницы ЗАГРУЖЕНЫ целиком ниже. Это ОТПРАВНАЯ ТОЧКА, '
-                        'а НЕ готовый ответ. Учти их содержимое И по умолчанию ДОИЩИ в базе '
-                        'контекст вокруг них (связанные задачи/страницы, стандарты, предысторию, '
-                        'смежные решения) — это почти всегда обогащает и проверяет ответ. '
-                        'Пропусти поиск ТОЛЬКО если вопрос — буквальный пересказ загруженного '
-                        '(что это / какой статус). Для анализа, ревью, декомпозиции, вопросов '
-                        '«как аналитик», сравнений — поиск по базе ОБЯЗАТЕЛЕН.\n\n'
+                        self._auto_fetch_note() + '\n\n'
                         + self._render_chunks_block(fr['chunks'], header='')
                     ),
                 })
@@ -1419,61 +1430,54 @@ class Pipeline:
         # scope_active = есть какие-то фильтры от агента → не отрезаем supplementary
         # (descendants раздела естественно тянут привязанные тикеты).
         scope_active = bool(section_ids or doc_ids or filters)
+        # Сужение агента (section_ids → раздел с потомками, doc_ids → точечно) уезжает в Qdrant
+        # ТЕМ ЖЕ фильтром, что и `filters` (ADR-0028). ⚠️ До этого оно было пост-фильтром по
+        # безфильтровому top-N: чанки нужного документа обязаны были сами попасть в общую
+        # выборку, иначе сужение молча снималось и агент получал выдачу по всему корпусу — на
+        # вопросе «про одну запись» это давало ответ из шести чужих документов. Индекс по
+        # `doc_id` у коллекции чанков есть с рождения (каскадное удаление), цена нулевая.
+        allowed_doc_ids: set[str] = set()
+        if section_ids:
+            allowed_doc_ids |= self._get_descendant_doc_ids(section_ids)
+        if doc_ids:
+            allowed_doc_ids |= set(doc_ids)
+        query_filters = dict(filters)
+        if allowed_doc_ids:
+            query_filters['doc_id'] = sorted(allowed_doc_ids)
         logger.info(
-            '[search] q=%r scope=%s section_ids=%d doc_ids=%d filters=%s limit=%d',
-            query[:100], scope_active,
-            len(section_ids or []), len(doc_ids or []), filters or {}, limit,
+            '[search] q=%r scope=%s section_ids=%d doc_ids=%d allowed_doc_ids=%d filters=%s limit=%d',
+            query[:100], scope_active, len(section_ids or []), len(doc_ids or []),
+            len(allowed_doc_ids), filters or {}, limit,
         )
-        chunks = self._search(query, limit, scope_active=scope_active, filters=filters)
+        chunks = self._search(query, limit, scope_active=scope_active, filters=query_filters)
         logger.info(
             '[search] retrieved %d chunks; by source_type=%s',
             len(chunks), _count_by(chunks, 'source_type'),
         )
         applied = '; '.join(f'{k}: {", ".join(v)}' for k, v in (filters or {}).items())
         if not chunks:
+            if allowed_doc_ids:
+                # Фильтр по документу отдаёт ВСЕ его чанки, ранжированные запросом, — пусто
+                # значит, таких документов в корпусе нет (обычно id собран по аналогии). К
+                # поиску по всему корпусу НЕ откатываемся: агент не узнал бы, что его сужение
+                # выброшено, и промах проявлялся бы не отказом, а ответом из чужих документов.
+                return ('Сужение не дало ничего: ни один из переданных section_ids/doc_ids не '
+                        'нашёлся в корпусе. Идентификаторы не собираются по аналогии: бери их из '
+                        'выдачи find_section, search или каталога. Нужен поиск по всему корпусу — '
+                        'позови search без section_ids/doc_ids.'), []
             if filters:
                 return ('\n'.join([*filter_notes, f'Поиск с фильтром ({applied}) не дал результатов. '
                                   'Попробуй другую формулировку или сними фильтр.']).strip(), [])
             return 'Поиск не дал результатов. Попробуй другую формулировку.', []
-        raw_chunks = chunks  # полный нефильтрованный набор — понадобится для auto-fallback
 
-        # Фильтрация: section_ids → рекурсивно (раздел + потомки); doc_ids → точечно.
-        filtered_applied = False
-        scope_missed = False
-        allowed_doc_ids: set[str] = set()
-        if section_ids:
-            allowed_doc_ids |= self._get_descendant_doc_ids(section_ids)
-        if doc_ids:
-            allowed_doc_ids |= set(doc_ids)
-        if allowed_doc_ids:
-            filtered = [c for c in chunks if c['doc_id'] in allowed_doc_ids]
-            logger.info(
-                '[search] descendants filter: %d chunks → %d (allowed_doc_ids=%d)',
-                len(chunks), len(filtered), len(allowed_doc_ids),
-            )
-            if filtered:
-                chunks = filtered
-                filtered_applied = True
-            else:
-                # ⚠️ Сужение не сматчило НИ ОДНОГО чанка — обычно это несуществующий id
-                # (агент собрал его по аналогии). Раньше здесь был молчаливый откат к поиску
-                # по всему корпусу: агент не узнавал, что его scope выброшен, и промах
-                # проявлялся не отказом, а деградацией качества. Теперь скажем.
-                scope_missed = True
-
-        # LLM reranker — отфильтровать нерелевантные чанки
+        # LLM reranker — отфильтровать нерелевантные чанки. ⓘ Отката «на нефильтрованный
+        # набор» больше нет: сужение применено в базе, другого набора не существует.
         rerank_in = len(chunks)
         reranked = self._rerank(query, chunks)
         logger.info(
-            '[search] rerank: %d → %d (dropped %d, filter_applied=%s)',
-            rerank_in, len(reranked), rerank_in - len(reranked), filtered_applied,
+            '[search] rerank: %d → %d (dropped %d, scoped=%s)',
+            rerank_in, len(reranked), rerank_in - len(reranked), bool(allowed_doc_ids),
         )
-        if not reranked and filtered_applied:
-            # Фильтр оставил чанки, но rerank их все выбросил — возможно классификация
-            # документа по теме расходится с тем, где агент искал. Повторяем без фильтра.
-            logger.info('[search] rerank auto-fallback on raw chunks (%d)', len(raw_chunks))
-            reranked = self._rerank(query, raw_chunks)
-            logger.info('[search] rerank fallback result: %d chunks', len(reranked))
         if not reranked:
             tail = f' Фильтр был: {applied} — возможно, стоит его снять.' if applied else ''
             return ('Поиск дал результаты, но ни один не оказался релевантным. '
@@ -1505,13 +1509,6 @@ class Pipeline:
                 )
 
         block = self._render_chunks_block(chunks)
-        if scope_missed:
-            block = (
-                'Сужение не дало совпадений: ни один из переданных section_ids/doc_ids не '
-                'нашёлся в корпусе — искал по всему корпусу. Идентификаторы не собираются по '
-                'аналогии: бери их из выдачи find_section или из перечня документов ниже.\n\n'
-                + block
-            )
         # Агент обязан ВИДЕТЬ, что фильтр применён (и какой): иначе он не отличит «в этой
         # категории про это не говорили» от «не нашлось вообще» — и не поймёт, почему выдача
         # уже, чем ожидал. Замечания о снятых фильтрах — тем же блоком, сверху.
@@ -1606,6 +1603,17 @@ class Pipeline:
             if wanted:
                 clean[name] = list(dict.fromkeys(wanted))
         return clean, notes
+
+    def _auto_fetch_note(self) -> str:
+        """Что сказать агенту о страницах, загруженных из ссылок в вопросе.
+
+        Дефолт велит «доискать в базе вокруг» — верно для документного корпуса, где ссылка
+        задаёт отправную точку. Корпус, где загруженный документ И ЕСТЬ предмет вопроса
+        (вопрос про одну запись, режим «пересказать это»), пишет своё в
+        `retrieval.prompts.auto_fetch_note` — иначе агент, выполняя дефолт, уходит в корпус за
+        «контекстом вокруг» и приносит ответ из чужих документов. Пусто → дефолт байт в байт.
+        """
+        return (self._s.get('auto_fetch_note') or '').strip() or _AUTO_FETCH_NOTE
 
     def _render_chunks_block(self, chunks: list[dict], header: str | None = None) -> str:
         """Рендер retrieval-результата из чанков: группировка по документу,
