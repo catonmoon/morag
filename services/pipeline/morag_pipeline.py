@@ -825,7 +825,7 @@ class Pipeline:
             logger.info('[auto-fetch] refs from question: %s', auto_refs)
             yield self._emit_status(
                 '📑', f'в вопросе ссылки ({len(auto_refs)}) — загружаю страницы целиком', False)
-            fr = self._fetch_refs(auto_refs)
+            fr = self._fetch_refs(auto_refs, budget=self._auto_fetch_budget(agent_messages))
             if fr['chunks']:
                 for c in fr['chunks']:
                     all_chunks[c['chunk_id']] = c
@@ -852,6 +852,10 @@ class Pipeline:
                         'ℹ️', 'из индекса (live-fetch не отдал, версия может быть не самой '
                         'свежей): ' + ', '.join(fr['from_index']), False)
             # Требование #2: честно про не загруженное в контекст.
+            if fr.get('partial'):
+                yield self._emit_status(
+                    'ℹ️', 'загружено не целиком (не влезает в окно вместе с историей): '
+                    + ', '.join(fr['partial']), False)
             if fr['not_fit']:
                 yield self._emit_status(
                     '⚠️', 'не поместились в контекст: ' + ', '.join(fr['not_fit']), False)
@@ -2092,7 +2096,24 @@ class Pipeline:
                 out.append(c)
         return out
 
-    def _fetch_refs(self, refs: list[str] | str) -> dict:
+    def _auto_fetch_budget(self, agent_messages: list[dict]) -> int:
+        """Сколько токенов автозагрузка может занять в окне агента.
+
+        ⚠️ Раньше — 60 % окна вслепую. Но окно делят ещё системный промпт (у корпуса с картой —
+        4-7k), ИСТОРИЯ диалога и резерв на ответ, и на втором вопросе разговора о длинной записи
+        промпт выходил за окно: vLLM отвечал 400 «maximum context length», агент отдавал
+        «связь с LLM сорвалась» (замерено 15.09 на записи в 78k токенов: первый вопрос проходил,
+        второй с историей — нет). Считаем от свободного места; потолок 60 % оставлен как
+        верхняя граница — документ не должен вытеснять всё остальное и на пустой истории.
+        """
+        ctx = self._s.get('agent_context_window') or 32768
+        taken = sum(self._count_tokens(m.get('content') or '') for m in agent_messages)
+        output_reserve = max(self._s.get('agent_max_tokens') or 0, 4096)
+        safety = 3000  # таблица цитат, финальная инструкция, служебные обёртки
+        free = ctx - taken - output_reserve - safety
+        return max(0, min(int(ctx * 0.6), free))
+
+    def _fetch_refs(self, refs: list[str] | str, budget: int | None = None) -> dict:
         """Резолв + загрузка набора ссылок ЦЕЛИКОМ (по URL/ID, только config-источники).
         Движок авто-fetch ссылок из вопроса (детерминированно в `pipe()`) — возвращает
         структурно, чтобы вызыватель сам оформил статус/контекст:
@@ -2108,12 +2129,13 @@ class Pipeline:
             except Exception:  # noqa: BLE001
                 refs = [r.strip() for r in re.split(r'[\s,]+', refs) if r.strip()]
         refs = [str(r).strip() for r in (refs or []) if str(r).strip()]
-        read_budget = int((self._s.get('agent_context_window') or 32768) * 0.6)
+        read_budget = budget if budget is not None else int((self._s.get('agent_context_window') or 32768) * 0.6)
         fitted_chunks: list[dict] = []
         loaded: list[str] = []
         not_resolved: list[str] = []
         not_indexed: list[str] = []
         not_fit: list[str] = []
+        partial: list[str] = []  # загружен не целиком — обрезан по чанкам под бюджет
         from_index: list[str] = []  # live-fetch не отдал → отдали индекс (может быть не свежим)
         used = 0
         for ref in refs:
@@ -2151,8 +2173,23 @@ class Pipeline:
                 not_indexed.append(ref)
                 continue
             cost = self._count_tokens(self._render_chunks_block(chunks, header=''))
-            if fitted_chunks and used + cost > read_budget:
-                not_fit.append(title)
+            if used + cost > read_budget:
+                # Целиком не лезет. Первый документ — режем по чанкам ДО бюджета, а не выбрасываем:
+                # вопрос про одну запись без самой записи — это ответ из ничего. Хвост агент дочитает
+                # search'ем внутри документа; в статус уходит «загружено не целиком».
+                if fitted_chunks:
+                    not_fit.append(title)
+                    continue
+                kept: list[dict] = []
+                for c in chunks:
+                    one = self._count_tokens(self._render_chunks_block([c], header=''))
+                    if kept and used + one > read_budget:
+                        break
+                    kept.append(c)
+                    used += one
+                fitted_chunks.extend(kept)
+                loaded.append(f'{title} (не целиком: {len(kept)} фрагментов из {len(chunks)})')
+                partial.append(title)
                 continue
             fitted_chunks.extend(chunks)
             used += cost
@@ -2160,6 +2197,7 @@ class Pipeline:
         return {
             'chunks': fitted_chunks, 'loaded': loaded, 'not_resolved': not_resolved,
             'not_indexed': not_indexed, 'not_fit': not_fit, 'from_index': from_index,
+            'partial': partial,
         }
 
     # ── Reranker ──────────────────────────────────────────────────────────────
