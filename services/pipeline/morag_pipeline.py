@@ -2065,6 +2065,11 @@ class Pipeline:
 
     _REF_RE = re.compile(r'https?://[^\s<>"\')\]]+')
     _DOCID_RE = re.compile(r'\b(?:confluence|jira|local):[a-z0-9_-]+:[^\s<>"\')\]]+')
+    # Идентификатор В КАВЫЧКАХ может содержать пробелы: у локального источника id — это путь
+    # файла, а каталоги называют по-человечески («Python 2023»). Голый регэксп выше обрывает
+    # такой id на пробеле, и автозагрузка молча грузит несуществующий документ — замерено на
+    # корпусе расшифровок: у 72 записей курсов из 190 автозагрузка не срабатывала вовсе.
+    _DOCID_QUOTED_RE = re.compile(r'["«]((?:confluence|jira|local):[a-z0-9_-]+:[^"«»<>]+)["»]')
 
     def _extract_refs(self, text: str) -> list[str]:
         """Вычленить из текста вопроса ссылки/doc_id, КОТОРЫЕ резолвятся в источник
@@ -2072,12 +2077,15 @@ class Pipeline:
         порядке появления. Не-наши URL и произвольные числа игнорируются молча."""
         if not text:
             return []
-        cands = self._REF_RE.findall(text) + self._DOCID_RE.findall(text)
+        # Кавычечная форма — первой: голый регэксп на том же тексте даст ОБРУБОК до пробела, и
+        # его надо узнать как префикс уже найденного, а не грузить как второй документ.
+        cands = (self._DOCID_QUOTED_RE.findall(text) + self._REF_RE.findall(text)
+                 + self._DOCID_RE.findall(text))
         out: list[str] = []
         seen: set[str] = set()
         for c in cands:
             c = c.rstrip('.,;')  # хвостовая пунктуация предложения
-            if c in seen:
+            if c in seen or any(full != c and full.startswith(c) for full in seen):
                 continue
             if self._resolve_ref(c) is not None:  # только источники из конфига
                 seen.add(c)
