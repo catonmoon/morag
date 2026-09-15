@@ -925,6 +925,73 @@ async def cmd_rebuild_km(
     logger.info('Knowledge Map rebuild complete')
 
 
+async def cmd_rebind_embedder(config_path: str, from_fp: str, dry_run: bool = False) -> None:
+    """Переписать `embedder_fingerprint` у документов, не пересчитывая векторов.
+
+    Зачем. Отпечаток = sha256(model|dim|base_url): адрес входит в него намеренно — та же модель
+    у разных серверов даёт разные векторы. Но бывает и обратное: индекс переезжает на другой
+    сервер, где ТОТ ЖЕ эмбеддер отвечает по другому адресу (замерено на корпусе расшифровок:
+    ollama против vLLM за шлюзом, cos 0.984-0.992 на одних текстах, ранги сохраняются). Без этой
+    команды первая же индексация сочла бы все документы устаревшими и пересчитала корпус целиком.
+
+    Что делает. Считает отпечаток по ТЕКУЩЕМУ конфигу и проставляет его документам, у которых
+    стоит `from_fp` (старый). Чанки отпечатка не несут — трогается только коллекция документов,
+    только payload. Идемпотентна: документ с новым отпечатком пропускается.
+
+    ⚠️ Ответственность за «тот же эмбеддер» — на операторе: команда не сравнивает векторов.
+    Замерь косинус на нескольких текстах ДО запуска; другая модель или другая квантизация —
+    это переиндексация, а не rebind.
+    """
+    config = load_config(config_path)
+    docs_collection = config.qdrant.collection_docs
+    to_fp = compute_embedder_fingerprint(
+        config.indexing.dense_embedder.model,
+        config.indexing.dense_embedder.dim,
+        config.indexing.dense_embedder.base_url,
+    )
+    logger.info('Embedder fingerprint by config: %s (rebinding from %s)', to_fp, from_fp)
+    if to_fp == from_fp:
+        logger.info('Nothing to do: config fingerprint equals the old one')
+        return
+
+    logger.info('Connecting to Qdrant %s:%d', config.qdrant.host, config.qdrant.port)
+    client = AsyncQdrantClient(host=config.qdrant.host, port=config.qdrant.port, timeout=120)
+    try:
+        matched: list = []
+        seen: dict[str, int] = {}
+        offset = None
+        while True:
+            points, offset = await client.scroll(
+                collection_name=docs_collection, limit=256, offset=offset,
+                with_payload=['embedder_fingerprint'], with_vectors=False,
+            )
+            for pt in points:
+                fp = str((pt.payload or {}).get('embedder_fingerprint'))
+                seen[fp] = seen.get(fp, 0) + 1
+                if fp == from_fp:
+                    matched.append(pt.id)
+            if offset is None:
+                break
+        logger.info('Documents by fingerprint: %s', seen)
+        logger.info('To rebind: %d', len(matched))
+        if dry_run:
+            logger.info('Dry run: nothing written')
+            return
+        if not matched:
+            logger.info('Nothing to do')
+            return
+        for i in range(0, len(matched), _BACKFILL_BATCH):
+            await client.set_payload(
+                collection_name=docs_collection,
+                payload={'embedder_fingerprint': to_fp},
+                points=matched[i:i + _BACKFILL_BATCH],
+                wait=True,
+            )
+        logger.info('Rebound %d documents to %s', len(matched), to_fp)
+    finally:
+        await client.close()
+
+
 async def cmd_backfill_short_ids(config_path: str, dry_run: bool = False) -> None:
     """Проставить существующим документам короткий код (ADR-0025). БЕЗ переиндексации.
 
@@ -1352,6 +1419,24 @@ def main() -> None:
         help='Посчитать и показать, ничего не записывая',
     )
 
+    rebind_parser = subparsers.add_parser(
+        'rebind-embedder',
+        help='Тот же эмбеддер по другому адресу: переписать отпечаток у документов без переиндексации',
+    )
+    rebind_parser.add_argument(
+        '--config', default=os.environ.get('MORAG_CONFIG_PATH', 'config.yml'),
+        metavar='PATH',
+        help='Путь к конфигу (по умолчанию: env MORAG_CONFIG_PATH или config.yml)',
+    )
+    rebind_parser.add_argument(
+        '--from', dest='from_fp', required=True, metavar='FINGERPRINT',
+        help='Старый отпечаток (см. `Embedder fingerprint:` в логе прежней индексации)',
+    )
+    rebind_parser.add_argument(
+        '--dry-run', action='store_true',
+        help='Посчитать и показать, ничего не записывая',
+    )
+
     serve_parser = subparsers.add_parser('serve', help='Daemon-режим: индексация по расписанию из конфига')
     serve_parser.add_argument(
         '--config', default=os.environ.get('MORAG_CONFIG_PATH', 'config.yml'),
@@ -1379,6 +1464,8 @@ def main() -> None:
         asyncio.run(cmd_rebuild_km(args.config))
     elif args.command == 'backfill-short-ids':
         asyncio.run(cmd_backfill_short_ids(args.config, dry_run=args.dry_run))
+    elif args.command == 'rebind-embedder':
+        asyncio.run(cmd_rebind_embedder(args.config, args.from_fp, dry_run=args.dry_run))
     elif args.command == 'serve':
         asyncio.run(cmd_serve(args.config))
     elif args.command == 'query':
