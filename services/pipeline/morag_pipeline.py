@@ -238,6 +238,11 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
             km.collection if km else None,
             default='knowledge_map',
         ),
+        # ⚠️ `knowledge_map.enabled: false` обязан выключать Карту и В ОТВЕТАХ, не только при
+        # индексации: иначе процесс, которому карта не нужна (режим «одна запись»), читает её из
+        # коллекции и кладёт в системный промпт — замерено 15.09: 111k токенов из 120k окна, и
+        # автозагрузке записи не оставалось места (влезал 1 чанк из 84).
+        'knowledge_map_enabled': bool(getattr(km, 'enabled', True)) if km else True,
 
         'sparse_url': _str_or(
             v.SPARSE_EMBED_URL, sparse.base_url if sparse else None,
@@ -748,8 +753,8 @@ class Pipeline:
             )
             return
 
-        # 1. Подтянуть карту документации
-        knowledge_map = self._fetch_knowledge_map()
+        # 1. Подтянуть карту документации — только если она включена конфигом.
+        knowledge_map = self._fetch_knowledge_map() if self._s.get('knowledge_map_enabled', True) else ''
 
         # 2. Собрать system prompt из именованных секций (morag.retrieval.prompt —
         #    единый источник; console показывает ту же структуру в превью).
@@ -2117,7 +2122,10 @@ class Pipeline:
         output_reserve = max(self._s.get('agent_max_tokens') or 0, 4096)
         safety = 3000  # таблица цитат, финальная инструкция, служебные обёртки
         free = ctx - taken - output_reserve - safety
-        return max(0, min(int(ctx * 0.6), free))
+        budget = max(0, min(int(ctx * 0.6), free))
+        logger.info('[auto-fetch] budget=%d (window=%d, taken=%d in %d msgs, reserve=%d, safety=%d)',
+                    budget, ctx, taken, len(agent_messages), output_reserve, safety)
+        return budget
 
     def _fetch_refs(self, refs: list[str] | str, budget: int | None = None) -> dict:
         """Резолв + загрузка набора ссылок ЦЕЛИКОМ (по URL/ID, только config-источники).
