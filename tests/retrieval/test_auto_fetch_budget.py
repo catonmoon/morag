@@ -30,7 +30,8 @@ def _pipeline(window: int, doc_chunks: list[dict]):
         'fetch_chunks_by_orders': staticmethod(lambda doc_id, orders: list(doc_chunks)),
     })()
     p._get_doc_title = lambda doc_id: 'Запись'
-    p._render_chunks_block = lambda chunks, header=None: '\n'.join(c['text'] for c in chunks)
+    p._render_chunks_block = lambda chunks, header=None, with_context=True: '\n'.join(
+        ((c.get('context', '') + '\n') if with_context and c.get('context') else '') + c['text'] for c in chunks)
     return p
 
 
@@ -75,3 +76,15 @@ def test_document_within_budget_loads_whole():
     p = _pipeline(window=20000, doc_chunks=chunks)
     out = p._fetch_refs(['local:demo:a.md'], budget=1000)
     assert len(out['chunks']) == 3 and out['partial'] == [] and out['loaded'] == ['Запись']
+
+
+def test_auto_fetch_counts_and_renders_without_context_lines():
+    """Справка к чанку нужна вырванному фрагменту (search/get_doc), а при чтении документа целиком
+    только повторяет соседний текст — и съедала треть окна (замер 15.09)."""
+    chunks = _chunks(4, 50)
+    for c in chunks:
+        c['context'] = ' '.join(['ctx'] * 50)   # справка такого же размера, как речь
+    p = _pipeline(window=20000, doc_chunks=chunks)
+    out = p._fetch_refs(['local:demo:a.md'], budget=210)
+    # 4 × 50 слов речи = 200 ≤ 210 — влезает целиком ТОЛЬКО без справок (с ними было бы 400)
+    assert len(out['chunks']) == 4 and out['partial'] == []

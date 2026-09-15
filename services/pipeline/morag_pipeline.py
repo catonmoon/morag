@@ -833,7 +833,7 @@ class Pipeline:
                     'role': 'user',
                     'content': (
                         self._auto_fetch_note() + '\n\n'
-                        + self._render_chunks_block(fr['chunks'], header='')
+                        + self._render_chunks_block(fr['chunks'], header='', with_context=False)
                     ),
                 })
                 names = list(dict.fromkeys(
@@ -1619,13 +1619,19 @@ class Pipeline:
         """
         return (self._s.get('auto_fetch_note') or '').strip() or _AUTO_FETCH_NOTE
 
-    def _render_chunks_block(self, chunks: list[dict], header: str | None = None) -> str:
+    def _render_chunks_block(self, chunks: list[dict], header: str | None = None,
+                             with_context: bool = True) -> str:
         """Рендер retrieval-результата из чанков: группировка по документу,
         блок `[N] Документ:` + путь/мета + (контекст+текст) каждого чанка. Единый
         формат для search/get_doc/авто-fetch и для пере-рендера при бюджет-проходе.
         `header=None` → «Найдено N документов/фрагментов:»; явный header (в т.ч. '') перебивает.
         Аудио-момент (timestamp_citations + start_sec) → `[N] Выпуск · MM:SS · Спикер`.
-        `[N]` стабильна (`_cite_register`). Строки не режутся."""
+        `[N]` стабильна (`_cite_register`). Строки не режутся.
+
+        `with_context=False` — без строк `Контекст:`. Справка к чанку объясняет фрагмент,
+        ВЫРВАННЫЙ из документа (search/get_doc); при чтении документа ЦЕЛИКОМ по порядку она
+        только повторяет соседний текст другими словами. Замерено 15.09 на записи в 84 чанка:
+        речь 22k токенов, справки 16k, экран 18k — справки съедали треть окна."""
         units: dict[str, dict] = {}   # ключ → {'meta':..., 'chunks':[...]}
         order_keys: list[str] = []
         for c in chunks:
@@ -1659,7 +1665,7 @@ class Pipeline:
                 lines = [_moment_head(n, meta['label'], self._code_of(doc_id), mode)]
                 ann_field = self._s.get('annotation_field')
                 for c in cs:
-                    if c.get('context'):
+                    if with_context and c.get('context'):
                         lines.append(f'Контекст: {c["context"]}')
                     # ADR-0027: экран (и указания докладчика на него) — ПЕРЕД речью: сцена, потом
                     # слова; род и время в подписи, чтобы агент не выдавал окно программы за тезис.
@@ -1686,7 +1692,7 @@ class Pipeline:
                 lines.append(f'URL: {url}')
             lines.append('')
             for c in cs:
-                if c.get('context'):
+                if with_context and c.get('context'):
                     lines.append(f'Контекст: {c["context"]}')
                 lines.append(c.get('text', ''))
                 lines.append('')
@@ -2172,7 +2178,7 @@ class Pipeline:
             if not chunks:
                 not_indexed.append(ref)
                 continue
-            cost = self._count_tokens(self._render_chunks_block(chunks, header=''))
+            cost = self._count_tokens(self._render_chunks_block(chunks, header='', with_context=False))
             if used + cost > read_budget:
                 # Целиком не лезет. Первый документ — режем по чанкам ДО бюджета, а не выбрасываем:
                 # вопрос про одну запись без самой записи — это ответ из ничего. Хвост агент дочитает
@@ -2182,7 +2188,7 @@ class Pipeline:
                     continue
                 kept: list[dict] = []
                 for c in chunks:
-                    one = self._count_tokens(self._render_chunks_block([c], header=''))
+                    one = self._count_tokens(self._render_chunks_block([c], header='', with_context=False))
                     if kept and used + one > read_budget:
                         break
                     kept.append(c)
