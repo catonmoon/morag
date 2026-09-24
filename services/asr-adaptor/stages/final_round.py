@@ -234,8 +234,14 @@ def _invents_name(was: str, now: str, known: set) -> bool:
     return difflib.SequenceMatcher(a=_key(was), b=_key(now)).ratio() < NAME_SIMILARITY
 
 
-def apply_fixes(text: str, fixes, canonicals=(), always=()) -> tuple[str, int, int]:
+def apply_fixes(text: str, fixes, canonicals=(), always=(), log_to=None) -> tuple[str, int, int]:
     """Применить замены к тексту ДЕТЕРМИНИРОВАННО. Возвращает (текст, применено, отброшено).
+
+    `log_to` — необязательный список, в который складывается ВЕРДИКТ по каждой замене
+    (`{was, now, ok, why}`). По умолчанию `None`, и тогда путь исполнения прежний, до байта: это
+    показометр для клиента, а не часть решения. Причины и так считаются — просто уходили в лог,
+    где их никто не видел, хотя отвергнутая замена интереснее принятой: по ней видно, что
+    сторож работает.
 
     Смысл всей конструкции: у модели не берут прозу — только пары «было → стало», и каждая проверяется
     по отдельности. Поэтому правка физически не может удалить речь, переставить слова или перевести
@@ -257,34 +263,46 @@ def apply_fixes(text: str, fixes, canonicals=(), always=()) -> tuple[str, int, i
     """
     canon = {_key(c) for c in (canonicals or ())}
     applied = skipped = 0
+
+    def verdict(was, now, ok, why='', **f):
+        if log_to is not None:
+            log_to.append({'was': was, 'now': now, 'ok': ok, 'why': why, **f})
+
     for fix in (fixes or ()):
         was, now = (fix.get('was') or '').strip(), (fix.get('now') or '').strip()
         if not was or not now or was == now:
+            verdict(was, now, False, 'empty')
             skipped += 1
             continue
         if len(was.split()) > MAX_WAS_WORDS or len(now.split()) > MAX_NOW_WORDS or len(now) > 60:
             log.warning('final-round: замена отброшена (слишком длинная): %r → %r', was, now)
+            verdict(was, now, False, 'too_long')
             skipped += 1
             continue
         pattern = re.compile(rf'(?<!\w){re.escape(was)}(?!\w)')
         if not pattern.search(text):
             log.warning('final-round: замена отброшена (нет в тексте по границам слова): %r', was)
+            verdict(was, now, False, 'not_found')
             skipped += 1
             continue
         if _changes_number(was, now):
             log.warning('final-round: замена отброшена (меняет число): %r → %r', was, now)
+            verdict(was, now, False, 'number')
             skipped += 1
             continue
         if _is_excision(was, now):
             log.warning('final-round: замена отброшена (изъятие слов): %r → %r', was, now)
+            verdict(was, now, False, 'excision')
             skipped += 1
             continue
         if _is_translation(was, now, canon):
             log.warning('final-round: замена отброшена (перевод): %r → %r', was, now)
+            verdict(was, now, False, 'translation')
             skipped += 1
             continue
         if GUARD_NAMES and _invents_name(was, now, canon | {_key(w) for w in re.findall(r'\w+', text)}):
             log.warning('final-round: замена отброшена (выдуманное имя): %r → %r', was, now)
+            verdict(was, now, False, 'invented_name')
             skipped += 1
             continue
         candidate = pattern.sub(now.replace('\\', r'\\'), text)
@@ -294,9 +312,11 @@ def apply_fixes(text: str, fixes, canonicals=(), always=()) -> tuple[str, int, i
         broken = [t for t in (always or ()) if t and not _term_survives(t, text, candidate)]
         if broken:
             log.warning('final-round: замена отброшена (рушит %s): %r → %r', broken[0], was, now)
+            verdict(was, now, False, 'breaks_term', term=broken[0])
             skipped += 1
             continue
         text = candidate
+        verdict(was, now, True)
         applied += 1
     return text, applied, skipped
 
@@ -324,7 +344,7 @@ def _system_prompt(corpus_desc: str) -> str:
 
 
 async def correct(text: str, doc_sum: str, context: str, canonicals, llm, always=(),
-                  recalled: str = '', corpus_desc: str = DEFAULT_CORPUS) -> str:
+                  recalled: str = '', corpus_desc: str = DEFAULT_CORPUS, fixes_out=None) -> str:
     """Правка сущностей: модель ПРЕДЛАГАЕТ замены, применяет их код.
 
     Прозу у модели не берём вовсе — только пары «было → стало» (их проверяет и применяет
@@ -348,7 +368,7 @@ async def correct(text: str, doc_sum: str, context: str, canonicals, llm, always
         schema=_FIX_SCHEMA, schema_name='fixes', max_tokens=1500)
 
     fixes = (res or {}).get('fixes') or []
-    fixed, applied, skipped = apply_fixes(text, fixes, canonicals, always)
+    fixed, applied, skipped = apply_fixes(text, fixes, canonicals, always, log_to=fixes_out)
     if skipped:
         log.info('final-round: применено замен %d, отброшено %d', applied, skipped)
     return fixed

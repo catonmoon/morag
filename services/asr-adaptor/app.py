@@ -71,7 +71,7 @@ def models():
 async def transcribe(file: UploadFile = File(...), model: str = Form('asr-adaptor'),
                      response_format: str = Form('verbose_json'), mode: str = Form(''),
                      episode: str = Form(''), title: str = Form(''), url: str = Form(''),
-                     hints: str = Form('')):
+                     hints: str = Form(''), events: str = Form('')):
     suffix = Path(file.filename or 'audio').suffix or '.mp3'
     tmp = tempfile.mktemp(suffix=suffix)
     Path(tmp).write_bytes(await file.read())
@@ -101,11 +101,17 @@ async def transcribe(file: UploadFile = File(...), model: str = Form('asr-adapto
 
     if (mode or CFG.mode) == 'sync':
         return await job(lambda _: None)
-    return {'job_id': jobs.submit(job), 'status': 'queued'}
+    # `events=1` просит ленту стадий (см. jobs.py). Не попросили — всё как раньше, до байта.
+    return {'job_id': jobs.submit(job, events=events not in ('', '0', 'false')), 'status': 'queued'}
 
 
 @app.get('/v1/jobs/{job_id}')
-def job_status(job_id: str):
+def job_status(job_id: str, since: int | None = None):
+    """Состояние задачи; с `?since=N` — ещё и лента событий новее курсора.
+
+    ⚠️ БЕЗ `since` ответ обязан совпадать с прежним поле в поле: по нему живёт другой продукт.
+    Поэтому ключи ленты добавляются только когда о ней спросили явно.
+    """
     j = jobs.get(job_id)
     if not j:
         raise HTTPException(404, 'job not found')
@@ -114,4 +120,6 @@ def job_status(job_id: str):
         out['result'] = j['result']
     elif j['status'] == 'error':
         out['error'] = j.get('error')
+    if since is not None:
+        out['events'], out['cursor'], out['dropped'] = jobs.since(j, since)
     return out

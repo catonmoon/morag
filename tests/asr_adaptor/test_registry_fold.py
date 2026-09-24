@@ -86,3 +86,37 @@ def test_setting_actually_decides(tmp_path, monkeypatch, minutes, expect_people)
         {'A': _voice(1), 'B': _voice(2)}, {'A': 600.0, 'B': 20.0},
         'ep1', str(tmp_path / 'r.json'))
     assert len(set(mapping.values())) == expect_people
+
+
+# --- решение по каждому кластеру: то, что рисуется на карте голосов ----------------------------
+
+def test_the_decision_for_every_cluster_can_be_collected(tmp_path, monkeypatch):
+    """Косинус и ветка решения считаются и так — просто не выходили наружу.
+
+    ⚠️⚠️ Центроида в отчёте нет и быть не может: это биометрический признак живого человека, а
+    лента событий сохраняется в файл. Наружу — только решение и близость.
+    """
+    registry = _reload(monkeypatch, ASR_MIN_GUEST_MIN='2.0')
+    reg = tmp_path / 'registry.json'
+
+    # первый прогон заводит голос, второй его узнаёт и приклеивает короткого незнакомца
+    registry.assign({'SPEAKER_00': _voice(1)}, {'SPEAKER_00': 700.0}, 'ep1', str(reg))
+    out: list[dict] = []
+    mapping = registry.assign({'A': _voice(1), 'B': _voice(2)}, {'A': 700.0, 'B': 15.0},
+                              'ep2', str(reg), out=out)
+
+    assert len(out) == 2 and [d['cluster'] for d in out] == ['A', 'B'], 'по убыванию эфира'
+    known, stranger = out
+    assert known['action'] == 'matched' and known['cos'] > 0.99 and known['label'] == mapping['A']
+    assert stranger['action'] == 'folded' and stranger['cos'] < 0.5
+    assert all('centroid' not in d and 'cent' not in d for d in out), 'биометрии в отчёте нет'
+    assert all(isinstance(v, (str, int, float)) for d in out for v in d.values())
+
+
+def test_collecting_decisions_does_not_change_the_mapping(tmp_path, monkeypatch):
+    registry = _reload(monkeypatch, ASR_MIN_GUEST_MIN='0.25')
+    cents, air = {'A': _voice(3), 'B': _voice(4)}, {'A': 700.0, 'B': 300.0}
+
+    plain = registry.assign(cents, air, 'ep1', str(tmp_path / 'a.json'))
+    noisy = registry.assign(cents, air, 'ep1', str(tmp_path / 'b.json'), out=[])
+    assert plain == noisy

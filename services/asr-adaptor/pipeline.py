@@ -118,8 +118,84 @@ def _around(turns, i: int, n: int = 2) -> str:
     return '\n'.join(parts)
 
 
+# --- лента событий: сведение сырых данных стадии к тому, что рисуется -------------------------
+# ⚠️ Форма выбрана из расчёта на объём, а не на удобство чтения: у часовой встречи спанов
+# диаризации под тысячу, и словари с именами полей раздули бы одно событие втрое.
+
+SPAN_GAP = 0.2       # склейка соседних отрезков одного голоса: короче — это дыхание, не пауза
+MAX_SPANS = 4000
+DRAFT_WIN = 30.0     # окно черновика — то самое, которым whisper и слушает
+
+
+def _emit_spans(emit, spans) -> None:
+    """Лента диаризации: `[начало, конец, индекс голоса]` плюс список меток.
+
+    Склеиваем соседние отрезки одного голоса: пауза короче 0.2 с — это вдох, а не смена
+    говорящего, и на картинке шириной в экран такие щели всё равно не видны, зато событий втрое
+    меньше.
+    """
+    if not spans:
+        return
+    names: list[str] = []
+    out: list[list] = []
+    for sp in spans:
+        who = sp.get('speaker') or ''
+        if who not in names:
+            names.append(who)
+        idx = names.index(who)
+        if out and out[-1][2] == idx and sp['start'] - out[-1][1] <= SPAN_GAP:
+            out[-1][1] = round(float(sp['end']), 2)
+            continue
+        out.append([round(float(sp['start']), 2), round(float(sp['end']), 2), idx])
+        if len(out) >= MAX_SPANS:
+            break
+    emit('diar.spans', speakers=names, spans=out)
+
+
+def _project(cents: dict) -> dict:
+    """192 измерения → две, чтобы близость голосов можно было НАРИСОВАТЬ.
+
+    ⚠️⚠️ Считаем ЗДЕСЬ, в движке, и наружу отдаём только пару чисел. Центроид — биометрический
+    признак живого человека: он остаётся в реестре под 0600, а лента событий сохраняется в файл и
+    может уехать куда угодно. Проекции для картинки достаточно, восстановить по ней голос нельзя.
+
+    Главные компоненты — по этой записи, а не по корпусу: масштаб всё равно условный, а зависеть
+    от состояния реестра картинке незачем.
+    """
+    labels = list(cents)
+    if not labels:
+        return {}
+    import numpy as _np   # noqa: PLC0415 — нужен только здесь
+
+    m = _np.asarray([cents[k] for k in labels], dtype=_np.float32)
+    if len(labels) == 1:
+        return {labels[0]: [0.0, 0.0]}
+    m = m - m.mean(axis=0, keepdims=True)
+    try:
+        _u, _s, vt = _np.linalg.svd(m, full_matrices=False)
+        xy = m @ vt[:2].T
+    except Exception:  # noqa: BLE001 — картинка не повод ронять стадию
+        return {k: [0.0, 0.0] for k in labels}
+    span = float(_np.abs(xy).max()) or 1.0
+    return {k: [round(float(v[0] / span), 3), round(float(v[1] / span), 3)] for k, v in zip(labels, xy)}
+
+
+def _emit_draft(emit, segs) -> None:
+    """Черновик окнами по 30 секунд — теми же, которыми его слушала модель."""
+    if not segs:
+        return
+    win: dict[int, list[str]] = {}
+    for sg in segs:
+        text = (sg.get('text') or '').strip()
+        if text:
+            win.setdefault(int(float(sg.get('start') or 0.0) // DRAFT_WIN), []).append(text)
+    for k in sorted(win):
+        emit('draft.window', **{'from': round(k * DRAFT_WIN, 1), 'to': round((k + 1) * DRAFT_WIN, 1),
+                                'text': ' '.join(win[k])[:600], 'bulk': True})
+
+
 async def _final_round(turns, dsum: str, gloss, llm, concurrency: int, step,
-                       always=(), sweep_delay: float = 30.0) -> tuple[int, int]:
+                       always=(), sweep_delay: float = 30.0, emit=None) -> tuple[int, int]:
     """Правка сущностей по репликам — параллельно, с повтором и добивочным проходом.
 
     Реплики независимы; последовательный проход держал стадию 8-12 мин из 15-18 на выпуск.
@@ -146,15 +222,24 @@ async def _final_round(turns, dsum: str, gloss, llm, concurrency: int, step,
         try:
             async with sem:
                 recalled = await recall_entities(dsum, raw, llm)
+                fixes: list[dict] = [] if emit else None
                 t['final'] = await correct(raw, dsum, _around(turns, i, CFG.context_turns),
                                            relevant(raw, gloss), llm, always, recalled,
-                                           corpus_desc=CFG.corpus_desc)
+                                           corpus_desc=CFG.corpus_desc, fixes_out=fixes)
+                for f in (fixes or ()):
+                    emit('turn.fix', turn=i, start=round(t['start'], 1), **f)
             ok = True
         except Exception as e:
             t['final'] = raw
             log.warning('final-round failed at %.1fs (%s: %s)',
                         t['start'], type(e).__name__, str(e)[:120])
         done += 1
+        if emit:
+            # ⚠️ Реплики считаются ПАРАЛЛЕЛЬНО (шесть разом) плюс добивочный проход — значит
+            # события приходят не в порядке записи. Клиенту нужен тайм-код, чтобы человек не
+            # решил, будто запись обрабатывается задом наперёд.
+            emit('turn.done', turn=i, start=round(t['start'], 1), done=done, n=len(turns),
+                 changed=bool(ok and t.get('final') != raw), failed=not ok)
         if done % 20 == 0:
             step(f'final-round {done}')
         return True, not ok
@@ -223,21 +308,47 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         if progress:
             progress(m)
 
+    def emit(kind, **f):
+        """Событие стадии в ленту (см. jobs.py). Молча ничего не делает, если ленты не просили.
+
+        ⚠️ Обёрнуто в try/except намеренно: показ работы — украшение, и оно не имеет права
+        уронить расшифровку. Час работы GPU дороже любой картинки.
+        """
+        if not progress:
+            return
+        try:
+            progress({'t': kind, 'at': round(time.monotonic() - t0, 2), **f})
+        except Exception:  # noqa: BLE001
+            log.debug('событие %s не отправилось', kind, exc_info=True)
+
+    def stage(name, **f):
+        """Начало стадии: прежняя строка прогресса И событие — одним вызовом."""
+        step(name)
+        emit('stage.start', stage=name, **f)
+
+    def stage_done(name, sec, **f):
+        emit('stage.end', stage=name, sec=sec, **f)
+
     try:
         env = stack_fingerprint()
         log.info('стек: %s', one_line(env))
         wav = str(tmp / 'in.wav')
         await asyncio.to_thread(_to_wav, audio_path, wav)
 
-        step('diarize')
+        # Длительность нужна ДО диаризации: событие `job.meta` открывает ленту и задаёт шкалу,
+        # на которой клиент рисует всё остальное. Чтение дешёвое, порядок значения не имеет.
+        audio_sec = coverage.wav_duration(wav)
+        emit('job.meta', audio_sec=round(audio_sec, 2), env=one_line(env))
+
+        stage('diarize')
         _t = time.monotonic()
         async with _res('diarize', CFG.diarize_slots):
             spans = await asyncio.to_thread(audio_clients.diarize, wav)
         tm['diarize_s'] = round(time.monotonic() - _t, 1)
+        stage_done('diarize', tm['diarize_s'], n=len(spans))
+        _emit_spans(emit, spans)
 
-        audio_sec = coverage.wav_duration(wav)
-
-        step('pass1')
+        stage('pass1')
         _t = time.monotonic()
         async with _res('whisper', CFG.whisper_slots):
             p1 = await asyncio.to_thread(audio_clients.asr, wav, '')
@@ -245,6 +356,11 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         words = {'segments': segs}
         full_text = ' '.join((s.get('text') or '').strip() for s in segs)
         tm['pass1_s'] = round(time.monotonic() - _t, 1)
+        stage_done('pass1', tm['pass1_s'], n=len(segs))
+        # ⚠️ Черновик приходит ЦЕЛИКОМ: whisper слушает файл одним вызовом. Окна по 30 с внутри
+        # него есть, но наружу их отдаёт только печать модели — поэтому отдаём пачкой и говорим
+        # об этом честно (`bulk`), а не изображаем поток задним числом.
+        _emit_draft(emit, segs)
 
         p1_holes = coverage.holes([(s['start'], s['end']) for s in segs], 0.0, audio_sec,
                                   CFG.hole_min_s)
@@ -252,7 +368,7 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             log.info('pass1 skipped %.1fs in %d place(s) — часть закроет пасс-2 внутри чанков',
                      sum(b - a for a, b in p1_holes), len(p1_holes))
 
-        step('glossary')
+        stage('glossary')
         _t = time.monotonic()
         # Свободный проход (гипотезы по черновику) и seed-проход (сверка известных написаний с тем
         # же черновиком) независимы — идут ПАРАЛЛЕЛЬНО, лишнего времени стадия не стоит.
@@ -265,6 +381,8 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         hint_set = hinted_canonicals(seed)
         tm['glossary_s'] = round(time.monotonic() - _t, 1)
         tm['n_glossary'] = len(gloss)  # размер глоссария — чем кормим подсказку пасса-2 (бюджет ≤200 ток.)
+        stage_done('glossary', tm['glossary_s'], n=len(gloss), n_hinted=len(seed),
+                   terms=[g['canonicals'][0] for g in gloss[:40] if g.get('canonicals')])
         if seed:
             tm['n_hints'] = len(seed)
             log.info('hints: подтверждено %d известных написаний из %d предложенных',
@@ -297,7 +415,7 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
                         len(extra), sum(b - a for a, b in unheard))
         counter = WhisperTokenCounter(CFG.whisper_tokenizer)
 
-        step('pass2')
+        stage('pass2')
         _t = time.monotonic()
         n_broken = n_hinted_chunks = 0
         for i, c in enumerate(chunks):
@@ -306,8 +424,17 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             if any(c.casefold() in hint_set for c in canon):
                 n_hinted_chunks += 1
             prompt = build_prompt(canon, counter, CFG.prompt_budget, CFG.always_terms, hint_set)
+            # ⚠️ ЕДИНСТВЕННОЕ место, где `prompt` и `canon` существуют: дальше цикл их затирает.
+            # Контекст, который уходит в whisper, показать больше неоткуда.
+            emit('chunk.start', i=i + 1, n=len(chunks), **{'from': round(c['start'], 2),
+                 'to': round(c['end'], 2)}, spk=c.get('speaker') or '',
+                 draft=(c.get('text') or '')[:200], terms=canon[:12], prompt=prompt[:200])
+            _ct = time.monotonic()
             try:
                 await _decode(wav, str(tmp / f'c{i}.wav'), c, prompt, audio_sec)
+                emit('chunk.done', i=i + 1, sec=round(time.monotonic() - _ct, 2),
+                     raw=(c.get('raw') or '')[:300], retried=bool(c.get('retried')),
+                     n_seg=len(c.get('segments') or ()))
             except Exception as error:
                 # ОДИН плохой чанк не должен стоить всей записи. До этой обработки любое падение
                 # ffmpeg или whisper на одном куске уносило час работы вместе с диаризацией и
@@ -317,10 +444,13 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
                             i, c['start'], c['end'], type(error).__name__, error)
                 c['raw'], c['segments'] = '', []
                 n_broken += 1
+                emit('chunk.done', i=i + 1, sec=round(time.monotonic() - _ct, 2),
+                     error=type(error).__name__)
             if (i + 1) % 20 == 0:
                 step(f'pass2 {i + 1}/{len(chunks)}')
         tm['pass2_s'] = round(time.monotonic() - _t, 1)
         tm['n_chunks'] = len(chunks)
+        stage_done('pass2', tm['pass2_s'], n=len(chunks), n_broken=n_broken)
         if seed:
             # Сколько кусков реально получили подтверждённый каноник — это и есть работа канала.
             tm['n_chunks_hinted'] = n_hinted_chunks
@@ -348,7 +478,7 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             for h0, h1 in coverage.holes(coverage.turn_segments(t), a, b, CFG.coverage_warn_s):
                 log.warning('speech lost: %.1fs at %.1fs (turn %.1f-%.1f)', h1 - h0, h0, a, b)
 
-        step('final-round')
+        stage('final-round')
         _t = time.monotonic()
         dsum = await doc_summary(full_text, llm)
         for t in turns:
@@ -358,23 +488,29 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         # `_term_survives` перебирает `always` на каждую замену.
         protect = list(CFG.always_terms) + [c for h in seed for c in h['canonicals']]
         n_round, n_failed = await _final_round(turns, dsum, gloss, llm, CFG.round_concurrency,
-                                              step, protect)
+                                              step, protect, emit=emit)
         raw_side = {f"{t['start']:.1f}": {'raw': t['raw'], 'final': t['final']}
                     for t in turns if t['final'] != t['raw']}
         tm['round_s'] = round(time.monotonic() - _t, 1)
         tm['n_round_turns'] = n_round
+        stage_done('final-round', tm['round_s'], n=len(turns), changed=n_round, failed=n_failed)
         if n_failed:
             tm['n_round_failed'] = n_failed
             log.warning('final-round: %d реплик остались сырыми из-за ошибок LLM', n_failed)
 
-        step('speakers')
+        stage('speakers')
         await _wait_turn(ticket)  # реестр — строго в порядке поступления выпусков
         async with _res('campp', CFG.campp_slots):
             cents, air = await asyncio.to_thread(audio_clients.campp, wav, spans)
+        decided: list[dict] = [] if progress else None
         mapping = await asyncio.to_thread(
             registry.assign, cents, air, episode or 'adhoc', CFG.registry_path,
-            CFG.match_threshold, CFG.max_centroids)
+            CFG.match_threshold, CFG.max_centroids, decided)
         _release_turn(ticket)
+        if decided:
+            xy = _project(cents)
+            for d in decided:
+                emit('spk.vec', xy=xy.get(d['cluster'], [0.0, 0.0]), **d)
         # реплики кластеров без матча (короткий шум) → доминирующий Speaker по air-time
         air_by_lbl = defaultdict(float)
         for t in turns:
@@ -390,11 +526,13 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         name_map: dict = {}
         name_conflicts: list = []
         if CFG.enable_naming:
-            step('naming')
+            stage('naming')
             _t = time.monotonic()
             name_map, name_conflicts = await name_speakers(
                 turns, registry.names(CFG.registry_path), llm, corpus_desc=CFG.corpus_desc)
             tm['naming_s'] = round(time.monotonic() - _t, 1)
+            stage_done('naming', tm['naming_s'], n=len(name_map))
+        emit('spk.map', mapping=mapping, names=name_map, conflicts=name_conflicts)
         for t in turns:
             t['speaker_id'] = t['speaker']
             t['speaker'] = name_map.get(t['speaker'], t['speaker'])
@@ -416,7 +554,7 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         # Стадия не критичная (торч ставится отдельно, см. requirements-align.txt) — падает мягко.
         words_doc = None
         if CFG.enable_align:
-            step('align')
+            stage('align')
             _t = time.monotonic()
             try:
                 async with _res('align', CFG.align_slots):
@@ -426,6 +564,7 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             except Exception as e:
                 log.warning('word alignment skipped: %s: %s', type(e).__name__, e)
             tm['align_s'] = round(time.monotonic() - _t, 1)
+            stage_done('align', tm['align_s'], n=len((words_doc or {}).get('turns') or ()))
 
         cov = coverage.summarize(audio_sec, segs, chunks, turns, CFG.hole_min_s)
         log.info('coverage: audio %.0fs, unheard by pass2 %.1fs, recovered %.1fs in %d chunk(s), '

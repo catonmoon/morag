@@ -408,3 +408,52 @@ def test_prompt_with_the_flag_swaps_the_example_and_adds_the_rule(monkeypatch):
     assert '«эйр флоу» → «Airflow»' in prompt, 'пример с именем модель применяла к любому обрывку'
     assert '«и Селедец»' not in prompt
     assert 'ИМЯ ЧЕЛОВЕКА' in prompt
+
+
+# --- вердикт по каждой замене: то, что показывается человеку ----------------------------------
+
+def test_the_verdict_of_every_fix_can_be_collected(guard):
+    """⚠️ Отвергнутая замена интереснее принятой: по ней видно, что сторож работает.
+
+    Причины отказа считались и раньше — и уходили в лог, где их никто не читает. `log_to` их
+    просто не выбрасывает; на сам результат это не влияет (проверено следующим тестом).
+    """
+    text = 'Мы берём эйр флоу и ставим его в кубер на H200.'
+    out: list[dict] = []
+    fixed, applied, skipped = apply_fixes(
+        text,
+        [{'was': 'эйр флоу', 'now': 'Airflow'},              # принята
+         {'was': 'кубер', 'now': ''},                        # пусто
+         {'was': 'мамонт', 'now': 'Mammoth'},                # нет в тексте
+         {'was': 'H200', 'now': 'H100'},                     # меняет число — решает акустика
+         {'was': 'ставим его в кубер', 'now': 'ставим'}],    # длинная
+        canonicals=['Airflow'], log_to=out)
+
+    assert 'Airflow' in fixed and 'H200' in fixed and applied == 1
+    assert [(v['was'], v['ok'], v['why']) for v in out] == [
+        ('эйр флоу', True, ''),
+        ('кубер', False, 'empty'),
+        ('мамонт', False, 'not_found'),
+        ('H200', False, 'number'),
+        ('ставим его в кубер', False, 'too_long'),
+    ]
+    assert skipped == 4
+
+
+def test_collecting_verdicts_does_not_change_the_result(guard):
+    """Показометр не имеет права влиять на корпус: с журналом и без него — байт в байт."""
+    text = 'Пост грез и эйр флоу, а ещё си плюс плюс.'
+    fixes = [{'was': 'пост грез', 'now': 'Postgres'}, {'was': 'эйр флоу', 'now': 'Airflow'},
+             {'was': 'си плюс плюс', 'now': 'C++'}, {'was': 'нет такого', 'now': 'X'}]
+    plain = apply_fixes(text, fixes, canonicals=['Postgres', 'Airflow', 'C++'])
+    noisy = apply_fixes(text, fixes, canonicals=['Postgres', 'Airflow', 'C++'], log_to=[])
+    assert plain == noisy
+
+
+def test_a_fix_that_would_break_a_known_term_says_which_one(guard):
+    out: list[dict] = []
+    apply_fixes('Об этом рассказывал Дмитрий Колодезев.',
+                [{'was': 'Колодезев', 'now': 'Колодзев'}],
+                canonicals=[], always=['Дмитрий Колодезев'], log_to=out)
+    assert out[0]['ok'] is False and out[0]['why'] == 'breaks_term'
+    assert out[0]['term'] == 'Дмитрий Колодезев', 'человеку надо сказать, ЧТО именно сломалось бы'

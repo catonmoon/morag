@@ -73,9 +73,18 @@ def _prov(episode: str, cluster: str, air: float) -> dict:
 
 
 def assign(cents: dict, air: dict, episode: str, registry_path: str,
-           threshold: float = 0.55, max_centroids: int = 8) -> dict:
+           threshold: float = 0.55, max_centroids: int = 8, out=None) -> dict:
     """cents {cluster: centroid[]} + air {cluster: sec} (substantial-кластеры от CAM++-эндпоинта)
-    → {cluster: 'Speaker_N'}. Мутирует+персистит реестр под flock. Кластеры по air-time desc (детерминизм)."""
+    → {cluster: 'Speaker_N'}. Мутирует+персистит реестр под flock. Кластеры по air-time desc (детерминизм).
+
+    `out` — необязательный список, куда складывается РЕШЕНИЕ по каждому кластеру
+    (`{cluster, air, label, best, cos, action}`). По умолчанию `None` — путь исполнения прежний.
+    Косинус и ветка считаются здесь и так, но наружу не попадали, а именно они объясняют человеку,
+    почему голос узнан или заведён заново.
+
+    ⚠️⚠️ Центроид в `out` НЕ кладём никогда. Это биометрический признак живого человека; он
+    остаётся в реестре, который лежит под 0600 и никуда не ездит. Наружу — только решение.
+    """
     path = Path(registry_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix('.lock')
@@ -94,8 +103,15 @@ def assign(cents: dict, air: dict, episode: str, registry_path: str,
         for cl in sorted(air, key=lambda c: -air[c]):
             cent = np.asarray(cents[cl], dtype=np.float32)
             pid, cos = best_match(cent, sp)
+            def decided(action, label):
+                if out is not None:
+                    out.append({'cluster': cl, 'air': round(float(air[cl]), 1), 'label': label,
+                                'best': (f'Speaker_{pid}' if pid is not None else ''),
+                                'cos': round(float(cos), 3), 'action': action})
+
             if pid is not None and cos >= threshold:
                 mapping[cl] = f'Speaker_{pid}'
+                decided('matched', mapping[cl])
                 rec = sp[pid]
                 if len(rec['centroids']) < max_centroids:  # обогащаем голос новым центроидом (cap)
                     rec['centroids'].append(cent.tolist())
@@ -105,8 +121,10 @@ def assign(cents: dict, air: dict, episode: str, registry_path: str,
                 reg['next_id'] += 1
                 sp[nid] = {'centroids': [cent.tolist()], 'provenance': [_prov(episode, cl, air[cl])]}
                 mapping[cl] = f'Speaker_{nid}'
+                decided('new', mapping[cl])
             else:  # короткий неузнанный кластер при непустом реестре → fold к ближайшему, без записи
                 mapping[cl] = f'Speaker_{pid}'
+                decided('folded', mapping[cl])
                 folded.append((cl, air[cl], cos, pid))
                 # Молчать тут дороже всего: расшифровка выглядит удавшейся, а в ней один человек
                 # задаёт себе вопрос и сам отвечает. Замечают обычно при чтении, а не при прогоне.
