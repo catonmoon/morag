@@ -62,6 +62,40 @@ def health():
     return {'status': 'ok', 'downstream': audio_clients.health(), 'llm': CFG.llm_model}
 
 
+@app.post('/warmup')
+def warmup():
+    """Заставить бэкенды ЗАГРУЗИТЬ МОДЕЛИ заранее — секундой тишины.
+
+    ⚠️ Модели грузятся ПО ПЕРВОМУ ЗАПРОСУ, и первая стадия прогона молча стоит минуты: человек
+    видит «идёт работа» и ничего больше (замерено живьём: три минуты тишины на первой записи).
+    Греть надо пока человек заполняет поля, а не когда он уже ждёт результат.
+    ⚠️ Ошибки НЕ роняют ответ: прогрев — удобство, а не условие работы; каждый бэкенд отчитывается
+    сам за себя, и по этому ответу видно, кто из них не откликнулся.
+    """
+    import time
+    import wave as wave_mod
+
+    tmp = tempfile.mktemp(suffix='.wav')
+    with wave_mod.open(tmp, 'wb') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(b'\x00' * 2 * 16000 * 2)      # две секунды тишины
+    out = {}
+    for name, call in (('diarizer', lambda: audio_clients.diarize(tmp, 1, 2)),
+                       ('asr', lambda: audio_clients.asr(tmp)),
+                       ('campp', lambda: audio_clients.campp(
+                           tmp, [{'start': 0.0, 'end': 2.0, 'speaker': 'SPEAKER_00'}]))):
+        began = time.monotonic()
+        try:
+            call()
+            out[name] = round(time.monotonic() - began, 1)
+        except Exception as error:                     # noqa: BLE001 - прогрев не обязан удаться
+            out[name] = f'err: {str(error)[:80]}'
+    Path(tmp).unlink(missing_ok=True)
+    return {'status': 'ok', 'warm': out}
+
+
 @app.get('/v1/models')
 def models():
     return {'object': 'list', 'data': [{'id': 'asr-adaptor', 'object': 'model'}]}
