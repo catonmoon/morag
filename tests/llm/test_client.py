@@ -202,6 +202,39 @@ class TestModelWait:
             assert call_count == 2
             assert mock_sleep.call_count == 1
 
+    async def test_waits_on_a_null_body(self):
+        """⚠️ Тело `null` при 200 — вторая форма «модель перезагружается», и её не проверяли.
+
+        SDK разбирает `null` в None ЕЩЁ ДО модели, поэтому `response.choices` падало с
+        AttributeError вместо ожидания: замерено 24.09 на живой индексации — одно окно из
+        восьмидесяти выкинуло из индекса весь документ, а прогон вышел с нулевым кодом.
+        """
+        with patch('morag.llm.client.AsyncOpenAI') as cls:
+            instance = AsyncMock()
+            instance.chat = AsyncMock()
+            instance.chat.completions = AsyncMock()
+            cls.return_value = instance
+
+            call_count = 0
+
+            async def side_effect(**kwargs):
+                nonlocal call_count
+                call_count += 1
+                return None if call_count == 1 else make_completion('ok')
+
+            instance.chat.completions.create.side_effect = side_effect
+
+            with patch('morag.llm.client.asyncio.sleep', new_callable=AsyncMock) as mock_sleep:
+                client = LLMClient(
+                    base_url='http://localhost/v1', model='test',
+                    model_wait_seconds=10, model_wait_retries=3,
+                )
+                result = await client.complete([{'role': 'user', 'content': 'Hi'}])
+
+            assert result == 'ok'
+            assert call_count == 2
+            assert mock_sleep.call_count == 1
+
     async def test_model_wait_exhausted_raises(self):
         """Если все попытки ожидания исчерпаны — пробрасывает ошибку."""
         with patch('morag.llm.client.AsyncOpenAI') as cls:

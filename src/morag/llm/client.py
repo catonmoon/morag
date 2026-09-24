@@ -222,7 +222,12 @@ class LLMClient:
         429-обработка — встроенная в SDK (max_retries + Retry-After).
 
         Обнаруживает два сигнала недоступности модели:
-        1. response.choices is None — сервер вернул 200, но пустое тело (перезагрузка)
+        1. пустой ответ при 200 — сервер перезагружается. ⚠️ Форм у него ДВЕ: `choices is None`
+           и сам `response is None` (тело `null`: SDK разбирает его в None ещё до модели).
+           Вторая проверялась не везде, и шлюз под нагрузкой ронял этим весь документ —
+           `AttributeError: 'NoneType' object has no attribute 'choices'` вместо ожидания и
+           повтора (замерено 24.09 на индексации: одно окно из восьмидесяти, документ выпал
+           из индекса целиком, прогон отчитался «0 indexed, 191 skipped» и вышел с нулём).
         2. BadRequestError "Model not found" — модель ещё не загружена
 
         При обнаружении ждёт model_wait_seconds и повторяет до model_wait_retries раз.
@@ -232,7 +237,7 @@ class LLMClient:
         try:
             async with self._inflight_cap():
                 response = await self._client.chat.completions.create(**kwargs)
-            if response.choices is None:
+            if response is None or response.choices is None:
                 raise _ModelUnavailableError('Empty response from server (choices is None)')
             return response
         except Exception as exc:
@@ -259,7 +264,7 @@ class LLMClient:
             try:
                 async with self._inflight_cap():
                     response = await self._client.chat.completions.create(**kwargs)
-                if response.choices is None:
+                if response is None or response.choices is None:
                     raise _ModelUnavailableError('Empty response from server (choices is None)')
                 return response
             except Exception as exc:
