@@ -194,6 +194,32 @@ def _emit_draft(emit, segs) -> None:
                                 'text': ' '.join(win[k])[:600], 'bulk': True})
 
 
+TURN_WINDOW = 700     # сколько знаков реплики показываем: экран окна, а не вся речь
+
+
+def _window(text: str, fixes) -> tuple[str, bool]:
+    """Кусок реплики, в котором видны правки: (текст, целиком ли).
+
+    Показывать реплику ЦЕЛИКОМ нельзя — она бывает на четыре минуты речи, это стена букв и
+    килобайты в каждом событии. Но и резать с начала нельзя: замена окажется за краем, и человек
+    увидит текст, в котором ничего не меняется. Поэтому окно двигается к ПЕРВОЙ замене и режется
+    по границам слов.
+    """
+    if len(text) <= TURN_WINDOW:
+        return text, True
+    first = min((text.find(f['was']) for f in fixes or () if f.get('was') and f['was'] in text),
+                default=-1)
+    start = 0 if first < 0 else max(0, first - TURN_WINDOW // 3)
+    piece = text[start:start + TURN_WINDOW]
+    if start:                                   # не начинаем с середины слова
+        cut = piece.find(' ')
+        piece = piece[cut + 1:] if 0 <= cut < 40 else piece
+    tail = piece.rfind(' ')
+    if tail > TURN_WINDOW - 40:
+        piece = piece[:tail]
+    return piece, False
+
+
 async def _final_round(turns, dsum: str, gloss, llm, concurrency: int, step,
                        always=(), sweep_delay: float = 30.0, emit=None) -> tuple[int, int]:
     """Правка сущностей по репликам — параллельно, с повтором и добивочным проходом.
@@ -226,6 +252,12 @@ async def _final_round(turns, dsum: str, gloss, llm, concurrency: int, step,
                 t['final'] = await correct(raw, dsum, _around(turns, i, CFG.context_turns),
                                            relevant(raw, gloss), llm, always, recalled,
                                            corpus_desc=CFG.corpus_desc, fixes_out=fixes)
+                if emit and fixes:
+                    # ⚠️ Текст ПЕРЕД правками и в одном блоке с ними: события одной реплики
+                    # уходят подряд, без await между ними, поэтому в ленте они не перемешаются с
+                    # соседними репликами — а окно показывает правки прямо в тексте.
+                    piece, whole = _window(raw, fixes)
+                    emit('turn.text', turn=i, start=round(t['start'], 1), text=piece, whole=whole)
                 for f in (fixes or ()):
                     emit('turn.fix', turn=i, start=round(t['start'], 1), **f)
             ok = True
