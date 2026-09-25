@@ -142,3 +142,38 @@ def test_confirmed_cyrillic_canonical_reaches_the_prompt():
 def test_unconfirmed_cyrillic_still_filtered_out():
     """Освобождение — только за четыре звена, а не всем подряд."""
     assert 'Постгрес' not in build_prompt(['Постгрес'], _Counter(), hinted=hinted([]))
+
+
+def test_фамилию_в_подсказку_только_если_её_слышно():
+    """⚠️⚠️ Канал кладёт каноники whisper НА УХО, и проверить их дальше некому. Сходство строк
+    целиком пропускало пару «имя» → «имя фамилия»: первое слово совпадает, порог взят. Так в
+    подсказку попадала фамилия, которой в звуке нет, и гость из зала становился тёзкой человека
+    из корпуса. Опознаёт фамилия — её и проверяем.
+    """
+    from stages.hints import _surname_heard
+
+    assert _surname_heard("Кузницова", "Мария Кузнецова"), "фамилия слышна — подсказка законна"
+    assert _surname_heard("Мария Кузницова", "Мария Кузнецова")
+    assert not _surname_heard("Мария", "Мария Кузнецова"), "фамилии в звуке нет — не подсказываем"
+    assert not _surname_heard("Мария из Смоленска", "Мария Кузнецова")
+    assert _surname_heard("Сивила", "Сивилла"), "термин из одного слова правило не трогает"
+
+
+def test_подсказка_с_неслышной_фамилией_отсеивается():
+    """То же правило на границе канала: не в функции, а в разборе ответа модели."""
+    from stages.hints import _norm, _validate
+
+    import logging
+    log = logging.getLogger("test")
+    batch = "и тут Мария рассказала про свой проект"
+    allowed = {_norm("Мария Кузнецова"): "Мария Кузнецова"}
+    names = {_norm("Мария Кузнецова")}
+
+    found = [{"term": "Мария Кузнецова", "heard": "Мария"}]
+    assert _validate(found, batch, allowed, log, names) == []
+
+    batch2 = "и тут Кузницова рассказала про свой проект"
+    found2 = [{"term": "Мария Кузнецова", "heard": "Кузницова"}]
+    assert _validate(found2, batch2, allowed, log, names) == [
+        {"heard": "Кузницова", "canonicals": ["Мария Кузнецова"]}]
+

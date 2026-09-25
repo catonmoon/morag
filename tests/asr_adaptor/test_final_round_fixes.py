@@ -313,13 +313,39 @@ def test_split_garble_of_a_known_name_is_repaired(guard):
     assert out == 'выступал Иван Оселедец из Сколтеха' and applied == 1
 
 
-def test_name_known_to_the_corpus_is_allowed_even_if_unlike(guard):
-    """Если верное написание уже известно корпусу — правка законна, как бы ни звучал гарбл."""
+def test_known_name_is_no_longer_a_proof(guard):
+    """⚠️⚠️ Решение изменено (ADR-0029): «имя известно корпусу» больше НЕ разрешает замену.
+
+    Куплено живым случаем: гость из зала назвал своё имя и город, а конвейер дописал ему фамилию
+    человека, которого корпус уже знает. Обе защиты пропустили это по одной причине — известность имени
+    считалась доказательством, что человек назвал именно его. Известность говорит лишь о том, КАК
+    писать имя, если оно прозвучало; прозвучало ли — решает звук.
+    """
     text = 'спасибо, Мих, за доклад'
 
-    out, applied, _ = apply_fixes(text, [{'was': 'Мих', 'now': 'Кузнецова'}], canonicals=['Кузнецова'])
+    out, applied, dropped = apply_fixes(text, [{'was': 'Мих', 'now': 'Кузнецова'}],
+                                        canonicals=['Кузнецова'])
+
+    assert out == text and applied == 0 and dropped == 1
+
+
+def test_surname_heard_in_the_garble_is_repaired(guard):
+    """Обратная сторона того же правила: фамилия слышна — чиним написание, для того гейт и есть."""
+    text = 'спасибо, Кузницова, за доклад'
+
+    out, applied, _ = apply_fixes(text, [{'was': 'Кузницова', 'now': 'Кузнецова'}],
+                                  canonicals=['Кузнецова'])
 
     assert out == 'спасибо, Кузнецова, за доклад' and applied == 1
+
+
+def test_first_name_may_be_completed_when_the_surname_is_heard(guard):
+    """Имя перед слышной фамилией дописать можно: опознаёт человека фамилия, её и проверяем."""
+    text = 'и Кузницова рассказывала'
+
+    out, applied, _ = apply_fixes(text, [{'was': 'и Кузницова', 'now': 'Мария Кузнецова'}])
+
+    assert out == 'Мария Кузнецова рассказывала' and applied == 1
 
 
 def test_name_already_present_in_the_fragment_is_allowed(guard):

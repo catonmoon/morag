@@ -48,7 +48,7 @@ def _asr_timeout(wav_path: str) -> int:
         return _ASR_TIMEOUT_MIN
 
 
-def asr(wav_path: str, prompt: str = '') -> dict:
+def asr(wav_path: str, prompt: str = '', temperature: str = '') -> dict:
     """podlodka через transcribe_backend, всегда verbose_json → {'text', 'segments'}.
 
     Сегменты нужны ОБОИМ пассам: пасс-1 по ним нарезает чанки, пасс-2 — чтобы было видно, сколько
@@ -59,6 +59,12 @@ def asr(wav_path: str, prompt: str = '') -> dict:
     data = {'model': CFG.asr_model, 'language': 'ru', 'response_format': 'verbose_json'}
     if prompt:
         data['prompt'] = prompt
+    # ⚠️ Температура — ЛЕСЕНКА отступа («0,0.2,0.4»), а не число: по ней у бэкенда включаются его
+    # датчики галлюцинации. Пусто — бэкенд решает сам (у него дефолт «0», то есть детерминированно).
+    # ⚠️⚠️ Полную лесенку (до 1.0) не просить: замерено, что на невнятном звуке она не спасает, а
+    # сочиняет — 3 ответа из 18 пришли текстом на чужих языках там, где при 0 модель молчала.
+    if temperature:
+        data['temperature'] = temperature
     headers = {'Authorization': f'Bearer {CFG.asr_key}'} if CFG.asr_key else {}
     with open(wav_path, 'rb') as f:
         r = requests.post(CFG.asr_url, data=data, files={'file': f}, headers=headers,

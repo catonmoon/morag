@@ -82,6 +82,10 @@ class Config:
     coverage_warn_s: float = field(default_factory=lambda: float(_env('ASR_COVERAGE_WARN_S', '5')))
     recover_gaps: bool = field(default_factory=lambda: _flag('ASR_RECOVER_GAPS'))
     retry_empty: bool = field(default_factory=lambda: _flag('ASR_RETRY_EMPTY'))
+    # Переслушивание подозрительных кусков (stages/relisten.py). По умолчанию ВЫКЛЮЧЕНО: стадия
+    # меняет текст расшифровки, и включать её чужому корпусу молча нельзя. У кого включено —
+    # петля вместо речи чинится на месте, а не доезжает до читателя.
+    relisten: bool = field(default_factory=lambda: _flag('ASR_RELISTEN', '0'))
 
     # Параллельность финал-раунда: реплики независимы, а стадия занимала 8-12 мин из 15-18 на
     # выпуск. Потолок скромный — упирается не в нас, а в лимиты провайдера.

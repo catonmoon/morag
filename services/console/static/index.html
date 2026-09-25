@@ -2120,7 +2120,9 @@
         },
 
         async fetchJson(url, opts) {
-          const r = await fetch(url, opts);
+          // Пути '/api/…' резолвим относительно страницы, а не корня хоста: консоль
+          // может стоять за reverse-proxy под префиксом (…/morag_console/<deploy>/).
+          const r = await fetch(new URL(url.replace(/^\//, ''), document.baseURI), opts);
           if (!r.ok) {
             const text = await r.text();
             throw new Error(`${r.status}: ${text}`);

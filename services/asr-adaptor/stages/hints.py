@@ -109,8 +109,25 @@ def similar(heard: str, term: str) -> float:
     return difflib.SequenceMatcher(None, _key(heard), _key(term)).ratio()
 
 
-def _validate(found: list, batch: str, allowed: dict[str, str], log) -> list[dict]:
-    """Пять правил отсева. Без них канал небезопасен: подсказка пасса-2 ничем не проверяется дальше.
+def _surname_heard(heard: str, canon: str) -> bool:
+    """Слышна ли ФАМИЛИЯ, которую подсказка собирается положить whisper на ухо.
+
+    ⚠️⚠️ Сходство СТРОК ЦЕЛИКОМ здесь врёт: у пары «имя» → «имя фамилия» совпадает первое слово, и
+    этого хватает, чтобы перевалить порог (замерено: 0.70 при пороге 0.55). Так в подсказку
+    попадает фамилия, которой в звуке нет, — а дальше модель охотно «слышит» подсказанное, и гость
+    из зала становится полным тёзкой человека, которого корпус знает. Опознаёт человека фамилия,
+    её и проверяем: имя перед слышной фамилией дописать можно, наоборот — нельзя.
+    """
+    parts = [p for p in canon.split() if p]
+    if len(parts) < 2:
+        return True                      # одно слово — проверять нечего, работает общий порог
+    surname = parts[-1]
+    return max((similar(w, surname) for w in heard.split() if w), default=0.0) >= SIM_MIN
+
+
+def _validate(found: list, batch: str, allowed: dict[str, str], log,
+              names: set[str] | None = None) -> list[dict]:
+    """Шесть правил отсева. Без них канал небезопасен: подсказка пасса-2 ничем не проверяется дальше.
 
     1. `term` не из предложенного списка — модель регулярно переписывает в него написание ИЗ
        ЧЕРНОВИКА («Редис» → `Redis`), то есть отменяет ту самую правку, ради которой всё затеяно;
@@ -118,7 +135,8 @@ def _validate(found: list, batch: str, allowed: dict[str, str], log) -> list[dic
        гарблами»;
     3. `heard` == `term` — записано верно, подсказку не заслужило (бюджет 200 токенов);
     4. написания не похожи — ловит выдуманные привязки, в том числе фамилию к чужому месту;
-    5. гейт редкости `_keep_one` — тот же, что у свободного прохода, против переводов.
+    5. гейт редкости `_keep_one` — тот же, что у свободного прохода, против переводов;
+    6. у ФАМИЛИИ человека должно быть звуковое основание — см. `_surname_heard`.
     """
     out, drops = [], {}
     bnorm = _norm(batch)
@@ -137,6 +155,8 @@ def _validate(found: list, batch: str, allowed: dict[str, str], log) -> list[dic
             reason = 'не похоже'
         elif not _keep_one(heard, canon):
             reason = 'гейт редкости'
+        elif (names or set()) and _norm(term) in (names or set()) and not _surname_heard(heard, canon):
+            reason = 'фамилии не слышно'
         else:
             out.append({'heard': heard, 'canonicals': [canon]})
             continue
@@ -166,7 +186,8 @@ async def _one_batch(llm, batch: str, terms: list[str], names: list[str], about:
     except Exception as e:
         log.warning('hints: батч %s пропущен — %s: %s', tag, type(e).__name__, str(e)[:120])
         return []
-    return _validate((res or {}).get('found') or [], batch, allowed, log)
+    return _validate((res or {}).get('found') or [], batch, allowed, log,
+                     {_norm(n) for n in names if _norm(n)})
 
 
 async def build_hints(full_text: str, llm, *, terms=(), names=(), about: str = '') -> list[dict]:

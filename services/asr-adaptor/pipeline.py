@@ -20,6 +20,7 @@ from pathlib import Path
 import audio_clients
 from config import CFG
 from stages import align, coverage, registry
+from stages import relisten as relisten_stage
 from stages.chunking import MIN_S as chunking_min_s
 from stages.chunking import chunk as chunk_fn
 from stages.chunking import gap_chunks
@@ -317,12 +318,39 @@ async def _decode(wav: str, sl: str, c: dict, prompt: str, audio_sec: float) -> 
     Path(sl).unlink(missing_ok=True)
 
     c['raw'] = r['text']
+    # ⚠️ Метрики сегмента (`avg_logprob`, `no_speech_prob`, `compression_ratio`) НЕ выбрасываем:
+    # это единственное место, где модель говорит, насколько она уверена. Без них после прогона
+    # нельзя понять, где она сомневалась, — а именно там и надо переслушивать.
     c['segments'] = [{'start': round(off + float(s.get('start') or 0.0), 2),
                       'end': round(off + float(s.get('end') or 0.0), 2),
-                      'text': (s.get('text') or '').strip()} for s in r['segments']]
+                      'text': (s.get('text') or '').strip(),
+                      **{k: s[k] for k in ('avg_logprob', 'no_speech_prob', 'compression_ratio')
+                         if s.get(k) is not None}} for s in r['segments']]
     if not c['raw']:
         log.warning('pass2 returned nothing for %.1f-%.1fs (speaker %s)',
                     c['start'], c['end'], c.get('speaker'))
+
+
+async def _relisten_chunk(wav: str, sl: str, c: dict, audio_sec: float) -> dict:
+    """Переслушать кусок ЧИСТЫМ УХОМ: то же окно с запасом, но без подсказки.
+
+    Подсказка пасса-2 несёт канонические написания, и на невнятном звуке модель охотно «слышит»
+    подсказанное — поэтому здесь её нет вовсе: нам нужно знать, что в звуке НА САМОМ ДЕЛЕ.
+    Порча осталась и в чистом ухе — пробуем мягкий отступ по температуре (замерено: полный отступ
+    вреден, он сочиняет).
+    """
+    pad = relisten_stage.PAD_S
+    a, b = max(0.0, c['start'] - pad), min(audio_sec, c['end'] + pad)
+    await asyncio.to_thread(_slice, wav, a, b, sl)
+    async with _res('whisper', CFG.whisper_slots):
+        r = await asyncio.to_thread(audio_clients.asr, sl, '')
+    if relisten_stage.looped(r['text']):
+        async with _res('whisper', CFG.whisper_slots):
+            mild = await asyncio.to_thread(audio_clients.asr, sl, '', relisten_stage.MILD)
+        if not relisten_stage.looped(mild['text']):
+            r = mild
+    Path(sl).unlink(missing_ok=True)
+    return {'text': r['text'], 'segments': r['segments'], 'offset': a}
 
 
 async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = '',
@@ -340,11 +368,16 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         if progress:
             progress(m)
 
-    def emit(kind, **f):
+    def emit(kind, /, **f):
         """Событие стадии в ленту (см. jobs.py). Молча ничего не делает, если ленты не просили.
 
         ⚠️ Обёрнуто в try/except намеренно: показ работы — украшение, и оно не имеет права
         уронить расшифровку. Час работы GPU дороже любой картинки.
+
+        ⚠️⚠️ Первый аргумент — ПОЗИЦИОННЫЙ (`/`), и это не педантизм: у событий свои поля, и поле
+        с именем `kind` (форма находки, род кадра) сталкивалось бы с именем параметра. Прогон
+        падал на `got multiple values for argument 'kind'` уже после того, как вся тяжёлая работа
+        сделана. Тот же класс ошибки ловился и в клиенте загрузки — закрываем его формой подписи.
         """
         if not progress:
             return
@@ -464,8 +497,11 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             _ct = time.monotonic()
             try:
                 await _decode(wav, str(tmp / f'c{i}.wav'), c, prompt, audio_sec)
+                # ⚠️ Кусок отдаём ЦЕЛИКОМ (до 900 знаков — это заведомо больше, чем помещается
+                # в 28 секунд речи): из этих кусков окно собирает сплошной текст записи, по
+                # которому человек листает. Обрезка по 300 знаков рвала бы его на полуслове.
                 emit('chunk.done', i=i + 1, sec=round(time.monotonic() - _ct, 2),
-                     raw=(c.get('raw') or '')[:300], retried=bool(c.get('retried')),
+                     raw=(c.get('raw') or '')[:900], retried=bool(c.get('retried')),
                      n_seg=len(c.get('segments') or ()))
             except Exception as error:
                 # ОДИН плохой чанк не должен стоить всей записи. До этой обработки любое падение
@@ -490,6 +526,39 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             tm['n_broken_chunks'] = n_broken
             log.warning('pass2: %d чанк(ов) из %d не расшифрованы — запись собрана без них',
                         n_broken, len(chunks))
+
+        # --- переслушивание: место, где модель сорвалась, слушаем ещё раз чистым ухом ----------
+        relisten_log: list[dict] = []
+        if CFG.relisten:
+            stage('relisten')
+            _t = time.monotonic()
+            for i, c in enumerate(chunks):
+                kind = relisten_stage.suspect(c)
+                if not kind:
+                    continue
+                was = c.get('raw') or ''
+                try:
+                    got = await _relisten_chunk(wav, str(tmp / f'r{i}.wav'), c, audio_sec)
+                except Exception as error:      # noqa: BLE001 — стадия не имеет права ронять запись
+                    log.warning('переслушивание %.1f-%.1f с не вышло: %s: %s',
+                                c['start'], c['end'], type(error).__name__, error)
+                    continue
+                said = relisten_stage.verdict(was, got['text'])
+                relisten_stage.apply(c, got['text'], got['segments'], got['offset'], said)
+                relisten_log.append({'start': round(c['start'], 2), 'end': round(c['end'], 2),
+                                     'kind': kind, 'verdict': said,
+                                     'was': was[:300], 'now': got['text'][:300]})
+                emit('relisten.span', i=len(relisten_log), **{'from': round(c['start'], 2),
+                     'to': round(c['end'], 2)}, kind=kind, verdict=said,
+                     was=was[:200], now=got['text'][:200])
+            tm['relisten_s'] = round(time.monotonic() - _t, 1)
+            tm['n_relistened'] = len(relisten_log)
+            counts = {v: sum(1 for x in relisten_log if x['verdict'] == v)
+                      for v in ('речь', 'тишина', 'петля осталась', 'без изменений')}
+            stage_done('relisten', tm['relisten_s'], n=len(relisten_log), **counts)
+            if relisten_log:
+                log.info('переслушано мест: %d (%s)', len(relisten_log),
+                         ', '.join(f'{k}: {v}' for k, v in counts.items() if v))
 
         # группировка подряд идущих чанков одного кластера в реплики
         turns = []
@@ -613,7 +682,10 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
                 # год «почему на той машине вышло иначе» отвечается из самого файла (fingerprint.py).
                 'env': env,
                 # глоссарий и сводка — в артефакт: офлайн-долечивание реплик без пересчёта
-                'glossary': gloss, 'doc_summary': dsum}
+                'glossary': gloss, 'doc_summary': dsum,
+                # ⚠️ Журнал переслушивания — В АРТЕФАКТЕ, а не только в живой ленте: через месяц
+                # «почему тут дыра» и «что здесь стояло раньше» отвечаются из самого файла.
+                **({'relisten': relisten_log} if relisten_log else {})}
     finally:
         _release_turn(ticket)  # идемпотентно: упавший выпуск не вешает очередь реестра
         shutil.rmtree(tmp, ignore_errors=True)

@@ -57,6 +57,23 @@ def _check_auth(authorization: Optional[str]) -> None:
         raise HTTPException(status_code=401, detail='bad api key')
 
 
+def _temperatures(raw: str):
+    """«» → дефолт библиотеки (лесенка), «0» → скаляр, «0,0.2,0.4» → своя лесенка.
+
+    Возвращает None, когда параметр не задан: тогда в `transcribe` он не передаётся вовсе и
+    работает дефолт mlx-whisper. Мусор в поле — тоже None: показ температуры не повод ронять
+    расшифровку.
+    """
+    parts = [p.strip() for p in str(raw or '').split(',') if p.strip()]
+    try:
+        vals = [float(p) for p in parts]
+    except ValueError:
+        return None
+    if not vals:
+        return None
+    return vals[0] if len(vals) == 1 else tuple(vals)
+
+
 @app.get('/health')
 def health():
     return {'status': 'ok'}
@@ -74,7 +91,14 @@ async def transcribe(
     model: str = Form(DEFAULT_MODEL),
     language: str = Form('ru'),
     prompt: str = Form(''),                       # ← honor-им (initial_prompt)
-    temperature: float = Form(0.0),
+    # Температура принимает и ЛЕСЕНКУ: «0,0.2,0.4» — тогда у mlx-whisper включаются его штатные
+    # датчики галлюцинации (`compression_ratio_threshold`, `logprob_threshold`): не понравился
+    # ответ — передекодирует окно с температурой повыше.
+    # ⚠️⚠️ Дефолт остаётся «0», то есть прежнее детерминированное поведение. Замерено 25.09 на 18
+    # местах корпуса: полная лесенка (до 1.0) на невнятном звуке не спасает, а СОЧИНЯЕТ — три
+    # ответа из восемнадцати пришли текстом на чужих языках там, где при «0» модель честно
+    # возвращала пусто. Отступ хорош, когда есть куда отступать; на тишине его цена — выдумка.
+    temperature: str = Form('0'),
     response_format: str = Form('verbose_json'),
     authorization: Optional[str] = Header(None),
 ):
@@ -85,7 +109,10 @@ async def transcribe(
     tmp = tempfile.mktemp(suffix=suffix)
     Path(tmp).write_bytes(await file.read())
     try:
-        kw = dict(path_or_hf_repo=repo, language=language, temperature=temperature)
+        kw = dict(path_or_hf_repo=repo, language=language)
+        steps = _temperatures(temperature)
+        if steps is not None:
+            kw['temperature'] = steps
         if prompt:
             kw['initial_prompt'] = prompt
         r = mlx_whisper.transcribe(tmp, **kw)

@@ -23,7 +23,7 @@ async def _events(wav_path, **kw) -> list[dict]:
         if isinstance(m, str):
             return
         seq[0] += 1
-        m['i'] = seq[0]
+        m['seq'] = seq[0]
         seen.append(m)
 
     await pipeline.run_pipeline(str(wav_path), llm=None, episode='ep1', progress=progress, **kw)
@@ -38,7 +38,7 @@ async def test_the_stream_describes_the_whole_run(backend, wav):  # noqa: F811
     events = await _events(wav)
 
     assert events, 'лента не должна быть пустой'
-    assert [e['i'] for e in events] == list(range(1, len(events) + 1)), 'нумерация сплошная'
+    assert [e['seq'] for e in events] == list(range(1, len(events) + 1)), 'нумерация сплошная'
     assert all(isinstance(e.get('at'), (int, float)) for e in events), 'у события есть время'
 
     meta = _of(events, 'job.meta')
@@ -66,7 +66,8 @@ async def test_every_chunk_reports_itself_with_the_context_given_to_whisper(back
     started, done = _of(events, 'chunk.start'), _of(events, 'chunk.done')
 
     assert started and len(started) == len(done), 'на каждый начатый кусок есть законченный'
-    assert [e['i_'] if 'i_' in e else e['i'] for e in started] != [], 'куски пронумерованы'
+    assert [e['i'] for e in started] == list(range(1, len(started) + 1)), \
+        'номер КУСКА не затёрт номером события'
     first = started[0]
     assert first['n'] == len(started) and first['from'] < first['to']
     # ⚠️ Ради этого поля событие и стоит ровно здесь: дальше цикл затирает промпт, и показать

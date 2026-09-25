@@ -52,7 +52,9 @@ def _progress(job: dict):
         if ring is None:          # ленты не просили — ни аллокаций, ни работы
             return
         job['seq'] += 1
-        m['i'] = job['seq']
+        # ⚠️ Поле конверта — `seq`, а не `i`: `i` у события уже занято СМЫСЛОМ (номер куска), и
+        # порядковый номер молча затирал его. Ловилось тестом ленты: курсор шёл 1, 1, 1.
+        m['seq'] = job['seq']
         if m.get('say'):          # событие может заодно обновить человеческую строку
             job['progress'] = m['say']
         ring.append(m)
@@ -98,6 +100,6 @@ def since(job: dict, cursor: int) -> tuple[list[dict], int, int]:
     ring = job.get('events')
     if ring is None:
         return [], cursor, 0
-    items = [e for e in ring if e['i'] > cursor]
-    dropped = ring[0]['i'] - cursor - 1 if ring and ring[0]['i'] > cursor + 1 else 0
-    return items, (items[-1]['i'] if items else cursor), dropped
+    items = [e for e in ring if e['seq'] > cursor]
+    dropped = ring[0]['seq'] - cursor - 1 if ring and ring[0]['seq'] > cursor + 1 else 0
+    return items, (items[-1]['seq'] if items else cursor), dropped

@@ -47,12 +47,12 @@ async def test_the_no_op_callback_of_sync_mode_still_works():
 async def test_events_are_numbered_and_served_by_cursor():
     async def factory(progress):
         for i in range(5):
-            progress({'t': 'chunk.done', 'i_chunk': i, 'say': f'pass2 {i}/5'})
+            progress({'t': 'chunk.done', 'i': i, 'say': f'pass2 {i}/5'})
         return {}
 
     _, job = await _run(factory, events=True)
     items, cursor, dropped = jobs.since(job, 0)
-    assert [e['i'] for e in items] == [1, 2, 3, 4, 5], 'нумерация сплошная и монотонная'
+    assert [e['seq'] for e in items] == [1, 2, 3, 4, 5], 'нумерация сплошная и монотонная'
     assert cursor == 5 and dropped == 0
     assert jobs.since(job, 3)[0] == items[3:], 'курсор отдаёт только то, чего клиент не видел'
     assert job['progress'] == 'pass2 4/5', '`say` заодно обновляет человеческую строку'
@@ -66,12 +66,12 @@ async def test_a_lagging_client_is_told_how_much_it_missed(monkeypatch):
 
     async def factory(progress):
         for i in range(10):
-            progress({'t': 'chunk.done', 'i_chunk': i})
+            progress({'t': 'chunk.done', 'i': i})
         return {}
 
     _, job = await _run(factory, events=True)
     items, cursor, dropped = jobs.since(job, 0)
-    assert [e['i'] for e in items] == [7, 8, 9, 10]
+    assert [e['seq'] for e in items] == [7, 8, 9, 10]
     assert dropped == 6 and cursor == 10
 
 
@@ -81,11 +81,11 @@ async def test_the_tail_survives_the_end_of_the_job(monkeypatch):
 
     async def factory(progress):
         for i in range(20):
-            progress({'t': 'chunk.done', 'i_chunk': i})
+            progress({'t': 'chunk.done', 'i': i})
         return {}
 
     _, job = await _run(factory, events=True)
-    assert [e['i'] for e in jobs.since(job, 0)[0]] == [18, 19, 20]
+    assert [e['seq'] for e in jobs.since(job, 0)[0]] == [18, 19, 20]
 
 
 async def test_a_broken_event_never_reaches_the_ring_as_a_string():

@@ -209,7 +209,7 @@ def _is_translation(was: str, now: str, canon: set[str]) -> bool:
     return is_common_ru(was) and is_plain_english(now)
 
 
-def _invents_name(was: str, now: str, known: set) -> bool:
+def _invents_name(was: str, now: str, spoken: set) -> bool:
     """Замена подставляет РУССКОЕ ИМЯ вместо непохожего обрывка — это выдумка, а не починка.
 
     Куплено живым прогоном: «меня зовут Мих» стало «меня зовут Иван Оселедец», а на повторе того же
@@ -217,8 +217,8 @@ def _invents_name(was: str, now: str, known: set) -> bool:
     вовсе. Для корпуса внутренних встреч это не косметика: под выдуманной фамилией живой человек.
 
     Отличаем починку от подстановки по сходству: «Василедец» → «Оселедец» похоже (0.8) и проходит,
-    «Мих» → «Иван Оселедец» не похоже (0.1) и отбрасывается. Имя, уже известное корпусу (каноники,
-    глоссарий, сам фрагмент), не трогаем — там написание проверено.
+    «Мих» → «Иван Оселедец» не похоже (0.1) и отбрасывается. Имя, УЖЕ ЗВУЧАВШЕЕ в этом куске, не
+    трогаем: оно пришло из звука.
 
     ⚠️ Только для КИРИЛЛИЧЕСКОГО гарбла. Замеры первой же партии: латиница против кириллицы даёт
     сходство 0 всегда, и проверка рубила законные починки транслита — «Aretri dogovarivus» →
@@ -227,11 +227,26 @@ def _invents_name(was: str, now: str, known: set) -> bool:
     """
     if not _CYR.search(was):
         return False
-    seen = {_key(w) for w in re.findall(r'\w+', was)} | known
-    fresh = [w for w in now.split() if _RU_NAME.match(w) and _key(w) not in seen]
+    heard = re.findall(r'\w+', was)
+    # `spoken` — то, что ЗВУЧАЛО в этом куске (весь фрагмент, не только заменяемое место): имя,
+    # произнесённое рядом, пришло из звука, а не из головы модели, и его чинить законно.
+    # ⚠️ Каноники сюда больше НЕ входят: «известно корпусу» — не доказательство того, что человек
+    # назвал именно это имя. Ровно на этом конвейер подменил гостя однофамильцем из корпуса.
+    fresh = [w for w in now.split() if _RU_NAME.match(w) and _key(w) not in spoken]
     if not fresh:
         return False
-    return difflib.SequenceMatcher(a=_key(was), b=_key(now)).ratio() < NAME_SIMILARITY
+    # ⚠️⚠️ ФАМИЛИЯ обязана быть слышна, и «имя известно корпусу» этого не заменяет. Замерено на
+    # живом случае: гость из зала представился именем и городом, а замена сделала его полным
+    # тёзкой человека, которого корпус уже знает по фамилии. Прежняя проверка пропускала это дважды: фамилия была в канониках (то
+    # есть «известна» — а туда её положил тот же канал), и сходство СТРОК ЦЕЛИКОМ выходило 0.53
+    # за счёт совпавшего имени. Сходство фамилии со всем, что слышно в куске, — 0.14.
+    # Имя перед фамилией дописать можно («и Селедец» → «Иван Оселедец», фамилия слышна на 0.93):
+    # опознаёт человека фамилия, её и проверяем.
+    surname = fresh[-1]
+    support = max((difflib.SequenceMatcher(a=_key(surname), b=_key(w)).ratio() for w in heard),
+                  default=0.0)
+    whole = difflib.SequenceMatcher(a=_key(was), b=_key(now)).ratio()
+    return whole < NAME_SIMILARITY or support < NAME_SIMILARITY
 
 
 def apply_fixes(text: str, fixes, canonicals=(), always=(), log_to=None) -> tuple[str, int, int]:
@@ -300,7 +315,7 @@ def apply_fixes(text: str, fixes, canonicals=(), always=(), log_to=None) -> tupl
             verdict(was, now, False, 'translation')
             skipped += 1
             continue
-        if GUARD_NAMES and _invents_name(was, now, canon | {_key(w) for w in re.findall(r'\w+', text)}):
+        if GUARD_NAMES and _invents_name(was, now, {_key(w) for w in re.findall(r'\w+', text)}):
             log.warning('final-round: замена отброшена (выдуманное имя): %r → %r', was, now)
             verdict(was, now, False, 'invented_name')
             skipped += 1
