@@ -145,7 +145,8 @@ def _map(a_keys: list[str], b_tokens: list[str], b_keys: list[str]) -> dict[int,
 
 
 def arbitrate(raw: str, second: str, clean: str | None, canon: set[str], *, lang: str = 'ru',
-              ratio: float = RATIO, common: float = COMMON) -> tuple[str, list[dict]]:
+              ratio: float = RATIO, common: float = COMMON,
+              vote_words_only: bool = False) -> tuple[str, list[dict]]:
     """Разобрать расхождения куска со вторым ухом. Возвращает (новый текст, решения).
 
     Решение: `{i, was, now, by}`; `by` ∈ частота · канон · голосование, а отклонённое большинство
@@ -179,6 +180,13 @@ def arbitrate(raw: str, second: str, clean: str | None, canon: set[str], *, lang
             elif in_now and not in_was and similar(kw, kn) >= SIM and not inflection(kw, kn):
                 by = 'канон'
             elif i in clean_at and sound(key(clean_at[i])) == sound(kn):
+                # ⚠️ Страж «голосовать только за слова языка» ИЗМЕРЕН и по умолчанию выключен: на
+                # живой записи он снял промах «обе модели одинаково ослышались на редком имени»
+                # (неверно → неверно, WER не менялся), а на эталоне отнял верный голос за сленг,
+                # которого частотник не знает («запушил»): 4.3 → 4.4 %. Опасный случай — вера
+                # большинству ПРОТИВ верного термина — закрыт вето канона, а не этим стражем.
+                if vote_words_only and not (freq(kn, lang) or 0) > 0:
+                    continue                          # имя или не-слово: большинству не верим
                 if in_was:
                     decisions.append({'i': i, 'was': was, 'now': now, 'by': 'вето', 'taken': False})
                     continue

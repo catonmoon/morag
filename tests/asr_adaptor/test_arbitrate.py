@@ -113,3 +113,14 @@ def test_canon_takes_spellings_for_verification_only():
     for word in ('Postgres', 'Кузнецова', 'Мария', 'Kafka', 'Разметки', 'Redis'):
         assert A.sound(word) in canon
     assert A.canon_from(None, None) == set()
+
+
+def test_vote_words_only_guard_is_optional_and_blocks_non_words(monkeypatch):
+    """Страж измерен и по умолчанию выключен; включённый — не верит большинству за не-слово."""
+    # обе формы — обычные слова, иначе правило частоты забирает решение раньше голосования
+    monkeypatch.setattr(A, 'freq', lambda w, lang: 1e-5 if w.startswith('постави') else 0.0)
+    both = 'он поставила задачу'
+    assert A.arbitrate('он поставил задачу', both, both, set())[1][0]['by'] == 'голосование'
+    garble = 'он ннн задачу'
+    assert A.arbitrate('он инн задачу', garble, garble, set())[1]              # без стража берёт
+    assert A.arbitrate('он инн задачу', garble, garble, set(), vote_words_only=True)[1] == []
