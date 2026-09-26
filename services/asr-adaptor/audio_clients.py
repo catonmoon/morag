@@ -48,7 +48,7 @@ def _asr_timeout(wav_path: str) -> int:
         return _ASR_TIMEOUT_MIN
 
 
-def asr(wav_path: str, prompt: str = '', temperature: str = '') -> dict:
+def asr(wav_path: str, prompt: str = '', temperature: str = '', words: bool = False) -> dict:
     """podlodka через transcribe_backend, всегда verbose_json → {'text', 'segments'}.
 
     Сегменты нужны ОБОИМ пассам: пасс-1 по ним нарезает чанки, пасс-2 — чтобы было видно, сколько
@@ -65,6 +65,10 @@ def asr(wav_path: str, prompt: str = '', temperature: str = '') -> dict:
     # сочиняет — 3 ответа из 18 пришли текстом на чужих языках там, где при 0 модель молчала.
     if temperature:
         data['temperature'] = temperature
+    # Времена слов от декодера (`segments[].words`): приблизительные, но доступные сразу — см.
+    # бэкенд. По умолчанию не просим: ответ и поведение прежние байт в байт.
+    if words:
+        data['word_timestamps'] = '1'
     headers = {'Authorization': f'Bearer {CFG.asr_key}'} if CFG.asr_key else {}
     with open(wav_path, 'rb') as f:
         r = requests.post(CFG.asr_url, data=data, files={'file': f}, headers=headers,

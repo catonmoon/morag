@@ -305,14 +305,17 @@ async def _decode(wav: str, sl: str, c: dict, prompt: str, audio_sec: float) -> 
     соседнего слова, и это дешевле, чем потерять кусок целиком.
     """
     await asyncio.to_thread(_slice, wav, c['start'], c['end'], sl)
+    # ⚠️ Флаг передаётся ТОЛЬКО когда включён: вызов клиента без него — прежний, и заглушки в
+    # тестах с фиксированной сигнатурой не ломаются.
+    ask = {'words': True} if CFG.word_times else {}
     async with _res('whisper', CFG.whisper_slots):
-        r = await asyncio.to_thread(audio_clients.asr, sl, prompt)
+        r = await asyncio.to_thread(lambda: audio_clients.asr(sl, prompt, **ask))
     off = c['start']
     if not r['text'] and CFG.retry_empty:
         a, b = max(0.0, c['start'] - PAD_S), min(audio_sec, c['end'] + PAD_S)
         await asyncio.to_thread(_slice, wav, a, b, sl)
         async with _res('whisper', CFG.whisper_slots):
-            again = await asyncio.to_thread(audio_clients.asr, sl, '')
+            again = await asyncio.to_thread(lambda: audio_clients.asr(sl, '', **ask))
         if again['text']:
             r, off, c['retried'] = again, a, True
     Path(sl).unlink(missing_ok=True)
@@ -325,7 +328,18 @@ async def _decode(wav: str, sl: str, c: dict, prompt: str, audio_sec: float) -> 
                       'end': round(off + float(s.get('end') or 0.0), 2),
                       'text': (s.get('text') or '').strip(),
                       **{k: s[k] for k in ('avg_logprob', 'no_speech_prob', 'compression_ratio')
-                         if s.get(k) is not None}} for s in r['segments']]
+                         if s.get(k) is not None},
+                      # Времена слов от декодера — в АБСОЛЮТНОМ времени, тем же сдвигом, что и
+                      # сегмент; иначе слово из куска на 40-й минуте лежало бы «на 3-й секунде».
+                      # ⚠️ Это НЕ `turns[].words` выравнивания (MMS_FA): те точные и упорядоченные,
+                      # эти — приблизительные и доступны сразу. Читатели времён реплик сюда не смотрят.
+                      **({'words': [{'word': str(w.get('word') or '').strip(),
+                                     'start': round(off + float(w.get('start') or 0.0), 2),
+                                     'end': round(off + float(w.get('end') or 0.0), 2),
+                                     **({'probability': round(float(w['probability']), 3)}
+                                        if w.get('probability') is not None else {})}
+                                    for w in s['words']]} if s.get('words') else {})}
+                     for s in r['segments']]
     if not c['raw']:
         log.warning('pass2 returned nothing for %.1f-%.1fs (speaker %s)',
                     c['start'], c['end'], c.get('speaker'))

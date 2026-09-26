@@ -43,6 +43,10 @@ class Config:
     asr_url: str = field(default_factory=lambda: _env('ASR_BACKEND_URL', 'http://127.0.0.1:8123/v1/audio/transcriptions'))
     asr_key: str = field(default_factory=lambda: _env('ASR_BACKEND_KEY'))
     asr_model: str = field(default_factory=lambda: _env('ASR_MODEL', 'whisper-podlodka-turbo'))
+    # Времена слов ОТ ДЕКОДЕРА в сегментах пасса-2 (`segments[].words`, приблизительные, с
+    # `probability`). Выключено — вызов бэкенда и артефакт байт в байт прежние. Нужно разбору
+    # внутри прогона: без времён слов он не видит ни растянутых слов, ни дыр (ADR-0030, план п. 3).
+    word_times: bool = field(default_factory=lambda: _flag('ASR_WORD_TIMES', '0'))
     campp_url: str = field(default_factory=lambda: _env('ASR_CAMPP_URL', 'http://127.0.0.1:8126/embed-centroids'))
     campp_key: str = field(default_factory=lambda: _env('ASR_CAMPP_KEY'))
 

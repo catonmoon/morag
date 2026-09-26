@@ -177,3 +177,47 @@ async def test_alignment_failure_does_not_break_the_transcript(backend, wav):
 
     assert r['words'] is None
     assert r['markdown'] and r['turns']
+
+
+# --- времена слов от декодера (ASR_WORD_TIMES) ---------------------------------------------------
+
+async def test_word_times_off_by_default_keeps_the_call_and_artifact_unchanged(backend, wav):
+    """Флаг выключен — клиент зовётся ПРЕЖНЕЙ сигнатурой (заглушка её и знает: `asr(path, prompt)`,
+    лишний аргумент уронил бы её TypeError), а в сегментах нет поля `words`."""
+    assert pipeline.CFG.word_times is False
+    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+
+    assert backend.calls, 'пасс-2 не звал бэкенд'
+    assert all('words' not in s for t in r['turns'] for s in t['segments'])
+
+
+async def test_word_times_are_shifted_to_absolute_time(backend, wav, monkeypatch):
+    """Флаг включён — бэкенд просят `words=True`, а времена слов сдвигаются на начало куска, как
+    и сегменты: иначе слово из куска на 50-й секунде лежало бы «на 0.3-й»."""
+    seen: list[tuple[bool, bool]] = []                        # (это пасс-1?, просили ли слова)
+    plain = backend.asr
+
+    def with_words(path, prompt='', words=False):
+        seen.append((path.endswith('in.wav'), words))
+        r = plain(path, prompt)
+        for s in r['segments']:
+            if s['text']:
+                s['words'] = [{'word': ' ' + s['text'], 'start': 0.3, 'end': 0.9, 'probability': 0.71234}]
+        return r
+
+    monkeypatch.setattr(pipeline.audio_clients, 'asr', with_words)
+    monkeypatch.setattr(pipeline.CFG, 'word_times', True)
+    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+
+    # ⚠️ Слова просят у КУСКОВ пасса-2, не у пасса-1 по всему файлу: тот лишь нарезает чанки.
+    chunk_calls = [w for first, w in seen if not first]
+    assert chunk_calls and all(chunk_calls), 'у кусков пасса-2 не просили времена слов'
+    assert not any(w for first, w in seen if first), 'пасс-1 не должен просить времена слов'
+    segs = [s for t in r['turns'] for s in t['segments'] if s['text']]
+    assert segs and all(s.get('words') for s in segs)
+    for s in segs:
+        w = s['words'][0]
+        assert w['word'] == s['text']                          # пробел декодера срезан
+        assert w['start'] == round(s['start'] + 0.3, 2)        # абсолютное время, тот же сдвиг
+        assert w['end'] == round(s['start'] + 0.9, 2)
+        assert w['probability'] == 0.712                       # уверенность сохранена, округлена

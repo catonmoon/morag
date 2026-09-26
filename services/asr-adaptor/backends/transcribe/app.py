@@ -114,6 +114,13 @@ async def transcribe(
     # возвращала пусто. Отступ хорош, когда есть куда отступать; на тишине его цена — выдумка.
     temperature: str = Form('0'),
     response_format: str = Form('verbose_json'),
+    # Времена слов ОТ ДЕКОДЕРА, сразу в ответе: `segments[].words = [{word, start, end,
+    # probability}]`. ⚠️ Приблизительные — это не выравнивание (MMS_FA в конце конвейера остаётся:
+    # караоке и цитатам нужны точные и упорядоченные времена). Зато они есть В МОМЕНТ прослушивания
+    # куска, а не в самом конце прогона: без них разбор внутри прогона не видит ни растянутых слов,
+    # ни дыр, ни того, какое слово модель произнесла неуверенно (`probability`). Пусто — прежний
+    # ответ байт в байт.
+    word_timestamps: str = Form(''),
     authorization: Optional[str] = Header(None),
 ):
     _check_auth(authorization)
@@ -129,6 +136,8 @@ async def transcribe(
             kw['temperature'] = steps
         if prompt:
             kw['initial_prompt'] = prompt
+        if word_timestamps.strip().lower() in ('1', 'true', 'yes', 'on'):
+            kw['word_timestamps'] = True
         r = mlx_whisper.transcribe(tmp, **kw)
     finally:
         Path(tmp).unlink(missing_ok=True)
