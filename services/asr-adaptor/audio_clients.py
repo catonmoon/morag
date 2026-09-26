@@ -48,7 +48,8 @@ def _asr_timeout(wav_path: str) -> int:
         return _ASR_TIMEOUT_MIN
 
 
-def asr(wav_path: str, prompt: str = '', temperature: str = '', words: bool = False) -> dict:
+def asr(wav_path: str, prompt: str = '', temperature: str = '', words: bool = False,
+        model: str = '') -> dict:
     """podlodka через transcribe_backend, всегда verbose_json → {'text', 'segments'}.
 
     Сегменты нужны ОБОИМ пассам: пасс-1 по ним нарезает чанки, пасс-2 — чтобы было видно, сколько
@@ -56,7 +57,8 @@ def asr(wav_path: str, prompt: str = '', temperature: str = '', words: bool = Fa
     тайм-коды соседних реплик не рвутся (см. stages/coverage.py). Расшифровка та же — verbose_json
     лишь подробнее отвечает, поэтому отдельной ветки «только текст» больше нет.
     """
-    data = {'model': CFG.asr_model, 'language': 'ru', 'response_format': 'verbose_json'}
+    # `model` — ДРУГАЯ модель прослушивания (второе ухо, ADR-0030); пусто — модель профиля.
+    data = {'model': model or CFG.asr_model, 'language': 'ru', 'response_format': 'verbose_json'}
     if prompt:
         data['prompt'] = prompt
     # ⚠️ Температура — ЛЕСЕНКА отступа («0,0.2,0.4»), а не число: по ней у бэкенда включаются его

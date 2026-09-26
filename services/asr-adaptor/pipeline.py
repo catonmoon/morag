@@ -21,6 +21,7 @@ import audio_clients
 from config import CFG
 from stages import align, coverage, registry
 from stages import relisten as relisten_stage
+from stages import arbitrate as arbitrate_stage
 from stages.chunking import MIN_S as chunking_min_s
 from stages.chunking import chunk as chunk_fn
 from stages.chunking import gap_chunks
@@ -574,6 +575,47 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
                 log.info('переслушано мест: %d (%s)', len(relisten_log),
                          ', '.join(f'{k}: {v}' for k, v in counts.items() if v))
 
+        # --- арбитраж: второе ухо другой модели, голосование под вето канона (ADR-0030) ---------
+        arbitrate_log: list[dict] = []
+        if CFG.second_model:
+            stage('arbitrate')
+            _t = time.monotonic()
+            canon = arbitrate_stage.canon_from(hints, gloss)
+
+            async def _second(i: int, c: dict) -> None:
+                if not c.get('raw'):
+                    return
+                sl = str(tmp / f'a{i}.wav')
+                try:
+                    await asyncio.to_thread(_slice, wav, c['start'], c['end'], sl)
+                    async with _res('whisper', CFG.whisper_slots):
+                        second = await asyncio.to_thread(
+                            lambda: audio_clients.asr(sl, '', model=CFG.second_model))
+                        clean = (await asyncio.to_thread(lambda: audio_clients.asr(sl, ''))
+                                 if CFG.clean_ear else None)
+                except Exception as error:      # noqa: BLE001 — стадия не имеет права ронять запись
+                    log.warning('арбитраж %.1f-%.1f с не вышел: %s: %s',
+                                c['start'], c['end'], type(error).__name__, error)
+                    return
+                finally:
+                    Path(sl).unlink(missing_ok=True)
+                for d in arbitrate_stage.apply(c, second['text'], (clean or {}).get('text'), canon,
+                                               ratio=CFG.arbitrate_ratio):
+                    row = {'start': round(c['start'], 2), 'end': round(c['end'], 2), **d}
+                    arbitrate_log.append(row)
+                    emit('arbitrate.swap', **{'from': row['start'], 'to': row['end']},
+                         was=d['was'], now=d['now'], by=d['by'], taken=d.get('taken', False))
+
+            await asyncio.gather(*(_second(i, c) for i, c in enumerate(chunks)))
+            arbitrate_log.sort(key=lambda r: (r['start'], r['i']))
+            tm['arbitrate_s'] = round(time.monotonic() - _t, 1)
+            counts = {k: sum(1 for x in arbitrate_log if x['by'] == k)
+                      for k in ('частота', 'канон', 'голосование', 'вето')}
+            stage_done('arbitrate', tm['arbitrate_s'], n=len(arbitrate_log), **counts)
+            if arbitrate_log:
+                log.info('арбитраж: %d решений (%s)', len(arbitrate_log),
+                         ', '.join(f'{k}: {v}' for k, v in counts.items() if v))
+
         # группировка подряд идущих чанков одного кластера в реплики
         turns = []
         for c in chunks:
@@ -699,7 +741,8 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
                 'glossary': gloss, 'doc_summary': dsum,
                 # ⚠️ Журнал переслушивания — В АРТЕФАКТЕ, а не только в живой ленте: через месяц
                 # «почему тут дыра» и «что здесь стояло раньше» отвечаются из самого файла.
-                **({'relisten': relisten_log} if relisten_log else {})}
+                **({'relisten': relisten_log} if relisten_log else {}),
+                **({'arbitration': arbitrate_log} if arbitrate_log else {})}
     finally:
         _release_turn(ticket)  # идемпотентно: упавший выпуск не вешает очередь реестра
         shutil.rmtree(tmp, ignore_errors=True)
