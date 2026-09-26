@@ -100,6 +100,9 @@ async def test_stage_asks_the_second_model_and_journals_the_swap(backend, wav, m
 
     assert 'other' in calls and '' in calls                    # вторая модель спрошена, первая — тоже
     assert r['arbitration'] and all(d['by'] == 'частота' and d['taken'] for d in r['arbitration'])
+    # …и журнал ДОЕЗЖАЕТ до артефакта: x_enriched собирается явным перечнем полей
+    from app import _enriched
+    assert _enriched(r)['x_enriched']['arbitration'] == r['arbitration']
     assert all('регресс' in t['raw'] and 'прегресс' not in t['raw'] for t in r['turns'] if t['raw'])
 
 
