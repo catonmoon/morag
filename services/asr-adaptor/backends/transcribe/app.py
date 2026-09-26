@@ -28,10 +28,24 @@ from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile  # no
 # Каталог с MLX-весами: env `TRANSCRIBE_MODELS_DIR`, иначе каталог моделей стека.
 MODELS_DIR = Path(os.environ.get('TRANSCRIBE_MODELS_DIR')
                   or Path(os.environ.get('ASR_STACK_HOME') or (Path.home() / 'asr-stack')) / 'models')
-MODELS = {
-    'whisper-podlodka-turbo': str(MODELS_DIR / 'whisper-podlodka-turbo'),
-    'whisper-large-v3-turbo': str(MODELS_DIR / 'whisper-large-v3-turbo'),
-}
+# Модели ищем В КАТАЛОГЕ, а не перечисляем в коде: второе мнение другой моделью — это параметр
+# запроса, и добавление модели не должно требовать правки движка. Каталог с весами (есть
+# `weights.safetensors`) становится доступным именем сразу после скачивания.
+# ⚠️ Имена из каталога, поэтому доменного тут не появится: это просто папки на диске.
+def _discover() -> dict:
+    found = {}
+    if MODELS_DIR.is_dir():
+        for d in sorted(MODELS_DIR.iterdir()):
+            if d.is_dir() and (d / 'weights.safetensors').is_file():
+                found[d.name] = str(d)
+    # Дефолты остаются объявленными, даже если веса ещё не скачаны: так у клиента честная
+    # ошибка «модели нет на диске», а не «такой модели не бывает».
+    for name in ('whisper-podlodka-turbo', 'whisper-large-v3-turbo'):
+        found.setdefault(name, str(MODELS_DIR / name))
+    return found
+
+
+MODELS = _discover()
 DEFAULT_MODEL = 'whisper-podlodka-turbo'
 API_KEY = os.environ.get('TRANSCRIBE_API_KEY')  # опц. Bearer-защита
 
