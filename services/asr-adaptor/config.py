@@ -95,6 +95,9 @@ class Config:
     # байт) и, если `ASR_CLEAN_EAR`, той же моделью без подсказки — третий голос для голосования.
     # Замерено: другая модель — 4.8 %, с голосованием — 4.4 % против 5.1 % без стадии; берётся
     # модель ДРУГОЙ ШКОЛЫ, не более крупная той же — та ошибается в тех же местах.
+    # ⚠️ У второго уха НЕТ подсказки и температуры — намеренно, по замеру (ADR-0030, 2а): подсказка
+    # на переслушивании у первой модели даёт ± 0, у второй — WER × 6; лесенка тождественна нулю.
+    # Ручки `ASR_SECOND_PROMPT` / `ASR_SECOND_TEMPERATURE` не заводить без нового замера.
     second_model: str = field(default_factory=lambda: _env('ASR_SECOND_MODEL', ''))
     clean_ear: bool = field(default_factory=lambda: _flag('ASR_CLEAN_EAR', '0'))
     arbitrate_ratio: float = field(default_factory=lambda: float(_env('ASR_ARBITRATE_RATIO', '100')))
