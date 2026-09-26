@@ -1,0 +1,14 @@
+#!/bin/sh
+# Сторож для СООБЩЕНИЯ коммита: это такой же публичный текст, как код, и после push его не
+# переписать. Тот же сосед, тот же список, только вход — файл сообщения ($1). См. pre-commit.
+set -e
+here=$(cd "$(dirname "$0")/../.." && pwd)
+for guard in "$here"/../*/tools/leak_check.py; do
+  [ -f "$guard" ] || continue
+  repo=$(cd "$(dirname "$guard")/.." && pwd)
+  [ "$repo" = "$here" ] && continue
+  if ! python3 "$guard" --message "$1"; then
+    echo "commit-msg: сторож нашёл данные корпуса в сообщении — коммит отменён" >&2
+    exit 1
+  fi
+done
