@@ -101,3 +101,12 @@ async def test_stage_asks_the_second_model_and_journals_the_swap(backend, wav, m
     assert 'other' in calls and '' in calls                    # вторая модель спрошена, первая — тоже
     assert r['arbitration'] and all(d['by'] == 'частота' and d['taken'] for d in r['arbitration'])
     assert all('регресс' in t['raw'] and 'прегресс' not in t['raw'] for t in r['turns'] if t['raw'])
+
+
+def test_canon_takes_spellings_for_verification_only():
+    canon = A.canon_from({'terms': ['Postgres'], 'names': ['Мария Кузнецова'],
+                          'spellings': ['Kafka', 'Отдел Разметки']},
+                         [{'canonicals': ['Redis']}])
+    for word in ('Postgres', 'Кузнецова', 'Мария', 'Kafka', 'Разметки', 'Redis'):
+        assert A.sound(word) in canon
+    assert A.canon_from(None, None) == set()

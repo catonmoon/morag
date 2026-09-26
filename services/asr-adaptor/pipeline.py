@@ -371,7 +371,8 @@ async def _relisten_chunk(wav: str, sl: str, c: dict, audio_sec: float) -> dict:
 async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = '',
                        url: str = '', hints: dict | None = None, progress=None) -> dict:
     """`hints` — знание об ЭТОЙ записи, известное ДО расшифровки: `{terms: [...], names: [...],
-    about: str}`. Форма нарочно generic: движок принимает «заведомо верные написания», а откуда
+    about: str, spellings: [...]}` (`spellings` — написания только для сверки в арбитраже, в
+    LLM-проход не идут; ADR-0030). Форма нарочно generic: движок принимает «заведомо верные написания», а откуда
     домен их взял (презентация, метки, каталог) — его дело. Пусто → конвейер прежний.
     """
     t0 = time.monotonic()

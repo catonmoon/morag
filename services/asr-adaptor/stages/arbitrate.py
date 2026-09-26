@@ -88,11 +88,16 @@ def ordinary_swap(was: str, now: str, lang: str, ratio: float = RATIO, common: f
 
 
 def canon_from(hints: dict | None, glossary: list | None) -> set[str]:
-    """Заведомо верные написания — звуковыми формами. Источник: канал подсказок (ADR-0024) и
-    подтверждённый глоссарий. Слово из имени в несколько слов входит и по отдельности."""
+    """Заведомо верные написания — звуковыми формами. Источники: канал подсказок (ADR-0024:
+    `terms`, `names`), подтверждённый глоссарий и `spellings` — написания ТОЛЬКО ДЛЯ СВЕРКИ.
+
+    ⚠️ `spellings` в LLM-проход подсказок не идут: это может быть большой список (весь глоссарий
+    организации, имена, названия систем — тысяча строк), и ему место в вето, а не в промпте. Откуда
+    домен его взял — его дело; движку это «заведомо верно, написано людьми».
+    Слово из имени в несколько слов входит и по отдельности."""
     out: set[str] = set()
     h = hints or {}
-    terms = list(h.get('terms') or ()) + list(h.get('names') or ())
+    terms = list(h.get('terms') or ()) + list(h.get('names') or ()) + list(h.get('spellings') or ())
     for g in glossary or ():
         terms += list((g or {}).get('canonicals') or ())
     for t in terms:
