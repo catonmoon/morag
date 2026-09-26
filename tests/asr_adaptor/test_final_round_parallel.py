@@ -200,3 +200,25 @@ async def test_sweep_pass_heals_transient_failure(monkeypatch):
     assert (n, failed) == (1, 0)
     assert turns[0]['final'].endswith('[правлено]')
     assert not turns[0].get('correction_failed')
+
+
+async def test_verdicts_are_kept_even_without_an_event_channel(monkeypatch):
+    """Вердикты замен собираются всегда, не только при включённой ленте (ADR-0030, наблюдаемость)."""
+    async def judging(raw, dsum, csum, canon, llm, always=(), recalled='', fixes_out=None, **kw):
+        if fixes_out is not None:
+            fixes_out.append({'was': 'пост грес', 'now': 'Postgres', 'ok': True, 'why': 'canonical'})
+            fixes_out.append({'was': 'наш', 'now': 'ваш', 'ok': False, 'why': 'common word'})
+        return raw.replace('пост грес', 'Postgres')
+
+    monkeypatch.setattr(pipeline, 'has_entity_signal', lambda raw, gloss: True)
+    monkeypatch.setattr(pipeline, 'correct', judging)
+    monkeypatch.setattr(pipeline, 'relevant', lambda *a: [])
+    monkeypatch.setattr(pipeline, 'recall_entities', lambda *a, **kw: _async(''))
+    turns = _turns(3)
+    for t in turns:
+        t['raw'] = 'у нас пост грес и наш кэш'
+    await pipeline._final_round(turns, 'сводка', [], None, 6, None)   # ленты НЕТ
+
+    for t in turns:
+        assert [f['ok'] for f in t['fixes']] == [True, False]
+        assert t['final'] == 'у нас Postgres и наш кэш'

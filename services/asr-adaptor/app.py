@@ -60,7 +60,9 @@ def _enriched(r: dict) -> dict:
                        # Журнал арбитража (ADR-0030) — тем же путём: x_enriched собирается явным
                        # перечнем, и поле, не названное здесь, до артефакта не доезжает — ловилось
                        # на первом живом прогоне: в логе 4 решения, в артефакте ноль.
-                       **({'arbitration': r['arbitration']} if r.get('arbitration') else {})},
+                       **({'arbitration': r['arbitration']} if r.get('arbitration') else {}),
+                       # Вердикты финал-раунда: что предложила модель, что принял код и почему.
+                       **({'fixes': r['fixes']} if r.get('fixes') else {})},
     }
 
 

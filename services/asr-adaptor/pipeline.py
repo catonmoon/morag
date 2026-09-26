@@ -250,7 +250,11 @@ async def _final_round(turns, dsum: str, gloss, llm, concurrency: int, step,
         try:
             async with sem:
                 recalled = await recall_entities(dsum, raw, llm)
-                fixes: list[dict] = [] if emit else None
+                # ⚠️ Вердикты собираются ВСЕГДА, не только при включённой ленте: это единственное
+                # место, где видно, что модель предложила и почему код принял или отверг, — а
+                # аудит замен корпуса пришлось восстанавливать диффом raw → text, потому что
+                # вердикты нигде не сохранялись (кольцо в памяти). Едут в артефакт: x_enriched.fixes.
+                fixes: list[dict] = []
                 t['final'] = await correct(raw, dsum, _around(turns, i, CFG.context_turns),
                                            relevant(raw, gloss), llm, always, recalled,
                                            corpus_desc=CFG.corpus_desc, fixes_out=fixes)
@@ -260,8 +264,10 @@ async def _final_round(turns, dsum: str, gloss, llm, concurrency: int, step,
                     # соседними репликами — а окно показывает правки прямо в тексте.
                     piece, whole = _window(raw, fixes)
                     emit('turn.text', turn=i, start=round(t['start'], 1), text=piece, whole=whole)
-                for f in (fixes or ()):
-                    emit('turn.fix', turn=i, start=round(t['start'], 1), **f)
+                if emit:
+                    for f in fixes:
+                        emit('turn.fix', turn=i, start=round(t['start'], 1), **f)
+                t['fixes'] = fixes
             ok = True
         except Exception as e:
             t['final'] = raw
@@ -652,6 +658,9 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         tm['round_s'] = round(time.monotonic() - _t, 1)
         tm['n_round_turns'] = n_round
         stage_done('final-round', tm['round_s'], n=len(turns), changed=n_round, failed=n_failed)
+        # Плоский журнал вердиктов финал-раунда — в артефакт; из реплик убираем, чтобы не дублировать.
+        round_log = [{'turn': i, 'start': round(t['start'], 2), **f}
+                     for i, t in enumerate(turns) for f in (t.pop('fixes', None) or ())]
         if n_failed:
             tm['n_round_failed'] = n_failed
             log.warning('final-round: %d реплик остались сырыми из-за ошибок LLM', n_failed)
@@ -743,7 +752,8 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
                 # ⚠️ Журнал переслушивания — В АРТЕФАКТЕ, а не только в живой ленте: через месяц
                 # «почему тут дыра» и «что здесь стояло раньше» отвечаются из самого файла.
                 **({'relisten': relisten_log} if relisten_log else {}),
-                **({'arbitration': arbitrate_log} if arbitrate_log else {})}
+                **({'arbitration': arbitrate_log} if arbitrate_log else {}),
+                **({'fixes': round_log} if round_log else {})}
     finally:
         _release_turn(ticket)  # идемпотентно: упавший выпуск не вешает очередь реестра
         shutil.rmtree(tmp, ignore_errors=True)
