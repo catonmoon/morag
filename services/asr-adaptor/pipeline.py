@@ -588,10 +588,21 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             stage('arbitrate')
             _t = time.monotonic()
             canon = arbitrate_stage.canon_from(hints, gloss)
+            gate_terms = [t for t in list((hints or {}).get('terms') or ()) + list((hints or {}).get('names') or ())
+                          if isinstance(t, str)] + [x for g in (gloss or ()) for x in (g.get('canonicals') or ())]
+            gated = {'слушали': 0, 'пропущено': 0}
 
             async def _second(i: int, c: dict) -> None:
                 if not c.get('raw'):
                     return
+                if CFG.arbitrate_gate == 'reader':
+                    # Ворота читателя: второй раз слушаем только то, что выглядит невменяемо.
+                    flags = await arbitrate_stage.reader_flags(llm, c['raw'], gate_terms)
+                    if not flags:
+                        gated['пропущено'] += 1
+                        return
+                    c['reader_flags'] = flags
+                    gated['слушали'] += 1
                 sl = str(tmp / f'a{i}.wav')
                 try:
                     await asyncio.to_thread(_slice, wav, c['start'], c['end'], sl)
@@ -618,6 +629,9 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             tm['arbitrate_s'] = round(time.monotonic() - _t, 1)
             counts = {k: sum(1 for x in arbitrate_log if x['by'] == k)
                       for k in ('частота', 'канон', 'голосование', 'вето')}
+            if CFG.arbitrate_gate == 'reader':
+                counts.update(gated)
+                tm['arbitrate_gate'] = dict(gated)
             stage_done('arbitrate', tm['arbitrate_s'], n=len(arbitrate_log), **counts)
             if arbitrate_log:
                 log.info('арбитраж: %d решений (%s)', len(arbitrate_log),

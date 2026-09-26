@@ -124,3 +124,51 @@ def test_vote_words_only_guard_is_optional_and_blocks_non_words(monkeypatch):
     garble = 'он ннн задачу'
     assert A.arbitrate('он инн задачу', garble, garble, set())[1]              # без стража берёт
     assert A.arbitrate('он инн задачу', garble, garble, set(), vote_words_only=True)[1] == []
+
+
+async def test_reader_gate_listens_only_where_the_reader_points(backend, wav, monkeypatch):
+    """Ворота читателя: второе ухо зовётся только для кусков, которые читатель счёл невменяемыми;
+    остальные не слушаются вовсе — это и есть экономия прохода."""
+    pytest.importorskip('wordfreq')
+    asked: list[str] = []
+    second_calls: list[str] = []
+
+    class Reader:
+        async def complete_json(self, messages, schema, **kw):
+            text = messages[-1]['content'].rsplit('Текст:', 1)[-1].strip()
+            asked.append(text)
+            return {'suspicious': ['прегресс'] if 'прегресс' in text else []}
+
+    def asr(path, prompt='', model='', **kw):
+        if path.endswith('in.wav'):
+            return {'text': ' '.join(s['text'] for s in PASS1), 'segments': PASS1}
+        a, b = backend.slices[path]
+        if model == 'other':
+            second_calls.append(path)
+            return {'text': 'это регресс тут', 'segments': [{'start': 0.0, 'end': b - a, 'text': 'это регресс тут'}]}
+        text = 'это прегресс тут' if a < 30 else 'это чисто тут'
+        return {'text': text, 'segments': [{'start': 0.0, 'end': b - a, 'text': text}]}
+
+    # ⚠️ Реестр семафоров конвейера переживает тест и держит семафор, привязанный к ЧУЖОМУ циклу
+    # событий: под нагрузкой (читатель + два уха разом) это «bound to a different event loop».
+    monkeypatch.setattr(pipeline, '_RES_SEMS', {})
+    monkeypatch.setattr(pipeline.audio_clients, 'asr', asr)
+    monkeypatch.setattr(pipeline.CFG, 'second_model', 'other')
+    monkeypatch.setattr(pipeline.CFG, 'arbitrate_gate', 'reader')
+    r = await pipeline.run_pipeline(str(wav), llm=Reader(), episode='ep1')
+
+    assert asked, 'читателя не спросили'
+    gate = r['timing']['arbitrate_gate']
+    assert gate['слушали'] >= 1 and gate['пропущено'] >= 1
+    assert len(second_calls) == gate['слушали']                 # второе ухо — только по пометке
+    assert all(d['by'] == 'частота' for d in r['arbitration'])
+
+
+def test_prompt_guard_catches_both_failure_modes_of_a_prompt():
+    clean = {'avg_logprob': -0.25, 'compression_ratio': 2.0}
+    assert A.prompt_guard(clean, {'avg_logprob': -0.27, 'compression_ratio': 2.1}) == ''
+    # модель «ослепла» от контекста в подсказке — logprob просел, сжатие даже упало
+    assert A.prompt_guard(clean, {'avg_logprob': -1.4, 'compression_ratio': 1.6}).startswith('ослепла')
+    # петля: сжатие взлетело, а logprob ВЫРОС — уверенное зацикливание, logprob его не видит
+    assert A.prompt_guard(clean, {'avg_logprob': 0.04, 'compression_ratio': 22.0}).startswith('петля')
+    assert A.prompt_guard({}, {}) == ''                          # метрик нет — не судим

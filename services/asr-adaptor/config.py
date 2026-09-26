@@ -100,6 +100,10 @@ class Config:
     # Ручки `ASR_SECOND_PROMPT` / `ASR_SECOND_TEMPERATURE` не заводить без нового замера.
     second_model: str = field(default_factory=lambda: _env('ASR_SECOND_MODEL', ''))
     clean_ear: bool = field(default_factory=lambda: _flag('ASR_CLEAN_EAR', '0'))
+    # Ворота второго уха: `reader` — LLM-читатель решает, слушать ли кусок ещё раз (оценка
+    # вменяемости слов с глоссарием записи); пусто — слушать все куски. Замерено: 4.4 % против 4.3 %
+    # «везде» при ≈ 30 % экономии прохода; одна короткая LLM-проверка на кусок.
+    arbitrate_gate: str = field(default_factory=lambda: _env('ASR_ARBITRATE_GATE', '').strip().lower())
     arbitrate_ratio: float = field(default_factory=lambda: float(_env('ASR_ARBITRATE_RATIO', '100')))
 
     # Параллельность финал-раунда: реплики независимы, а стадия занимала 8-12 мин из 15-18 на
