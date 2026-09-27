@@ -546,7 +546,8 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
                                   # ⚠️ Форму и выключатель глоссария передаём ТОЛЬКО когда они
                                   # заданы: заглушки в тестах и чужие обёртки знают прежнюю сигнатуру.
                                   **({'prefix': CFG.prompt_prefix} if CFG.prompt_prefix else {}),
-                                  **({'free_latin': False} if not CFG.prompt_glossary else {}))
+                                  **({'free_latin': False} if CFG.prompt_glossary == 'none' else {}),
+                                  **({'conflict_free': True} if CFG.prompt_glossary == 'clean' else {}))
             # ⚠️ ЕДИНСТВЕННОЕ место, где `prompt` и `canon` существуют: дальше цикл их затирает.
             # Контекст, который уходит в whisper, показать больше неоткуда.
             emit('chunk.start', i=i + 1, n=len(chunks), **{'from': round(c['start'], 2),

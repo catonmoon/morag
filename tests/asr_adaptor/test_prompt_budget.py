@@ -75,3 +75,12 @@ def test_free_glossary_canonicals_can_be_switched_off_keeping_knowledge():
     assert 'ChatGPT' not in out
     assert 'ChatGPT' in build_prompt(['ChatGPT'], FakeCounter(), 100, ['Валентин Малых'])
 
+
+def test_conflict_free_drops_only_the_glossary_canonical_that_sounds_like_a_known_term():
+    """«Яд»: каноник глоссария, звучащий как постоянный термин, но написанный иначе, — вон; прочая латиница остаётся."""
+    out = build_prompt(['Postgres', 'GitLab'], FakeCounter(), 100, ['Постгрес'], conflict_free=True)
+
+    assert 'Постгрес' in out and 'GitLab' in out
+    assert 'Postgres' not in out
+    assert 'Postgres' in build_prompt(['Postgres', 'GitLab'], FakeCounter(), 100, ['Постгрес'])   # умолчание прежнее
+

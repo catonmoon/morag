@@ -51,7 +51,7 @@ def fit_prompt(terms, counter: WhisperTokenCounter, budget: int = 200, prefix: s
 def build_prompt(canonicals, counter: WhisperTokenCounter, budget: int = 200,
                  always: tuple[str, ...] | list[str] = (),
                  hinted: frozenset[str] | set[str] = frozenset(),
-                 prefix: str = PREFIX, free_latin: bool = True) -> str:
+                 prefix: str = PREFIX, free_latin: bool = True, conflict_free: bool = False) -> str:
     """Промпт для podlodka: постоянные термины корпуса + латино-каноники куска.
 
     `always` — то, что не надо переоткрывать в каждом выпуске: имена ведущих, повторяющиеся
@@ -77,9 +77,16 @@ def build_prompt(canonicals, counter: WhisperTokenCounter, budget: int = 200,
     `free_latin=False` — латинские каноники свободного глоссария в подсказку НЕ идут, остаются
     постоянные термины и подтверждённые: замерено на 522 местах гарблов (ADR-0030, 2ж), что
     свободный глоссарий канонизирует гарбл в него самого и подсказка с ним хуже отсутствия подсказки.
+    `conflict_free=True` — мягче: из латиницы глоссария уходит только «яд» — каноник, звучащий как
+    постоянный термин или подтверждённая подсказка, но написанный иначе; настоящие латинские
+    термины, которых снаружи никто не дал, остаются (без них живьём WER окон 8.8 → 10.9 %).
     """
     hint = [c for c in canonicals if c.casefold() in hinted]
     latin = [c for c in canonicals if _LAT.search(c) and c.casefold() not in hinted] if free_latin else []
+    if conflict_free and latin:
+        from .arbitrate import key, sound
+        known = {sound(k): key(k) for k in list(always) + list(hinted) if k}
+        latin = [c for c in latin if not (sound(c) in known and known[sound(c)] != key(c))]
     terms = list(dict.fromkeys([t for t in always if t] + hint + latin))
     # `prefix` — форма подсказки. Замерено на 17 окнах: длинный список в форме предложения
     # («В разговоре … упоминаются A, B, C.») однажды ОНЕМИЛ окно (0 слов), а форма «Глоссарий: A, B,
