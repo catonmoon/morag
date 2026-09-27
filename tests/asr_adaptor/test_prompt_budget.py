@@ -84,3 +84,13 @@ def test_conflict_free_drops_only_the_glossary_canonical_that_sounds_like_a_know
     assert 'Postgres' not in out
     assert 'Postgres' in build_prompt(['Postgres', 'GitLab'], FakeCounter(), 100, ['Постгрес'])   # умолчание прежнее
 
+
+def test_substitute_replaces_the_glossary_canonical_with_the_known_spelling():
+    """Каноник глоссария, звучащий как известное слово, подменяется им; латиница без пары остаётся."""
+    from stages.arbitrate import key, sound
+    known = {sound(key('Постгрес')): 'Постгрес'}
+    out = build_prompt(['Postgres', 'GitLab'], FakeCounter(), 100, [], substitute=known)
+
+    assert 'Постгрес' in out and 'GitLab' in out and 'Postgres' not in out
+    assert out.count('Постгрес') == 1
+

@@ -24,6 +24,11 @@ async def test_glossary_switch_reaches_the_prompt_builder(backend, wav, monkeypa
     assert seen and all(kw.get('conflict_free') is True and 'free_latin' not in kw for kw in seen)
 
     seen.clear()
+    monkeypatch.setattr(pipeline.CFG, 'prompt_glossary', 'substitute')
+    await pipeline.run_pipeline(str(wav), llm=None, episode='ep1', hints={'terms': ['Постгрес']})
+    assert seen and all(isinstance(kw.get('substitute'), dict) and 'постгрес' in kw['substitute'] for kw in seen)
+
+    seen.clear()
     monkeypatch.setattr(pipeline.CFG, 'prompt_glossary', 'all')
     await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
-    assert seen and all('free_latin' not in kw and 'conflict_free' not in kw for kw in seen)   # умолчание — прежняя сигнатура
+    assert seen and all(not ({'free_latin', 'conflict_free', 'substitute'} & set(kw)) for kw in seen)   # умолчание — прежняя сигнатура

@@ -537,6 +537,13 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         stage('pass2')
         _t = time.monotonic()
         n_broken = n_hinted_chunks = 0
+        # Режим «подменять»: карта «звучание → известное написание», постоянные термины старше подсказок,
+        # подсказки старше spellings (снимок написаний снаружи — только для подмены, в промпт сам не идёт).
+        spell_map: dict[str, str] = {}
+        if CFG.prompt_glossary == 'substitute':
+            for k in list(CFG.always_terms) + [str(t) for key_ in ('terms', 'names', 'spellings')
+                                                for t in ((hints or {}).get(key_) or ()) if t]:
+                spell_map.setdefault(arbitrate_stage.sound(arbitrate_stage.key(k)), k)
         for i, c in enumerate(chunks):
             src = c['text'] or _neighbour_text(chunks, i)
             canon = relevant(src, gloss)
@@ -547,7 +554,8 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
                                   # заданы: заглушки в тестах и чужие обёртки знают прежнюю сигнатуру.
                                   **({'prefix': CFG.prompt_prefix} if CFG.prompt_prefix else {}),
                                   **({'free_latin': False} if CFG.prompt_glossary == 'none' else {}),
-                                  **({'conflict_free': True} if CFG.prompt_glossary == 'clean' else {}))
+                                  **({'conflict_free': True} if CFG.prompt_glossary == 'clean' else {}),
+                                  **({'substitute': spell_map} if CFG.prompt_glossary == 'substitute' else {}))
             # ⚠️ ЕДИНСТВЕННОЕ место, где `prompt` и `canon` существуют: дальше цикл их затирает.
             # Контекст, который уходит в whisper, показать больше неоткуда.
             emit('chunk.start', i=i + 1, n=len(chunks), **{'from': round(c['start'], 2),
