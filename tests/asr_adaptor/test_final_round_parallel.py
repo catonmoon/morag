@@ -222,3 +222,20 @@ async def test_verdicts_are_kept_even_without_an_event_channel(monkeypatch):
     for t in turns:
         assert [f['ok'] for f in t['fixes']] == [True, False]
         assert t['final'] == 'у нас Postgres и наш кэш'
+
+
+def test_known_words_of_the_record_are_not_replaced_by_different_sounding_ones():
+    """«МММ» из метки поста финал-раунд менял на «MCP»; «PDN» → «PLN». Известное слово записи может
+    смениться только косметически (другой алфавит) или формой — не другим словом."""
+    from stages.final_round import apply_fixes
+
+    text = 'кто знает про МММ? а PDN в проде? и Postgres тоже'
+    fixes = [{'was': 'МММ', 'now': 'MCP'}, {'was': 'PDN', 'now': 'PLN'},
+             {'was': 'Postgres', 'now': 'Постгрес'}]
+    log = []
+    out, applied, skipped = apply_fixes(text, fixes, log_to=log, protect=['МММ', 'PDN', 'Postgres'])
+    assert [v['why'] for v in log] == ['known_term', 'known_term', '']
+    assert 'МММ' in out and 'PDN' in out and 'Постгрес' in out          # косметика прошла
+    # без protect — прежнее поведение: все три замены применяются
+    out2, applied2, _ = apply_fixes(text, fixes)
+    assert 'MCP' in out2 and 'PLN' in out2 and applied2 == 3

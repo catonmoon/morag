@@ -249,7 +249,8 @@ def _invents_name(was: str, now: str, spoken: set) -> bool:
     return whole < NAME_SIMILARITY or support < NAME_SIMILARITY
 
 
-def apply_fixes(text: str, fixes, canonicals=(), always=(), log_to=None) -> tuple[str, int, int]:
+def apply_fixes(text: str, fixes, canonicals=(), always=(), log_to=None,
+                protect=()) -> tuple[str, int, int]:
     """Применить замены к тексту ДЕТЕРМИНИРОВАННО. Возвращает (текст, применено, отброшено).
 
     `log_to` — необязательный список, в который складывается ВЕРДИКТ по каждой замене
@@ -277,6 +278,16 @@ def apply_fixes(text: str, fixes, canonicals=(), always=(), log_to=None) -> tupl
     сжатиям: «си плюс плюс» → «C++» это сразу минус 40% на короткой реплике.
     """
     canon = {_key(c) for c in (canonicals or ())}
+    # `protect` — известные написания ЗАПИСИ (подсказки, имена, постоянные термины) звуковыми
+    # формами. ⚠️ `_term_survives` защищает только `always` и только слова от пяти букв: «МММ»,
+    # «PDN», «IPR» не защищены нигде — и финал-раунд менял их на «MCP», «PLN», «ИПР». Здесь сверка
+    # ПО ЗВУЧАНИЮ: замена, которая уводит известное слово в ДРУГОЕ по звучанию, отвергается с
+    # причиной `known_term`; косметика (тот же звук, другой алфавит) и форма слова проходят.
+    # Замерено звуком по корпусу: из 104 таких замен 64 зря, 10 верно, 30 ничья — поэтому вето
+    # опциональное (пустой `protect` — прежнее поведение байт в байт), а верные 10 возвращает
+    # арбитраж звуком в конвейере (ADR-0030): по причине `known_term` кусок переслушивается.
+    from stages.arbitrate import inflection as _inflection, sound as _sound
+    protected = {_sound(t) for t in (protect or ()) if t}
     applied = skipped = 0
 
     def verdict(was, now, ok, why='', **f):
@@ -305,6 +316,13 @@ def apply_fixes(text: str, fixes, canonicals=(), always=(), log_to=None) -> tupl
             verdict(was, now, False, 'number')
             skipped += 1
             continue
+        if protected:
+            sw, sn = _sound(was), _sound(now)
+            if sw in protected and sn != sw and not _inflection(sw, sn):
+                log.warning('final-round: замена отброшена (известное слово): %r → %r', was, now)
+                verdict(was, now, False, 'known_term')
+                skipped += 1
+                continue
         if _is_excision(was, now):
             log.warning('final-round: замена отброшена (изъятие слов): %r → %r', was, now)
             verdict(was, now, False, 'excision')
@@ -359,7 +377,8 @@ def _system_prompt(corpus_desc: str) -> str:
 
 
 async def correct(text: str, doc_sum: str, context: str, canonicals, llm, always=(),
-                  recalled: str = '', corpus_desc: str = DEFAULT_CORPUS, fixes_out=None) -> str:
+                  recalled: str = '', corpus_desc: str = DEFAULT_CORPUS, fixes_out=None,
+                  protect=()) -> str:
     """Правка сущностей: модель ПРЕДЛАГАЕТ замены, применяет их код.
 
     Прозу у модели не берём вовсе — только пары «было → стало» (их проверяет и применяет
@@ -383,7 +402,8 @@ async def correct(text: str, doc_sum: str, context: str, canonicals, llm, always
         schema=_FIX_SCHEMA, schema_name='fixes', max_tokens=1500)
 
     fixes = (res or {}).get('fixes') or []
-    fixed, applied, skipped = apply_fixes(text, fixes, canonicals, always, log_to=fixes_out)
+    fixed, applied, skipped = apply_fixes(text, fixes, canonicals, always, log_to=fixes_out,
+                                          protect=protect)
     if skipped:
         log.info('final-round: применено замен %d, отброшено %d', applied, skipped)
     return fixed
