@@ -155,6 +155,7 @@ async def test_reader_gate_listens_only_where_the_reader_points(backend, wav, mo
     monkeypatch.setattr(pipeline.audio_clients, 'asr', asr)
     monkeypatch.setattr(pipeline.CFG, 'second_model', 'other')
     monkeypatch.setattr(pipeline.CFG, 'arbitrate_gate', 'reader')
+    monkeypatch.setattr(pipeline.CFG, 'clean_ear', '')
     r = await pipeline.run_pipeline(str(wav), llm=Reader(), episode='ep1')
 
     assert asked, 'читателя не спросили'
@@ -183,3 +184,50 @@ async def test_reader_does_not_flag_the_known_spellings_it_was_given():
 
     flags = await A.reader_flags(Echo(), 'это прегресс тут', ['Postgres', 'Мария Кузнецова', 'Kafka'])
     assert flags == ['прегресс']
+
+
+def test_unresolved_dispute_is_journaled_not_decided():
+    """Спор без правила и свидетеля остаётся черновиком, но виден в журнале — по нему зовут третий голос."""
+    text, dec = A.arbitrate('он поставил задачу', 'он поставила задачу', None, set())
+    assert text == 'он поставил задачу'
+    assert dec == [{'i': 1, 'was': 'поставил', 'now': 'поставила', 'by': 'спорно', 'taken': False}]
+
+
+async def test_clean_ear_on_demand_is_called_only_where_a_dispute_remains(backend, wav, monkeypatch):
+    """Режим demand: чистое ухо зовётся только для кусков, где второе ухо оставило нерешённый спор."""
+    clean_calls: list[str] = []
+
+    def asr(path, prompt='', model='', **kw):
+        if path.endswith('in.wav'):
+            return {'text': ' '.join(s['text'] for s in PASS1), 'segments': PASS1}
+        a, b = backend.slices[path]
+        if model == 'other':
+            text = 'он поставила задачу' if a < 30 else 'это чисто тут'   # спор только в первом куске
+        elif prompt == '' and a < 100 and not model:
+            clean_calls.append(path); text = 'он поставила задачу'
+            return {'text': text, 'segments': [{'start': 0.0, 'end': b - a, 'text': text}]}
+        else:
+            text = 'он поставил задачу' if a < 30 else 'это чисто тут'
+        return {'text': text, 'segments': [{'start': 0.0, 'end': b - a, 'text': text}]}
+
+    monkeypatch.setattr(pipeline, '_RES_SEMS', {})
+    monkeypatch.setattr(pipeline.audio_clients, 'asr', asr)
+    monkeypatch.setattr(pipeline.CFG, 'second_model', 'other')
+    monkeypatch.setattr(pipeline.CFG, 'clean_ear', 'demand')
+    monkeypatch.setattr(pipeline.CFG, 'arbitrate_gate', '')
+    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+
+    assert r['timing']['arbitrate_gate']['третий голос'] >= 1
+    assert all(d['by'] in ('голосование', 'спорно') for d in r['arbitration'])
+    assert any(d['by'] == 'голосование' and d['taken'] for d in r['arbitration'])
+
+
+async def test_protect_known_runs_end_to_end(backend, wav, monkeypatch):
+    """Защита известных слов собирается в run_pipeline из подсказок и постоянных терминов — путь,
+    которого юнит-тесты _final_round не проходят (ловилось вживую: NameError на финал-раунде)."""
+    monkeypatch.setattr(pipeline, '_RES_SEMS', {})
+    monkeypatch.setattr(pipeline.CFG, 'protect_known', True)
+    monkeypatch.setattr(pipeline.CFG, 'final_ear', True)
+    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1',
+                                    hints={'terms': ['Postgres'], 'names': ['Мария Кузнецова']})
+    assert r['turns'] and r['markdown']

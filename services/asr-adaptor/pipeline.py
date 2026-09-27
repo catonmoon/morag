@@ -714,7 +714,7 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         if CFG.protect_known:
             protect = tuple(dict.fromkeys(
                 [x for x in list((hints or {}).get('terms') or ()) + list((hints or {}).get('names') or ())
-                 if isinstance(x, str)] + [x for x in always if x]))
+                 if isinstance(x, str)] + [x for x in (CFG.always_terms or ()) if x]))
 
         async def _ear(turn: dict, was: str) -> str | None:
             """Чистое ухо на 30 с вокруг спорного слова реплики — окно, не слово (ADR-0030)."""
