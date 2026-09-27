@@ -25,6 +25,13 @@ def _flag(key: str, default: str = '1') -> bool:
     return _env(key, default) not in ('0', 'false', 'no', '')
 
 
+def _clean_ear_mode(raw: str) -> str:
+    v = (raw or '').strip().lower()
+    if v in ('demand', 'по требованию'):
+        return 'demand'
+    return 'always' if v in ('1', 'true', 'yes', 'on', 'always') else ''
+
+
 def _enable_thinking() -> bool | None:
     """Reasoning-флаг для LLMClient (env `ASR_LLM_ENABLE_THINKING`). Пусто/none → None: НЕ слать
     reasoning-параметр (для non-reasoning моделей типа grok-4.20-non-reasoning он невалиден → 400).
@@ -69,6 +76,8 @@ class Config:
     # --- прочее ---
     mode: str = field(default_factory=lambda: _env('ASR_MODE', 'async'))  # async | sync
     whisper_tokenizer: str = field(default_factory=lambda: _env('ASR_WHISPER_TOKENIZER', 'openai/whisper-large-v3'))
+    # Форма подсказки пасса-2 (префикс перед списком написаний). Пусто — умолчание движка.
+    prompt_prefix: str = field(default_factory=lambda: _env('ASR_PROMPT_PREFIX', ''))
     prompt_budget: int = field(default_factory=lambda: int(_env('ASR_PROMPT_BUDGET', '200')))
     # Авто-наминг Speaker_N → имя (интро-LLM + реестр). off → транскрипт остаётся в Speaker_N.
     # ⚠️ ВЫКЛЮЧЕН ПО УМОЛЧАНИЮ. Стадия исходит из подкастового допущения «ведущий представляет
@@ -99,7 +108,10 @@ class Config:
     # на переслушивании у первой модели даёт ± 0, у второй — WER × 6; лесенка тождественна нулю.
     # Ручки `ASR_SECOND_PROMPT` / `ASR_SECOND_TEMPERATURE` не заводить без нового замера.
     second_model: str = field(default_factory=lambda: _env('ASR_SECOND_MODEL', ''))
-    clean_ear: bool = field(default_factory=lambda: _flag('ASR_CLEAN_EAR', '0'))
+    # Третий голос — та же модель без подсказки: `always` (каждый кусок), `demand` — только там, где
+    # после второго уха остались споры, не решённые ни частотой, ни каноном (ADR-0030: эскалация по
+    # куску, а не проход по записи); пусто/0 — без него (тогда голосования нет).
+    clean_ear: str = field(default_factory=lambda: _clean_ear_mode(_env('ASR_CLEAN_EAR', '0')))
     # Ворота второго уха: `reader` — LLM-читатель решает, слушать ли кусок ещё раз (оценка
     # вменяемости слов с глоссарием записи); пусто — слушать все куски. Замерено: 4.4 % против 4.3 %
     # «везде» при ≈ 30 % экономии прохода; одна короткая LLM-проверка на кусок.

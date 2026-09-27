@@ -52,3 +52,15 @@ def test_duplicates_do_not_eat_budget():
 def test_no_terms_gives_empty_prompt():
     assert build_prompt([], FakeCounter(), 100, []) == ''
     assert fit_prompt([], FakeCounter(), 100) == ''
+
+
+def test_prompt_prefix_is_a_parameter_with_the_old_default():
+    from stages import prompt_budget as PB
+
+    class Count:
+        def count(self, text):
+            return len(text.split())
+
+    assert PB.build_prompt(['Postgres'], Count(), always=('Kafka',)).startswith(PB.PREFIX)
+    assert PB.build_prompt(['Postgres'], Count(), always=('Kafka',), prefix='Глоссарий: ') == 'Глоссарий: Kafka, Postgres.'
+    assert PB.build_prompt(['Postgres'], Count(), prefix='').startswith(PB.PREFIX)   # пусто = умолчание

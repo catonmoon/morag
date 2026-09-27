@@ -510,7 +510,10 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             canon = relevant(src, gloss)
             if any(c.casefold() in hint_set for c in canon):
                 n_hinted_chunks += 1
-            prompt = build_prompt(canon, counter, CFG.prompt_budget, CFG.always_terms, hint_set)
+            prompt = build_prompt(canon, counter, CFG.prompt_budget, CFG.always_terms, hint_set,
+                                  # ⚠️ Форму передаём ТОЛЬКО когда она задана: заглушки в тестах и
+                                  # чужие обёртки знают прежнюю сигнатуру.
+                                  **({'prefix': CFG.prompt_prefix} if CFG.prompt_prefix else {}))
             # ⚠️ ЕДИНСТВЕННОЕ место, где `prompt` и `canon` существуют: дальше цикл их затирает.
             # Контекст, который уходит в whisper, показать больше неоткуда.
             emit('chunk.start', i=i + 1, n=len(chunks), **{'from': round(c['start'], 2),
@@ -540,7 +543,8 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
                 step(f'pass2 {i + 1}/{len(chunks)}')
         tm['pass2_s'] = round(time.monotonic() - _t, 1)
         tm['n_chunks'] = len(chunks)
-        stage_done('pass2', tm['pass2_s'], n=len(chunks), n_broken=n_broken)
+        tm['n_retried'] = sum(1 for c in chunks if c.get('retried'))
+        stage_done('pass2', tm['pass2_s'], n=len(chunks), n_broken=n_broken, n_retried=tm['n_retried'])
         if seed:
             # Сколько кусков реально получили подтверждённый каноник — это и есть работа канала.
             tm['n_chunks_hinted'] = n_hinted_chunks
@@ -609,8 +613,17 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
                     async with _res('whisper', CFG.whisper_slots):
                         second = await asyncio.to_thread(
                             lambda: audio_clients.asr(sl, '', model=CFG.second_model))
-                        clean = (await asyncio.to_thread(lambda: audio_clients.asr(sl, ''))
-                                 if CFG.clean_ear else None)
+                        clean = None
+                        if CFG.clean_ear == 'always':
+                            clean = await asyncio.to_thread(lambda: audio_clients.asr(sl, ''))
+                        elif CFG.clean_ear == 'demand':
+                            # Третий голос по требованию: только если после второго уха остались
+                            # споры, не решённые ни правилом, ни свидетелем.
+                            _, first = arbitrate_stage.arbitrate(c['raw'], second['text'], None, canon,
+                                                                 ratio=CFG.arbitrate_ratio)
+                            if any(d['by'] == 'спорно' for d in first):
+                                clean = await asyncio.to_thread(lambda: audio_clients.asr(sl, ''))
+                                gated['третий голос'] = gated.get('третий голос', 0) + 1
                 except Exception as error:      # noqa: BLE001 — стадия не имеет права ронять запись
                     log.warning('арбитраж %.1f-%.1f с не вышел: %s: %s',
                                 c['start'], c['end'], type(error).__name__, error)
@@ -628,8 +641,8 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             arbitrate_log.sort(key=lambda r: (r['start'], r['i']))
             tm['arbitrate_s'] = round(time.monotonic() - _t, 1)
             counts = {k: sum(1 for x in arbitrate_log if x['by'] == k)
-                      for k in ('частота', 'канон', 'голосование', 'вето')}
-            if CFG.arbitrate_gate == 'reader':
+                      for k in ('частота', 'канон', 'голосование', 'вето', 'спорно')}
+            if CFG.arbitrate_gate == 'reader' or CFG.clean_ear == 'demand':
                 counts.update(gated)
                 tm['arbitrate_gate'] = dict(gated)
             stage_done('arbitrate', tm['arbitrate_s'], n=len(arbitrate_log), **counts)
