@@ -710,9 +710,12 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         # термин, отбрасывается. Защищаем только подтверждённые, а не весь список снаружи —
         # `_term_survives` перебирает `always` на каждую замену.
         protect = list(CFG.always_terms) + [c for h in seed for c in h['canonicals']]
-        protect = ()
+        # ⚠️ `protect` ниже — ПРЕЖНЯЯ переменная (постоянные термины для `_term_survives`), её не
+        # трогаем: мой первый вариант затенил её пустым кортежем и при выключенной защите отключал
+        # старое вето. Известные слова записи — отдельное имя.
+        known = ()
         if CFG.protect_known:
-            protect = tuple(dict.fromkeys(
+            known = tuple(dict.fromkeys(
                 [x for x in list((hints or {}).get('terms') or ()) + list((hints or {}).get('names') or ())
                  if isinstance(x, str)] + [x for x in (CFG.always_terms or ()) if x]))
 
@@ -749,7 +752,7 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
 
         n_round, n_failed = await _final_round(turns, dsum, gloss, llm, CFG.round_concurrency,
                                               step, protect, emit=emit,
-                                             **({'protect': protect} if protect else {}),
+                                             **({'protect': known} if known else {}),
                                              **({'ear': _ear} if (CFG.protect_known and CFG.final_ear) else {}))
         raw_side = {f"{t['start']:.1f}": {'raw': t['raw'], 'final': t['final']}
                     for t in turns if t['final'] != t['raw']}
