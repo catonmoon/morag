@@ -543,9 +543,10 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             if any(c.casefold() in hint_set for c in canon):
                 n_hinted_chunks += 1
             prompt = build_prompt(canon, counter, CFG.prompt_budget, CFG.always_terms, hint_set,
-                                  # ⚠️ Форму передаём ТОЛЬКО когда она задана: заглушки в тестах и
-                                  # чужие обёртки знают прежнюю сигнатуру.
-                                  **({'prefix': CFG.prompt_prefix} if CFG.prompt_prefix else {}))
+                                  # ⚠️ Форму и выключатель глоссария передаём ТОЛЬКО когда они
+                                  # заданы: заглушки в тестах и чужие обёртки знают прежнюю сигнатуру.
+                                  **({'prefix': CFG.prompt_prefix} if CFG.prompt_prefix else {}),
+                                  **({'free_latin': False} if not CFG.prompt_glossary else {}))
             # ⚠️ ЕДИНСТВЕННОЕ место, где `prompt` и `canon` существуют: дальше цикл их затирает.
             # Контекст, который уходит в whisper, показать больше неоткуда.
             emit('chunk.start', i=i + 1, n=len(chunks), **{'from': round(c['start'], 2),

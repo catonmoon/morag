@@ -64,3 +64,14 @@ def test_prompt_prefix_is_a_parameter_with_the_old_default():
     assert PB.build_prompt(['Postgres'], Count(), always=('Kafka',)).startswith(PB.PREFIX)
     assert PB.build_prompt(['Postgres'], Count(), always=('Kafka',), prefix='Глоссарий: ') == 'Глоссарий: Kafka, Postgres.'
     assert PB.build_prompt(['Postgres'], Count(), prefix='').startswith(PB.PREFIX)   # пусто = умолчание
+
+
+def test_free_glossary_canonicals_can_be_switched_off_keeping_knowledge():
+    """Без свободного глоссария остаются постоянные термины и подтверждённые подсказки; умолчание прежнее."""
+    out = build_prompt(['ChatGPT', 'Постгрес'], FakeCounter(), 100, ['Валентин Малых'],
+                       hinted=frozenset({'постгрес'}), free_latin=False)
+
+    assert 'Валентин Малых' in out and 'Постгрес' in out
+    assert 'ChatGPT' not in out
+    assert 'ChatGPT' in build_prompt(['ChatGPT'], FakeCounter(), 100, ['Валентин Малых'])
+
