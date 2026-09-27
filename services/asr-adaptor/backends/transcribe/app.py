@@ -12,9 +12,12 @@ response_format=json|verbose_json). GET /v1/models, GET /health.
 """
 from __future__ import annotations
 
+import asyncio
 import math
 import os
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 # mlx_whisper.load_audio зовёт `ffmpeg` из PATH — в headless-запуске его может не быть
 os.environ['PATH'] = '/opt/homebrew/bin:' + os.environ.get('PATH', '')
@@ -24,6 +27,22 @@ from typing import Optional  # noqa: E402
 
 import mlx_whisper  # noqa: E402
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile  # noqa: E402
+
+# ⚠️⚠️ Стек. 27.09 бэкенд упал SIGSEGV внутри MLX — `compile_dfs`, рекурсия по графу вычислений,
+# переполнила стек (KERN_PROTECTION_FAILURE на охранной странице) на ~700-м запросе процесса: длинная
+# запись, две модели попеременно (пасс-2 и второе ухо). Инференс шёл в главном потоке uvicorn — 8 МБ.
+# Теперь он идёт в своём потоке с 1 ГБ стека (виртуальный резерв, не занятая память); заодно цикл
+# событий не блокируется на время декодирования — `/health` отвечает и под нагрузкой. Один воркер:
+# GPU всё равно один, а прежний блокирующий вызов и так выстраивал запросы в очередь.
+# `TRANSCRIBE_DISABLE_COMPILE=1` — запасной ход, если стека не хватит: без `mx.compile` рекурсии нет,
+# цена — скорость декодера (не мерилась; включать только по факту повторного падения).
+threading.stack_size(1 << 30)
+_INFER = ThreadPoolExecutor(max_workers=1, thread_name_prefix='infer')
+_INFER.submit(lambda: None).result()          # поток создаётся сейчас, пока задан большой стек
+threading.stack_size(0)
+if os.environ.get('TRANSCRIBE_DISABLE_COMPILE', '').strip().lower() in ('1', 'true', 'yes', 'on'):
+    import mlx.core as _mx  # noqa: E402
+    _mx.disable_compile()
 
 # Каталог с MLX-весами: env `TRANSCRIBE_MODELS_DIR`, иначе каталог моделей стека.
 MODELS_DIR = Path(os.environ.get('TRANSCRIBE_MODELS_DIR')
@@ -138,7 +157,7 @@ async def transcribe(
             kw['initial_prompt'] = prompt
         if word_timestamps.strip().lower() in ('1', 'true', 'yes', 'on'):
             kw['word_timestamps'] = True
-        r = mlx_whisper.transcribe(tmp, **kw)
+        r = await asyncio.get_running_loop().run_in_executor(_INFER, lambda: mlx_whisper.transcribe(tmp, **kw))
     finally:
         Path(tmp).unlink(missing_ok=True)
 

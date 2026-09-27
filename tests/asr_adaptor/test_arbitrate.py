@@ -282,3 +282,26 @@ async def test_always_terms_stay_protected_when_known_word_protection_is_off(bac
     verdicts = [f for f in r.get('fixes') or [] if f['was'] == 'Kubernetes']
     assert verdicts and all(f['why'] == 'breaks_term' for f in verdicts)
     assert all('Cabernet' not in (t.get('text') or '') for t in r['turns'])
+
+
+async def test_backend_death_during_arbitration_is_counted_in_the_artifact(backend, wav, monkeypatch):
+    """Бэкенд упал посреди стадии: запись не роняем, но число кусков без арбитража едет в артефакт."""
+    def asr(path, prompt='', model='', **kw):
+        if path.endswith('in.wav'):
+            return {'text': ' '.join(s['text'] for s in PASS1), 'segments': PASS1}
+        if model == 'other':
+            raise ConnectionError('Max retries exceeded')          # второе ухо — бэкенда больше нет
+        a, b = backend.slices[path]
+        text = 'он поставил задачу' if a < 30 else 'это чисто тут'
+        return {'text': text, 'segments': [{'start': 0.0, 'end': b - a, 'text': text}]}
+
+    monkeypatch.setattr(pipeline, '_RES_SEMS', {})
+    monkeypatch.setattr(pipeline.audio_clients, 'asr', asr)
+    monkeypatch.setattr(pipeline.CFG, 'second_model', 'other')
+    monkeypatch.setattr(pipeline.CFG, 'clean_ear', '')
+    monkeypatch.setattr(pipeline.CFG, 'arbitrate_gate', '')
+    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+
+    assert not r.get('arbitration')                            # журнал пуст — ключа нет
+    assert r['timing']['arbitrate_failed'] >= 1
+

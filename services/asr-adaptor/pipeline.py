@@ -629,6 +629,7 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             gate_terms = [t for t in list((hints or {}).get('terms') or ()) + list((hints or {}).get('names') or ())
                           if isinstance(t, str)] + [x for g in (gloss or ()) for x in (g.get('canonicals') or ())]
             gated = {'слушали': 0, 'пропущено': 0}
+            failed = {'n': 0}      # куски, где стадия не вышла (бэкенд упал): в артефакт, не только в лог
 
             async def _second(i: int, c: dict) -> None:
                 if not c.get('raw'):
@@ -670,6 +671,7 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
                                 gated['третий голос'] = gated.get('третий голос', 0) + 1
                                 gated['секунд третьего голоса'] = round(gated.get('секунд третьего голоса', 0) + (b - a), 1)
                 except Exception as error:      # noqa: BLE001 — стадия не имеет права ронять запись
+                    failed['n'] += 1
                     log.warning('арбитраж %.1f-%.1f с не вышел: %s: %s',
                                 c['start'], c['end'], type(error).__name__, error)
                     return
@@ -690,6 +692,14 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             if CFG.arbitrate_gate == 'reader' or CFG.clean_ear == 'demand':
                 counts.update(gated)
                 tm['arbitrate_gate'] = dict(gated)
+            if failed['n']:
+                # ⚠️ 27.09: бэкенд whisper упал посреди длинной записи, 60 кусков из 119 прошли мимо
+                # стадии с предупреждением на каждый, а прогон выглядел удавшимся. Число — в артефакт
+                # и одной строкой ошибки: расшифровка есть, но на этих кусках она без арбитража.
+                tm['arbitrate_failed'] = failed['n']
+                counts['не вышло'] = failed['n']
+                log.error('стадия арбитража не вышла на %d кусках из %d — расшифровка на них без арбитража'
+                          ' (бэкенд недоступен?)', failed['n'], len(chunks))
             stage_done('arbitrate', tm['arbitrate_s'], n=len(arbitrate_log), **counts)
             if arbitrate_log:
                 log.info('арбитраж: %d решений (%s)', len(arbitrate_log),
