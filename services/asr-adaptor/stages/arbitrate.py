@@ -251,7 +251,10 @@ async def reader_flags(llm, text: str, terms: list[str]) -> list[str]:
     except Exception:                                        # noqa: BLE001 — ворота не роняют запись
         return []
     words = (got or {}).get('suspicious') if isinstance(got, dict) else None
-    return [w for w in (words or ()) if isinstance(w, str) and key(w)]
+    # ⚠️ Читатель иногда переписывает в «подозрительные» сам список известных написаний (а заодно
+    # рвёт JSON на длинном ответе) — но это по определению ВЕРНЫЕ слова. Такие пометки — не пометки.
+    known = {sound(t) for term in terms for t in term.split() if len(key(t)) >= 3}
+    return [w for w in (words or ()) if isinstance(w, str) and key(w) and sound(w) not in known]
 
 
 # --- страж подсказки: метрики Whisper видят, когда промпт сломал расшифровку --------------------

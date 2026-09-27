@@ -172,3 +172,14 @@ def test_prompt_guard_catches_both_failure_modes_of_a_prompt():
     # петля: сжатие взлетело, а logprob ВЫРОС — уверенное зацикливание, logprob его не видит
     assert A.prompt_guard(clean, {'avg_logprob': 0.04, 'compression_ratio': 22.0}).startswith('петля')
     assert A.prompt_guard({}, {}) == ''                          # метрик нет — не судим
+
+
+async def test_reader_does_not_flag_the_known_spellings_it_was_given():
+    """Пометка, совпадающая с известным написанием, — не пометка: читатель бывало переписывал
+    в подозрительные весь список, который ему дали."""
+    class Echo:
+        async def complete_json(self, messages, schema, **kw):
+            return {'suspicious': ['Postgres', 'Кузнецова', 'прегресс', 'kafka']}
+
+    flags = await A.reader_flags(Echo(), 'это прегресс тут', ['Postgres', 'Мария Кузнецова', 'Kafka'])
+    assert flags == ['прегресс']
