@@ -25,7 +25,7 @@ from stages import arbitrate as arbitrate_stage
 from stages.chunking import MIN_S as chunking_min_s
 from stages.chunking import chunk as chunk_fn
 from stages.chunking import gap_chunks
-from stages.final_round import correct, doc_summary, has_entity_signal, recall_entities
+from stages.final_round import apply_fixes, correct, doc_summary, has_entity_signal, recall_entities
 from fingerprint import one_line, stack_fingerprint
 from stages.glossary import build_glossary, relevant
 from stages.hints import build_hints, hinted as hinted_canonicals, merge as merge_hints
@@ -222,8 +222,24 @@ def _window(text: str, fixes) -> tuple[str, bool]:
     return piece, False
 
 
+def _ear_prefers(heard: str | None, was: str, now: str, margin: float = 0.15) -> str:
+    """За кого звук: 'now' · 'was' · 'tie' · 'silent'. Сравнение ПО ЗВУЧАНИЮ с лучшим словом окна."""
+    from difflib import SequenceMatcher
+    from stages.arbitrate import key as _key, sound as _sound
+    if not heard:
+        return 'silent'
+    hs = [_sound(_key(w)) for w in heard.split() if _key(w)]
+    sw, sn = _sound(was), _sound(now)
+    bw = max((SequenceMatcher(a=sw, b=h).ratio() for h in hs), default=0.0)
+    bn = max((SequenceMatcher(a=sn, b=h).ratio() for h in hs), default=0.0)
+    if bn - bw >= margin:
+        return 'now'
+    return 'was' if bw - bn >= margin else 'tie'
+
+
 async def _final_round(turns, dsum: str, gloss, llm, concurrency: int, step,
-                       always=(), sweep_delay: float = 30.0, emit=None) -> tuple[int, int]:
+                       always=(), sweep_delay: float = 30.0, emit=None,
+                       protect=(), ear=None) -> tuple[int, int]:
     """Правка сущностей по репликам — параллельно, с повтором и добивочным проходом.
 
     Реплики независимы; последовательный проход держал стадию 8-12 мин из 15-18 на выпуск.
@@ -257,7 +273,23 @@ async def _final_round(turns, dsum: str, gloss, llm, concurrency: int, step,
                 fixes: list[dict] = []
                 t['final'] = await correct(raw, dsum, _around(turns, i, CFG.context_turns),
                                            relevant(raw, gloss), llm, always, recalled,
-                                           corpus_desc=CFG.corpus_desc, fixes_out=fixes)
+                                           corpus_desc=CFG.corpus_desc, fixes_out=fixes,
+                                           **({'protect': protect} if protect else {}))
+                # Арбитраж ЗВУКОМ: замену известного слова отверг сторож — но финал-раунд иногда
+                # ЧИНИТ прайминг (звук за замену в 10 случаях из 104). Кусок слушается чистым
+                # ухом; звук ближе к замене — принимаем, ближе к прежнему или ничья — прежнее.
+                if ear is not None:
+                    for f in fixes:
+                        if f.get('why') != 'known_term':
+                            continue
+                        heard = await ear(t, f['was'])
+                        said = _ear_prefers(heard, f['was'], f['now'])
+                        if said == 'now':
+                            t['final'], n_ok, _ = apply_fixes(t['final'], [{'was': f['was'], 'now': f['now']}],
+                                                              relevant(raw, gloss), always)
+                            f.update(ok=bool(n_ok), why='known_term→ear:now' if n_ok else 'known_term→ear:now,not_found')
+                        else:
+                            f['why'] = f'known_term (ear: {said})'
                 if emit and fixes:
                     # ⚠️ Текст ПЕРЕД правками и в одном блоке с ними: события одной реплики
                     # уходят подряд, без await между ними, поэтому в ленте они не перемешаются с
@@ -678,8 +710,47 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         # термин, отбрасывается. Защищаем только подтверждённые, а не весь список снаружи —
         # `_term_survives` перебирает `always` на каждую замену.
         protect = list(CFG.always_terms) + [c for h in seed for c in h['canonicals']]
+        protect = ()
+        if CFG.protect_known:
+            protect = tuple(dict.fromkeys(
+                [x for x in list((hints or {}).get('terms') or ()) + list((hints or {}).get('names') or ())
+                 if isinstance(x, str)] + [x for x in always if x]))
+
+        async def _ear(turn: dict, was: str) -> str | None:
+            """Чистое ухо на 30 с вокруг спорного слова реплики — окно, не слово (ADR-0030)."""
+            segs = turn.get('segments') or []
+            if not segs:
+                return None
+            at = None
+            for sg in segs:                              # точные времена от декодера, если есть
+                for w in sg.get('words') or ():
+                    if (w.get('word') or '').strip().strip('.,!?;:«»"') .lower() == was.strip('.,!?;:«»"').lower():
+                        at = float(w['start']); break
+                if at is not None:
+                    break
+            if at is None:                               # иначе — по доле слова в реплике
+                words = (turn.get('raw') or '').split()
+                pos = next((k for k, w in enumerate(words) if w.strip('.,!?;:«»"').lower() == was.strip('.,!?;:«»"').lower()), None)
+                if pos is None:
+                    return None
+                a0, b0 = segs[0]['start'], segs[-1]['end']
+                at = a0 + (b0 - a0) * pos / max(1, len(words))
+            sl = str(tmp / f'ear{int(at * 100)}.wav')
+            try:
+                await asyncio.to_thread(_slice, wav, max(0.0, at - 15), min(audio_sec, at + 15), sl)
+                async with _res('whisper', CFG.whisper_slots):
+                    got = await asyncio.to_thread(lambda: audio_clients.asr(sl, ''))
+                return got.get('text') or ''
+            except Exception as error:      # noqa: BLE001 — ухо не роняет запись
+                log.warning('арбитраж звуком не вышел (%s): %s', was, error)
+                return None
+            finally:
+                Path(sl).unlink(missing_ok=True)
+
         n_round, n_failed = await _final_round(turns, dsum, gloss, llm, CFG.round_concurrency,
-                                              step, protect, emit=emit)
+                                              step, protect, emit=emit,
+                                             **({'protect': protect} if protect else {}),
+                                             **({'ear': _ear} if (CFG.protect_known and CFG.final_ear) else {}))
         raw_side = {f"{t['start']:.1f}": {'raw': t['raw'], 'final': t['final']}
                     for t in turns if t['final'] != t['raw']}
         tm['round_s'] = round(time.monotonic() - _t, 1)

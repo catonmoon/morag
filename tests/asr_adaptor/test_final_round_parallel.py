@@ -239,3 +239,40 @@ def test_known_words_of_the_record_are_not_replaced_by_different_sounding_ones()
     # без protect — прежнее поведение: все три замены применяются
     out2, applied2, _ = apply_fixes(text, fixes)
     assert 'MCP' in out2 and 'PLN' in out2 and applied2 == 3
+
+
+async def test_ear_arbitrates_a_refused_known_word_replacement(monkeypatch):
+    """Сторож отверг замену известного слова; звук решает: ближе к замене — принять, иначе оставить."""
+    from stages.final_round import apply_fixes
+
+    async def proposing(raw, dsum, csum, canon, llm, always=(), recalled='', fixes_out=None, protect=(), **kw):
+        fixed, _, _ = apply_fixes(raw, [{'was': 'МММ', 'now': 'MCP'}], canon, always, log_to=fixes_out, protect=protect)
+        return fixed
+
+    async def ear_for_now(turn, was):
+        return 'кто тут знает MCP вообще'               # звук ближе к «MCP»
+
+    async def ear_for_was(turn, was):
+        return 'кто тут знает ммм вообще'
+
+    monkeypatch.setattr(pipeline, 'has_entity_signal', lambda raw, gloss: True)
+    monkeypatch.setattr(pipeline, 'correct', proposing)
+    monkeypatch.setattr(pipeline, 'relevant', lambda *a: [])
+    monkeypatch.setattr(pipeline, 'recall_entities', lambda *a, **kw: _async(''))
+    for ear, expect_final, expect_why in ((ear_for_now, 'кто знает МCP?', 'known_term→ear:now'),
+                                          (ear_for_was, 'кто знает МММ?', 'known_term (ear: was)'),
+                                          (None, 'кто знает МММ?', 'known_term')):
+        turns = _turns(1)
+        turns[0]['raw'] = 'кто знает МММ?'
+        await pipeline._final_round(turns, 'сводка', [], None, 6, None, protect=('МММ',), ear=ear)
+        assert turns[0]['fixes'][0]['why'] == expect_why
+        assert turns[0]['final'].replace('MCP', 'МCP') == expect_final
+
+
+def test_ear_prefers_compares_by_sound_with_a_margin():
+    # ⚠️ Сравнение — с ЛУЧШИМ словом окна, и оно грубое: ничья трактуется за прежнее слово —
+    # это предохранитель, а не недостаток.
+    assert pipeline._ear_prefers('кербер ос в проде', 'Сапфир', 'Kerberos') == 'now'
+    assert pipeline._ear_prefers('сапфир ос в проде', 'Сапфир', 'Kerberos') == 'was'
+    assert pipeline._ear_prefers('кербер в проде', 'Кербер', 'Kerberos') == 'tie'
+    assert pipeline._ear_prefers('', 'a', 'b') == 'silent' and pipeline._ear_prefers(None, 'a', 'b') == 'silent'
