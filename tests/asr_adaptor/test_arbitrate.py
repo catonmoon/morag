@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
 
 import pipeline
 from stages import arbitrate as A
@@ -193,6 +194,18 @@ def test_unresolved_dispute_is_journaled_not_decided():
     assert dec == [{'i': 1, 'was': 'поставил', 'now': 'поставила', 'by': 'спорно', 'taken': False}]
 
 
+def test_ear_window_never_cuts_a_word_out_of_context():
+    chunk = {'start': 100.0, 'end': 112.0, 'raw': 'один два три четыре',
+             'segments': [{'start': 100.0, 'end': 112.0, 'text': 'один два три четыре',
+                           'words': [{'word': ' три', 'start': 107.0, 'end': 107.5}]}]}
+    disputes = [{'i': 2, 'was': 'три', 'now': 'тры', 'by': 'спорно'}]
+    assert A.ear_window(chunk, disputes, 'chunk', 3000.0) == (100.0, 112.0)
+    assert A.ear_window(chunk, disputes, 'window30', 3000.0) == (92.0, 122.0)       # 30 с вокруг слова
+    a, b = A.ear_window(chunk, disputes, 'neighbours', 3000.0, (70.0, 150.0))
+    assert a <= 100.0 and b >= 112.0 and b - a <= A.NEIGHBOURS_MAX
+    assert A.dispute_time({'start': 0.0, 'end': 10.0, 'raw': 'a b c d'}, [{'i': 3}]) == 8.75   # доля токена
+
+
 async def test_clean_ear_on_demand_is_called_only_where_a_dispute_remains(backend, wav, monkeypatch):
     """Режим demand: чистое ухо зовётся только для кусков, где второе ухо оставило нерешённый спор."""
     clean_calls: list[str] = []
@@ -203,8 +216,8 @@ async def test_clean_ear_on_demand_is_called_only_where_a_dispute_remains(backen
         a, b = backend.slices[path]
         if model == 'other':
             text = 'он поставила задачу' if a < 30 else 'это чисто тут'   # спор только в первом куске
-        elif prompt == '' and a < 100 and not model:
-            clean_calls.append(path); text = 'он поставила задачу'
+        elif Path(path).stem.startswith('e'):                             # третий голос — своим окном
+            clean_calls.append((path, a, b)); text = 'он поставила задачу'
             return {'text': text, 'segments': [{'start': 0.0, 'end': b - a, 'text': text}]}
         else:
             text = 'он поставил задачу' if a < 30 else 'это чисто тут'
@@ -214,10 +227,14 @@ async def test_clean_ear_on_demand_is_called_only_where_a_dispute_remains(backen
     monkeypatch.setattr(pipeline.audio_clients, 'asr', asr)
     monkeypatch.setattr(pipeline.CFG, 'second_model', 'other')
     monkeypatch.setattr(pipeline.CFG, 'clean_ear', 'demand')
+    monkeypatch.setattr(pipeline.CFG, 'clean_ear_window', 'window30')
     monkeypatch.setattr(pipeline.CFG, 'arbitrate_gate', '')
     r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
 
-    assert r['timing']['arbitrate_gate']['третий голос'] >= 1
+    gate = r['timing']['arbitrate_gate']
+    assert gate['третий голос'] >= 1 and len(clean_calls) == gate['третий голос']
+    assert all(abs((b - a) - A.EAR_WINDOW) < 1e-6 or a == 0.0 for _, a, b in clean_calls)   # окно, не слово
+    assert gate['секунд третьего голоса'] > 0
     assert all(d['by'] in ('голосование', 'спорно') for d in r['arbitration'])
     assert any(d['by'] == 'голосование' and d['taken'] for d in r['arbitration'])
 

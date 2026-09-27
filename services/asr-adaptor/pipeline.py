@@ -653,9 +653,20 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
                             # споры, не решённые ни правилом, ни свидетелем.
                             _, first = arbitrate_stage.arbitrate(c['raw'], second['text'], None, canon,
                                                                  ratio=CFG.arbitrate_ratio)
-                            if any(d['by'] == 'спорно' for d in first):
-                                clean = await asyncio.to_thread(lambda: audio_clients.asr(sl, ''))
+                            disputes = [d for d in first if d['by'] == 'спорно']
+                            if disputes:
+                                # Окном, а не словом (ADR-0030): кусок · 30 с вокруг спора · с соседями.
+                                nb = (float(chunks[i - 1]['start']) if i > 0 else float(c['start']),
+                                      float(chunks[i + 1]['end']) if i + 1 < len(chunks) else float(c['end']))
+                                a, b = arbitrate_stage.ear_window(c, disputes, CFG.clean_ear_window, audio_sec, nb)
+                                sl3 = str(tmp / f'e{i}.wav')
+                                try:
+                                    await asyncio.to_thread(_slice, wav, a, b, sl3)
+                                    clean = await asyncio.to_thread(lambda: audio_clients.asr(sl3, ''))
+                                finally:
+                                    Path(sl3).unlink(missing_ok=True)
                                 gated['третий голос'] = gated.get('третий голос', 0) + 1
+                                gated['секунд третьего голоса'] = round(gated.get('секунд третьего голоса', 0) + (b - a), 1)
                 except Exception as error:      # noqa: BLE001 — стадия не имеет права ронять запись
                     log.warning('арбитраж %.1f-%.1f с не вышел: %s: %s',
                                 c['start'], c['end'], type(error).__name__, error)

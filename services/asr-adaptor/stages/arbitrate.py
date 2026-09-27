@@ -150,7 +150,8 @@ def arbitrate(raw: str, second: str, clean: str | None, canon: set[str], *, lang
     """Разобрать расхождения куска со вторым ухом. Возвращает (новый текст, решения).
 
     Решение: `{i, was, now, by}`; `by` ∈ частота · канон · голосование, а отклонённое большинство
-    пишется как `by: вето` с `taken: False` — журнал обязан показывать и то, что НЕ сделали.
+    пишется как `by: вето` с `taken: False` — журнал обязан показывать и то, что НЕ сделали; спор,
+    который никто не решил, — как `by: спорно` (по нему конвейер зовёт третий голос по требованию).
     """
     toks, s_toks = raw.split(), (second or '').split()
     if not toks or not s_toks:
@@ -192,6 +193,10 @@ def arbitrate(raw: str, second: str, clean: str | None, canon: set[str], *, lang
                     continue
                 by = 'голосование'
             if by is None:
+                # Спор, который не решили ни правило, ни свидетель. В журнал — «спорно»: агент не
+                # имеет права выбирать по вкусу, но и молчать о споре не должен; по этой пометке
+                # конвейер решает, звать ли третий голос (чистое ухо по требованию).
+                decisions.append({'i': i, 'was': was, 'now': now, 'by': 'спорно', 'taken': False})
                 continue
             out[i] = _put(was, now)
             decisions.append({'i': i, 'was': was, 'now': out[i], 'by': by, 'taken': True})
@@ -281,4 +286,53 @@ def prompt_guard(clean: dict, prompted: dict) -> str:
     if a is not None and b is not None and b < a - GUARD_LOGPROB_DROP:
         return f'ослепла: logprob {b:.2f} против {a:.2f}'
     return ''
+
+
+# --- окно третьего голоса -----------------------------------------------------------------------
+
+EAR_WINDOW = 30.0           # окно Whisper: короче — энкодер дополняет тишиной, длиннее — несколько окон
+NEIGHBOURS_MAX = 90.0       # кусок с соседями — потолок, иначе это уже не окно, а проход
+
+
+def dispute_time(chunk: dict, disputes: list[dict]) -> float:
+    """Где звучит спорное место: по временам слов декодера, если они есть, иначе по доле токена."""
+    toks = (chunk.get('raw') or '').split()
+    idx = sorted(d['i'] for d in disputes) if disputes else [0]
+    mid = idx[len(idx) // 2]
+    want = key(toks[mid]) if 0 <= mid < len(toks) else ''
+    for s in chunk.get('segments') or ():
+        for w in s.get('words') or ():
+            if want and key(w.get('word') or '') == want:
+                return float(w['start'])
+    a, b = float(chunk.get('start') or 0.0), float(chunk.get('end') or 0.0)
+    return a + (b - a) * (mid + 0.5) / max(1, len(toks))
+
+
+def ear_window(chunk: dict, disputes: list[dict], mode: str, audio_sec: float,
+               neighbours: tuple[float, float] | None = None) -> tuple[float, float]:
+    """Что слушать третьим голосом. ⚠️ Никогда не слово: окно по слову давало вдвое меньше попаданий.
+
+    | режим | окно |
+    |---|---|
+    | `chunk` | кусок как есть (≤ 28 с; короткий кусок энкодер дополнит тишиной) |
+    | `window30` | 30 с вокруг спорного места — поверх границ кусков, по временам слов декодера |
+    | `neighbours` | кусок с соседями, не длиннее 90 с (несколько окон Whisper подряд) |
+    """
+    a, b = float(chunk.get('start') or 0.0), float(chunk.get('end') or 0.0)
+    if mode == 'window30':
+        t = dispute_time(chunk, disputes)
+        a, b = t - EAR_WINDOW / 2, t + EAR_WINDOW / 2
+    elif mode == 'neighbours' and neighbours:
+        na, nb = neighbours
+        half = NEIGHBOURS_MAX / 2
+        a, b = max(na, a - half), min(nb, b + half)
+        if b - a > NEIGHBOURS_MAX:
+            mid = (float(chunk['start']) + float(chunk['end'])) / 2
+            a, b = mid - half, mid + half
+    a = max(0.0, a)
+    if audio_sec:
+        b = min(audio_sec, b)
+    if b - a < 1.0:
+        a, b = max(0.0, a - 1.0), a + 2.0
+    return round(a, 2), round(b, 2)
 
