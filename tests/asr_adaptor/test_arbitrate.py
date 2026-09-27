@@ -231,3 +231,37 @@ async def test_protect_known_runs_end_to_end(backend, wav, monkeypatch):
     r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1',
                                     hints={'terms': ['Postgres'], 'names': ['Мария Кузнецова']})
     assert r['turns'] and r['markdown']
+
+
+async def test_always_terms_stay_protected_when_known_word_protection_is_off(backend, wav, monkeypatch):
+    """Регрессия на затенение: при выключенной защите известных слов прежнее вето по постоянным
+    терминам (`_term_survives`) обязано работать как раньше."""
+    from stages.final_round import apply_fixes
+
+    async def proposing(raw, dsum, csum, canon, llm, always=(), recalled='', fixes_out=None, **kw):
+        fixed, _, _ = apply_fixes(raw, [{'was': 'Kubernetes', 'now': 'Cabernet'}], canon, always, log_to=fixes_out)
+        return fixed
+
+    def asr(path, prompt='', **kw):
+        if path.endswith('in.wav'):
+            return {'text': ' '.join(s['text'] for s in PASS1), 'segments': PASS1}
+        a, b = backend.slices[path]
+        return {'text': 'ставим Kubernetes сюда', 'segments': [{'start': 0.0, 'end': b - a, 'text': 'ставим Kubernetes сюда'}]}
+
+    monkeypatch.setattr(pipeline, '_RES_SEMS', {})
+    monkeypatch.setattr(pipeline.audio_clients, 'asr', asr)
+    monkeypatch.setattr(pipeline, 'has_entity_signal', lambda raw, gloss: True)
+    monkeypatch.setattr(pipeline, 'correct', proposing)
+    monkeypatch.setattr(pipeline, 'relevant', lambda *a: [])
+
+    async def nothing(*a, **kw):
+        return ''
+
+    monkeypatch.setattr(pipeline, 'recall_entities', nothing)
+    monkeypatch.setattr(pipeline.CFG, 'always_terms', ('Kubernetes',))
+    monkeypatch.setattr(pipeline.CFG, 'protect_known', False)
+    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+
+    verdicts = [f for f in r.get('fixes') or [] if f['was'] == 'Kubernetes']
+    assert verdicts and all(f['why'] == 'breaks_term' for f in verdicts)
+    assert all('Cabernet' not in (t.get('text') or '') for t in r['turns'])
