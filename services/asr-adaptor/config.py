@@ -109,6 +109,10 @@ class Config:
     # `hints.vocabulary`, английский словарь) в подсказку не идёт. B. Модель сама помечает пары
     # «знаю / догадка», в подсказку идут только известные. Оба выключены; оба — ADR-0030 (2и).
     glossary_witness: bool = field(default_factory=lambda: _flag('ASR_GLOSSARY_WITNESS', '0'))
+    # Порог английского словаря для свидетеля A (zipf). 3.0 — обычные слова; замерено живьём, что при
+    # нём уходит половина глоссария длинной записи (59 из 111): «kubernetes» 2.2, «jira» 2.1, «gitlab»
+    # 1.9 по zipf — термины, а не обычные слова. 1.5 оставляет их, выбрасывая выдумки (0.0).
+    glossary_witness_en: float = field(default_factory=lambda: float(_env('ASR_GLOSSARY_WITNESS_EN', '3.0')))
     glossary_selflabel: bool = field(default_factory=lambda: _flag('ASR_GLOSSARY_SELFLABEL', '0'))
     # Авто-наминг Speaker_N → имя (интро-LLM + реестр). off → транскрипт остаётся в Speaker_N.
     # ⚠️ ВЫКЛЮЧЕН ПО УМОЛЧАНИЮ. Стадия исходит из подкастового допущения «ведущий представляет

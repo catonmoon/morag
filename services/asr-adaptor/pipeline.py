@@ -512,7 +512,8 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             if CFG.glossary_witness:
                 gloss = witnessed(gloss, known=list(CFG.always_terms) + [str(t) for k_ in ('terms', 'names', 'spellings')
                                                                          for t in (h.get(k_) or ()) if t],
-                                  vocabulary=set(str(v) for v in (h.get('vocabulary') or ())), log=drop_log)
+                                  vocabulary=set(str(v) for v in (h.get('vocabulary') or ())),
+                                  en_threshold=CFG.glossary_witness_en, log=drop_log)
             tm['n_glossary_dropped'] = len(drop_log)
             if drop_log:
                 log.info('глоссарий: без свидетеля / по самооценке выброшено %d каноников', len(drop_log))
