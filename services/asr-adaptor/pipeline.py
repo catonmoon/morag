@@ -27,7 +27,7 @@ from stages.chunking import chunk as chunk_fn
 from stages.chunking import gap_chunks
 from stages.final_round import apply_fixes, correct, doc_summary, has_entity_signal, recall_entities
 from fingerprint import one_line, stack_fingerprint
-from stages.glossary import build_glossary, relevant
+from stages.glossary import build_glossary, reconcile, relevant
 from stages.hints import build_hints, hinted as hinted_canonicals, merge as merge_hints
 from stages.namer import name_speakers
 from stages.prompt_budget import WhisperTokenCounter, build_prompt
@@ -497,6 +497,15 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             build_hints(full_text, llm, terms=h.get('terms') or (), names=h.get('names') or (),
                         about=h.get('about') or title))
         gloss = merge_hints(seed, gloss)
+        if CFG.glossary_reconcile:
+            rec_log: list[dict] = []
+            gloss = reconcile(gloss, known=list(CFG.always_terms) + [str(t) for k_ in ('terms', 'names', 'spellings')
+                                                                    for t in (h.get(k_) or ()) if t],
+                              vocabulary=set(str(v) for v in (h.get('vocabulary') or ())), log=rec_log)
+            tm['n_reconciled'] = len(rec_log)
+            if rec_log:
+                log.info('глоссарий: сверка с известными написаниями — подменено %d, выброшено %d',
+                         sum(1 for r in rec_log if r['now']), sum(1 for r in rec_log if not r['now']))
         hint_set = hinted_canonicals(seed)
         tm['glossary_s'] = round(time.monotonic() - _t, 1)
         tm['n_glossary'] = len(gloss)  # размер глоссария — чем кормим подсказку пасса-2 (бюджет ≤200 ток.)
