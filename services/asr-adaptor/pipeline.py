@@ -501,11 +501,10 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             rec_log: list[dict] = []
             gloss = reconcile(gloss, known=list(CFG.always_terms) + [str(t) for k_ in ('terms', 'names', 'spellings')
                                                                     for t in (h.get(k_) or ()) if t],
-                              vocabulary=set(str(v) for v in (h.get('vocabulary') or ())), log=rec_log)
+                              log=rec_log)
             tm['n_reconciled'] = len(rec_log)
             if rec_log:
-                log.info('глоссарий: сверка с известными написаниями — подменено %d, выброшено %d',
-                         sum(1 for r in rec_log if r['now']), sum(1 for r in rec_log if not r['now']))
+                log.info('глоссарий: сверка с известными написаниями — подменено %d', len(rec_log))
         hint_set = hinted_canonicals(seed)
         tm['glossary_s'] = round(time.monotonic() - _t, 1)
         tm['n_glossary'] = len(gloss)  # размер глоссария — чем кормим подсказку пасса-2 (бюджет ≤200 ток.)

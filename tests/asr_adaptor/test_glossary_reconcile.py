@@ -35,17 +35,11 @@ def test_fuzzy_substitution_needs_both_sides_and_a_rare_canonical():
     assert out[0]['canonicals'] == ['Kubernetes']
 
 
-def test_transliteration_without_a_witness_is_dropped_but_established_latin_stays():
-    log = []
-    out = G.reconcile([{'heard': 'Морак', 'canonicals': ['Morak']},
-                       {'heard': 'Гитлаб', 'canonicals': ['GitLab']},
-                       {'heard': 'лейбл', 'canonicals': ['label']},
-                       {'heard': 'Квен', 'canonicals': ['Qwen', 'Квен']}],
-                      vocabulary={'gitlab'}, log=log)
-    assert [e['canonicals'] for e in out] == [['GitLab'], ['label'], ['Квен']]
-    assert {(r['was'], r['why']) for r in log} == {('Morak', 'транслитерация'), ('Qwen', 'транслитерация')}
+def test_unknown_latin_canonical_is_left_alone():
+    """Без свидетеля каноник не трогаем: правила «транслитерация — вон» здесь нет (решение владельца)."""
+    out = G.reconcile([{'heard': 'Гитлаб', 'canonicals': ['GitLab']}, {'heard': 'Квен', 'canonicals': ['Qwen', 'Квен']}])
+    assert [e['canonicals'] for e in out] == [['GitLab'], ['Qwen', 'Квен']]
 
 
-def test_entry_without_canonicals_disappears_and_empty_input_is_fine():
+def test_empty_input_is_fine():
     assert G.reconcile([]) == []
-    assert G.reconcile([{'heard': 'ремка', 'canonicals': ['Remka']}]) == []

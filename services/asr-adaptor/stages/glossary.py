@@ -223,8 +223,6 @@ def relevant(chunk_text: str, glossary: list[dict]) -> list[str]:
 
 # --- сверка глоссария с известными написаниями (ADR-0030, 2з) -------------------------------------
 
-_LATIN_WORD = re.compile(r'[A-Za-z]+')
-_CYR = re.compile(r'[А-Яа-яЁё]')
 RECONCILE_SIM = 0.85      # похожесть по звучанию для подмены известным написанием (нестрого)
 RECONCILE_HEARD = 0.75    # …и услышанное тоже обязано походить на него: иначе «creds» → «Redis»
 RECONCILE_MIN = 5         # нестрогая сверка — только от 5 звуков; короче — лишь точное совпадение
@@ -235,25 +233,20 @@ def _english_word(tok: str, threshold: float = 3.0) -> bool:
 
 
 def reconcile(glossary: list[dict], known: list[str] | tuple[str, ...] = (),
-              vocabulary: set[str] | frozenset[str] | None = None,
               log: list[dict] | None = None) -> list[dict]:
-    """Каноники глоссария против ЗНАНИЯ снаружи. Два правила, оба по свидетелю, без LLM.
+    """Каноники глоссария против ЗНАНИЯ снаружи: одно правило, по свидетелю, без LLM.
 
     Замерено 28.09 на 522 местах гарблов и десяти живых прогонах: свободный глоссарий «канонизирует»
-    гарбл в него самого («Postgress» рядом с «Postgres») и транслитерирует обычные слова в латиницу
-    («пре-альфа» → «prealpha»), а подсказка пасса-2 это воспроизводит. Выбрасывать латиницу целиком
-    нельзя — «GitLab», «Big Data» находит только глоссарий.
+    гарбл в него самого («Postgress» рядом с «Postgres»), а подсказка пасса-2 это воспроизводит.
+    Выбрасывать латиницу целиком нельзя — «GitLab», «Big Data» находит только глоссарий.
 
-    1. **Подмена известным написанием.** Каноник, звучащий как известное слово (`known`: постоянные
+    **Подмена известным написанием.** Каноник, звучащий как известное слово (`known`: постоянные
        термины → подсказки записи → написания снаружи, по убыванию доверия), но написанный иначе, —
        заменяется им. Точное совпадение звучания — всегда; нестрогое (≥ 0.85) — только от 5 звуков,
        когда и УСЛЫШАННОЕ похоже на известное (≥ 0.75) и каноник не обычное английское слово:
        иначе «creds» становился «Redis», а «Flow» — «MLflow». Каноник, который сам известен, не трогаем.
-    2. **Транслитерация — не знание.** Латинский каноник, звучащий ровно как услышанная кириллица,
-       остаётся, только если это установившееся написание: есть в `vocabulary` (домен даёт список
-       латинских слов, живущих в его текстах) или обычное английское слово по частотнику; иначе
-       выбрасывается — «Morak», «prealpha», «Remka» не знание, а перекодировка гарбла.
-    Пары без каноников уходят; журнал (`log`) — что подменили и что выбросили, с причиной.
+    ⓘ Правило «транслитерация без свидетеля — вон» здесь было и снято владельцем 28.09 («тупая
+    идея»): признак «звучит как услышанное» — подпорка, а не знание. Журнал (`log`) — что подменили.
     """
     from .arbitrate import key, similar, sound
     if not glossary:
@@ -261,11 +254,9 @@ def reconcile(glossary: list[dict], known: list[str] | tuple[str, ...] = (),
     known = [k for k in dict.fromkeys(str(k) for k in known if k)]
     kidx = [(k, sound(key(k))) for k in known]
     kkeys = {key(k) for k in known}
-    vocab = {v.lower() for v in (vocabulary or ())}
     out: list[dict] = []
     for entry in glossary:
         heard = str(entry.get('heard') or '')
-        sh = sound(key(heard))
         cans: list[str] = []
         for c in entry.get('canonicals') or ():
             c = str(c)
@@ -287,12 +278,6 @@ def reconcile(glossary: list[dict], known: list[str] | tuple[str, ...] = (),
                     log.append({'heard': heard, 'was': c, 'now': best, 'why': 'известное написание'})
                 cans.append(best)
                 continue
-            if _LATIN_WORD.search(c) and _CYR.search(heard) and sc == sh:
-                words = [w.lower() for w in _LATIN_WORD.findall(c)]
-                if not all(w in vocab or _english_word(w) for w in words):
-                    if log is not None:
-                        log.append({'heard': heard, 'was': c, 'now': None, 'why': 'транслитерация'})
-                    continue
             cans.append(c)
         cans = list(dict.fromkeys(cans))
         if cans:
