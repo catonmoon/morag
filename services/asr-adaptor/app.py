@@ -18,6 +18,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 
 import audio_clients
 import jobs
+import prompts
 from config import CFG
 from pipeline import run_pipeline
 
@@ -27,6 +28,19 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name
 
 app = FastAPI(title='asr-adaptor', version='1.0')
 _LLM = CFG.build_llm()
+# Переопределения промптов стадий (`ASR_PROMPTS=<файл.toml>`) применяются ОДИН РАЗ при старте.
+# Битый файл роняет старт, а не молчит: человек, тюнящий промпт, обязан узнать, что он не применился.
+_PROMPTS = prompts.install(CFG.prompts_file)
+if _PROMPTS:
+    logging.getLogger('asr').info('промпты из %s: %s', CFG.prompts_file, ', '.join(_PROMPTS))
+
+
+def _runner(mode: str):
+    """`legacy` — `pipeline.run_pipeline`; `graph` — `graph.run.run_graph` (та же сигнатура)."""
+    if mode == 'graph':
+        from graph.run import run_graph  # noqa: PLC0415 — граф грузится, только если его выбрали
+        return run_graph
+    return run_pipeline
 
 
 def _enriched(r: dict) -> dict:
@@ -62,7 +76,10 @@ def _enriched(r: dict) -> dict:
                        # на первом живом прогоне: в логе 4 решения, в артефакте ноль.
                        **({'arbitration': r['arbitration']} if r.get('arbitration') else {}),
                        # Вердикты финал-раунда: что предложила модель, что принял код и почему.
-                       **({'fixes': r['fixes']} if r.get('fixes') else {})},
+                       **({'fixes': r['fixes']} if r.get('fixes') else {}),
+                       # Граф (ASR_PIPELINE=graph): пройденные узлы, журнал инструментов, счётчики.
+                       # У линейного конвейера ключа нет — прежний артефакт байт в байт.
+                       **({'graph': r['graph']} if r.get('graph') else {})},
     }
 
 
@@ -114,7 +131,9 @@ def models():
 async def transcribe(file: UploadFile = File(...), model: str = Form('asr-adaptor'),
                      response_format: str = Form('verbose_json'), mode: str = Form(''),
                      episode: str = Form(''), title: str = Form(''), url: str = Form(''),
-                     hints: str = Form(''), events: str = Form('')):
+                     hints: str = Form(''), events: str = Form(''), pipeline: str = Form('')):
+    # `pipeline=legacy|graph` — выбор конвейера на ОДНУ запись (A/B без перезапуска); пусто — конфиг.
+    run = _runner(pipeline.strip().lower() if pipeline.strip() else CFG.pipeline)
     suffix = Path(file.filename or 'audio').suffix or '.mp3'
     tmp = tempfile.mktemp(suffix=suffix)
     Path(tmp).write_bytes(await file.read())
@@ -136,7 +155,7 @@ async def transcribe(file: UploadFile = File(...), model: str = Form('asr-adapto
 
     async def job(progress):
         try:
-            return _enriched(await run_pipeline(
+            return _enriched(await run(
                 tmp, _LLM, episode=episode, title=title, url=url, hints=known,
                 progress=progress))
         finally:

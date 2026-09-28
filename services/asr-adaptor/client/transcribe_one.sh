@@ -95,9 +95,15 @@ echo "[$EPID] $(stat -f%z "$AUDIO" 2>/dev/null || stat -c%s "$AUDIO") bytes; sub
 HINTS=""
 [ -n "${HINTS_FILE:-}" ] && [ -s "${HINTS_FILE:-}" ] && HINTS=$(cat "$HINTS_FILE")
 
+# Какой конвейер гонит запись: `PIPELINE=graph` — граф состояний (эксперимент, см. graph/),
+# пусто — как настроен адаптер (`ASR_PIPELINE`, по умолчанию прежний конвейер). Поле формы
+# перебивает конфиг на одну запись — так две реализации сравниваются на одном стенде без рестарта.
+extra=()
+[ -n "${PIPELINE:-}" ] && extra+=(-F "pipeline=${PIPELINE}")
+
 RESP=$(curl -fsS --max-time 600 -X POST "$BASE/v1/audio/transcriptions" \
   -F "file=@${AUDIO};type=audio/mpeg" -F "mode=async" -F "episode=${EPID}" \
-  -F "title=${TITLE}" -F "url=${SRC}" -F "hints=${HINTS}")
+  -F "title=${TITLE}" -F "url=${SRC}" -F "hints=${HINTS}" "${extra[@]}")
 JID=$(printf '%s' "$RESP" | python3 -c 'import sys,json;print(json.load(sys.stdin)["job_id"])')
 echo "[$EPID] job $JID; polling..."
 

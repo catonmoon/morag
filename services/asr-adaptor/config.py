@@ -41,6 +41,11 @@ def _clean_ear_mode(raw: str) -> str:
     return 'always' if v in ('1', 'true', 'yes', 'on', 'always') else ''
 
 
+def _pipeline_mode(raw: str) -> str:
+    """`graph` — конвейер как граф состояний (`graph/`), всё остальное — прежний `legacy`."""
+    return 'graph' if (raw or '').strip().lower() in ('graph', 'граф') else 'legacy'
+
+
 def _enable_thinking() -> bool | None:
     """Reasoning-флаг для LLMClient (env `ASR_LLM_ENABLE_THINKING`). Пусто/none → None: НЕ слать
     reasoning-параметр (для non-reasoning моделей типа grok-4.20-non-reasoning он невалиден → 400).
@@ -84,6 +89,14 @@ class Config:
 
     # --- прочее ---
     mode: str = field(default_factory=lambda: _env('ASR_MODE', 'async'))  # async | sync
+    # Какой конвейер гонит запись: `legacy` — `pipeline.run_pipeline` (умолчание, байт в байт
+    # прежний), `graph` — тот же конвейер как граф состояний (`graph/run.py`): узлы, инструменты,
+    # заменяемая политика решения по месту, журнал вызовов. Эксперимент: граф удаляется каталогом.
+    # Поле формы `pipeline=` у `POST /v1/audio/transcriptions` перебивает на одну запись — A/B на
+    # одном стенде без перезапуска.
+    pipeline: str = field(default_factory=lambda: _pipeline_mode(_env('ASR_PIPELINE', 'legacy')))
+    # Файл переопределений промптов стадий (TOML, см. prompts.py). Пусто — встроенные тексты.
+    prompts_file: str = field(default_factory=lambda: _env('ASR_PROMPTS', ''))
     whisper_tokenizer: str = field(default_factory=lambda: _env('ASR_WHISPER_TOKENIZER', 'openai/whisper-large-v3'))
     # Форма подсказки пасса-2 (префикс перед списком написаний). Пусто — умолчание движка.
     prompt_prefix: str = field(default_factory=lambda: _env('ASR_PROMPT_PREFIX', ''))
@@ -284,6 +297,15 @@ class RetryingLLM:
         kwargs = self._with_rep(kwargs)
         return await self._policy.call(
             lambda: self._client.complete_json(*args, **kwargs), 'complete_json')
+
+    async def complete_with_tools(self, *args, **kwargs):
+        """Function calling (LLM-оркестратор графа) — под той же политикой ретраев.
+
+        До этого метод уходил в клиент через `__getattr__` МИМО ретраев: спайк шлюза посреди
+        цикла по месту ронял бы решение, а не ждал десять секунд, как остальные стадии."""
+        kwargs = self._with_rep(kwargs)
+        return await self._policy.call(
+            lambda: self._client.complete_with_tools(*args, **kwargs), 'complete_with_tools')
 
 
 CFG = Config()
