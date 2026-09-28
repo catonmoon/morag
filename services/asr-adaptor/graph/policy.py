@@ -103,17 +103,16 @@ class RulePolicy:
 # перечни описаны в схемах function calling; здесь — цель, правила и когда остановиться.
 ORCHESTRATOR_SYS = (
     'Ты — оркестратор проверки ОДНОГО места автоматической расшифровки русской речи. Ты не пишешь '
-    'и не правишь текст: замены делают правила и свидетели (звук, канон), а ты решаешь, какие '
-    'инструменты звать и когда остановиться. Каждый инструмент стоит времени: прослушивание — '
-    'секунды звука, читатель и правка — вызов модели. Не зови инструмент повторно с теми же '
-    'аргументами и не проси окно по слову — только куском или шире.\n'
-    'Место «кусок»: если текст выглядит чистым — сразу finish(skip); если есть подозрительные слова '
-    '(reader_flags), послушай другой моделью (listen ear=second), разбери расхождения правилами '
-    '(arbitrate_rules); остались споры — послушай чистым ухом (listen ear=clean, window=chunk) и '
-    'разбери ещё раз; затем finish(apply). Сомневаешься в слове — спроси in_canon или frequency.\n'
-    'Место «реплика»: recall, затем correct_turn; для замен с причиной known_term — listen(word), '
-    'sound_prefers, и apply_fix только если звук за замену; затем finish(apply).\n'
-    'Всегда заканчивай вызовом finish. Аргументы — строго по схеме инструмента.'
+    'и не правишь текст: замены делают правила и свидетели (звук, канон), код применяет их сам. '
+    'Твоя работа — решить, какие проверки стоят своей цены на этом месте, и вовремя остановиться. '
+    'Прослушивание стоит секунд звука, читатель и правка — вызова модели. Не зови инструмент '
+    'повторно с теми же аргументами.\n'
+    'Место «кусок»: сначала reader_flags. Пусто — finish(skip). Есть подозрения — listen(ear=second, '
+    'window=same), затем arbitrate_rules. Если в ответе disputes = 0 — finish(apply). Если споры '
+    'остались — один раз listen(ear=clean, window=chunk), снова arbitrate_rules и finish(apply).\n'
+    'Место «реплика»: recall, затем correct_turn. Для каждой замены с why = known_term: listen(word), '
+    'sound_prefers(was, now), и apply_fix только если said = now. Затем finish(apply).\n'
+    'Всегда заканчивай вызовом finish. Аргументы — строго по схеме; why — не длиннее 12 слов.'
 )
 
 
@@ -122,7 +121,7 @@ class LLMPolicy:
 
     kind = 'llm'
     RETRIES = 2            # битые аргументы: столько раз показать ошибку и спросить снова
-    MAX_TOKENS = 300
+    MAX_TOKENS = 800        # 300 обрезал аргументы finish на длинном «why» (живой прогон 28.09)
 
     def __init__(self, cfg, llm) -> None:
         self.cfg = cfg
@@ -184,11 +183,13 @@ class LLMPolicy:
                     raise ValueError('ожидался объект')
             except ValueError as e:
                 # Битые аргументы — сказать модели и спросить снова, а не падать и не гадать.
-                ex['messages'].append({'role': 'assistant', 'content': msg.get('content') or '', 'tool_calls': [tc]})
-                ex['messages'].append({'role': 'tool', 'tool_call_id': tc.get('id') or 'call_bad',
-                                       'content': json.dumps({'error': f'аргументы не JSON: {e}',
-                                                              'hint': 'верни объект по схеме инструмента'},
-                                                             ensure_ascii=False)})
+                # ⚠️⚠️ Сам битый вызов в историю НЕ кладём: шлюз разбирает аргументы прошлых вызовов
+                # и на обрезанной строке отвечает 400 на ВСЮ переписку — место терялось целиком
+                # (живой прогон 28.09: «Unterminated string», два куска из 27).
+                ex['messages'].append({'role': 'assistant', 'content': msg.get('content') or ''})
+                ex['messages'].append({'role': 'user', 'content':
+                                       f'Вызов {name or "инструмента"} не принят: аргументы не JSON ({e}). '
+                                       'Повтори вызов с объектом по схеме, why — коротко.'})
                 meter['orchestrator_bad_args'] = meter.get('orchestrator_bad_args', 0) + 1
                 continue
             ex['messages'].append({'role': 'assistant', 'content': msg.get('content') or '', 'tool_calls': [tc]})

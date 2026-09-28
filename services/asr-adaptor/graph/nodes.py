@@ -292,8 +292,10 @@ async def arbitrate(st: State, d: Deps, ev: Emitter) -> None:
             fin = await decide_place(place, policy, reg, cfg.graph_place_steps)
             _account(place)
             decisions = []
-            if fin.decision == 'apply' and place.heard.get('second') is not None:
-                decisions = (await reg.call('apply_swaps'))['decisions']
+            # Решения правил применяет КОД, если второе ухо слушали, — независимо от слова политики:
+            # политика выбирает, что слушать, а не судит правила против свидетелей.
+            if place.heard.get('second') is not None:
+                decisions = (await reg.call('apply_swaps', _internal=True))['decisions']
             for x in decisions:
                 row = {'start': round(c['start'], 2), 'end': round(c['end'], 2), **x}
                 arbitrate_log.append(row)
@@ -408,12 +410,8 @@ async def final_round(st: State, d: Deps, ev: Emitter) -> None:
                 reg = final_tools(place, d, slices, st=st, journal=st.journal, meter=st.meter)
                 fin = await decide_place(place, policy, reg, cfg.graph_place_steps)
                 fixes = place.fixes
-                if fin.decision == 'apply':
-                    t['final'] = place.final
-                else:
-                    t['final'] = raw
-                    for f in fixes:
-                        f['ok'], f['why'] = False, f"{f.get('why', '')} (место пропущено: {fin.why})"
+                # Текст — то, что прошло вето правки и звука; слово политики на него не влияет.
+                t['final'] = place.final
                 if fixes:
                     # ⚠️ Текст ПЕРЕД правками и в одном блоке с ними: события одной реплики уходят
                     # подряд, без await между ними, и в ленте не перемешаются с соседними.

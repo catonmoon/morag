@@ -86,13 +86,6 @@ def arbitrate_tools(place: Place, d, slices: Slices, *, journal: list, meter: di
         decisions = A.apply(c, second['text'], clean, place.canon, ratio=cfg.arbitrate_ratio)
         return {'decisions': decisions, 'taken': sum(1 for x in decisions if x.get('taken'))}
 
-    async def in_canon(word: str) -> dict:
-        return {'word': word, 'known': A.in_canon(word, place.canon)}
-
-    async def frequency(word: str) -> dict:
-        f = A.freq(word, 'ru')
-        return {'word': word, 'frequency': f, 'ordinary': bool(f is not None and f >= A.COMMON)}
-
     async def finish(decision: str, why: str = '') -> dict:
         return {'decision': decision, 'why': why}
 
@@ -111,13 +104,14 @@ def arbitrate_tools(place: Place, d, slices: Slices, *, journal: list, meter: di
         Tool('arbitrate_rules', 'Разобрать расхождения куска с услышанным правилами (частота, канон, '
              'голосование под вето). Возвращает решения и число споров, которые никто не решил.',
              arbitrate_rules),
-        Tool('apply_swaps', 'Применить решения правил к куску (текст, сегменты, слова декодера). '
-             'Единственный инструмент, который меняет текст.', apply_swaps),
-        Tool('in_canon', 'Знает ли канон записи это написание (по звучанию, с допуском на форму слова).',
-             in_canon, schema={'properties': {'word': {'type': 'string'}}, 'required': ['word']}),
-        Tool('frequency', 'Насколько слово обычно в русском языке (частотник); None — частотника нет.',
-             frequency, schema={'properties': {'word': {'type': 'string'}}, 'required': ['word']}),
-        Tool('finish', 'Закончить место: apply — применить решения правил, skip — оставить как есть.',
+        # ⚠️ Применение — ВНУТРЕННЕЕ: его зовёт узел после цикла, если второе ухо слушали. Живой
+        # прогон 28.09 показал, чем кончается открытое: модель звала его дважды и «skip» после него,
+        # а своим «skip» отменяла решения правил (взяла 1 из 15) — то есть судила против свидетелей.
+        Tool('apply_swaps', 'Применить решения правил к куску.', apply_swaps, internal=True),
+        # ⓘ `in_canon` и `frequency` из набора модели убраны: правила сверяются с каноном и частотником
+        # сами, на исход эти вызовы не влияют — в живом прогоне это 36 вызовов чистой цены.
+        Tool('finish', 'Закончить место. Решения правил применит код, если второе ухо слушали; '
+             'decision — apply (есть что разбирать) или skip (кусок чист, слушать нечего).',
              finish, schema={'properties': {'decision': {'type': 'string', 'enum': ['apply', 'skip']},
                                             'why': {'type': 'string'}},
                              'required': ['decision']}),
@@ -192,6 +186,18 @@ def final_tools(place: Place, d, slices: Slices, *, st, journal: list, meter: di
         return {'was': was, 'now': now, 'said': said}
 
     async def apply_fix(was: str, now: str) -> dict:
+        # ⚠️⚠️ Вето в КОДЕ, а не в промпте: живой прогон 28.09 — модель с открытым `apply_fix` сама
+        # писала текст («Не подделка?» → «Не-е-е. Подделка?»). Применить можно только замену, которую
+        # предложила правка, отверг сторож известных слов и за которую проголосовал ЗВУК.
+        cand = [f for f in place.fixes if f['was'] == was and f['now'] == now
+                and str(f.get('why', '')).startswith('known_term')]
+        if not cand:
+            raise ToolError('такой замены правка не предлагала или сторож её не отвергал', recoverable=False,
+                            hint='apply_fix — только для замен correct_turn с why=known_term')
+        said = place.last('sound_prefers', was=was, now=now)
+        if not (isinstance(said, dict) and said.get('said') == 'now'):
+            raise ToolError('звук не за замену: сначала listen(word) и sound_prefers(was, now) со «now»',
+                            recoverable=False)
         place.final, n_ok, _ = d.apply_fixes(place.final, [{'was': was, 'now': now}], canonicals, st.protect)
         for f in place.fixes:
             if f.get('why') == 'known_term' and f['was'] == was and f['now'] == now:
@@ -219,8 +225,8 @@ def final_tools(place: Place, d, slices: Slices, *, st, journal: list, meter: di
         Tool('apply_fix', 'Применить одну замену к тексту реплики (только если звук за неё).', apply_fix,
              schema={'properties': {'was': {'type': 'string'}, 'now': {'type': 'string'}},
                      'required': ['was', 'now']}),
-        Tool('finish', 'Закончить место: apply — принять текст с применёнными заменами, skip — оставить '
-             'реплику сырой.', finish,
+        Tool('finish', 'Закончить место. Текст реплики — тот, что дали correct_turn и apply_fix; '
+             'decision — apply или skip, на текст не влияет.', finish,
              schema={'properties': {'decision': {'type': 'string', 'enum': ['apply', 'skip']},
                                     'why': {'type': 'string'}},
                      'required': ['decision']}),

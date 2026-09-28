@@ -77,6 +77,10 @@ class Tool:
     # Приращения счётчика по факту вызова: {'llm_calls': 1}, {'audio_s': 12.3}. Считает инструмент,
     # потому что только он знает, сколько секунд отрезал и звал ли модель.
     cost: Callable[[dict, Any], dict] | None = None
+    # Внутренний инструмент зовёт только КОД узла, не политика: его нет в схемах для модели, и вызов
+    # из цикла по месту отвергается. Так устроено применение решений — политика выбирает, что
+    # слушать, а менять текст вправе только правила и свидетели (ADR-0030).
+    internal: bool = False
 
     def as_schema(self) -> dict:
         """Форма function calling (OpenAI): то, что уходит LLM-оркестратору."""
@@ -98,15 +102,16 @@ class Registry:
         return list(self._tools)
 
     def schemas(self) -> list[dict]:
-        return [t.as_schema() for t in self._tools.values()]
+        return [t.as_schema() for t in self._tools.values() if not t.internal]
 
     def _tick(self, key: str, by: float = 1) -> None:
         self.meter[key] = round(self.meter.get(key, 0) + by, 2) if isinstance(by, float) else self.meter.get(key, 0) + by
 
-    async def call(self, name: str, **args) -> Any:
+    async def call(self, name: str, *, _internal: bool = False, **args) -> Any:
         tool = self._tools.get(name)
-        if tool is None:
-            raise ToolError(f'нет инструмента «{name}»', hint=f'есть: {", ".join(self._tools)}')
+        if tool is None or (tool.internal and not _internal):
+            open_ = ', '.join(n for n, t in self._tools.items() if not t.internal)
+            raise ToolError(f'нет инструмента «{name}»', hint=f'есть: {open_}')
         validate(tool.schema, args)
         row: dict = {'place': self.place, 'tool': name, 'args': _trunc(args, 80)}
         t0 = time.monotonic()

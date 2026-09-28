@@ -263,7 +263,9 @@ async def test_llm_policy_reports_bad_arguments_and_asks_again_then_gives_up_sof
     assert fin.decision == 'skip'
     assert fake.meter['orchestrator_bad_args'] == 1
     err = llm.seen[1][-1]
-    assert err['role'] == 'tool' and 'не JSON' in err['content']
+    assert err['role'] == 'user' and 'не JSON' in err['content']
+    # битый вызов в историю не попал: шлюз разбирает аргументы прошлых вызовов и отвечает 400
+    assert not any(m.get('tool_calls') for m in llm.seen[1])
 
 
 async def test_llm_policy_without_a_tool_call_or_with_a_dead_model_leaves_the_place_as_is():
@@ -286,3 +288,40 @@ async def test_llm_policy_bad_tool_name_becomes_an_observation_not_a_crash():
     fin = await decide_place(place, LLMPolicy(_cfg(), llm), fake, 8)
     assert fin.decision == 'skip'
     assert 'error' in place.history[0][2] and 'guess' in place.history[0][2]['error']
+
+
+
+# --- вето в коде: модель выбирает инструменты, текст меняют только правила и звук -------------------
+
+async def test_apply_fix_refuses_what_correct_turn_did_not_propose_or_the_sound_did_not_confirm(rich, silence):
+    """Живой прогон 28.09: с открытым apply_fix модель сама писала текст. Теперь — отказ в коде."""
+    from types import SimpleNamespace
+    import pipeline
+    from graph.deps import Deps
+    from graph.places import Slices, final_tools
+    turn = {'raw': 'это прегресс тут', 'start': 20.0, 'segments': [{'start': 20.0, 'end': 35.0, 'text': 'это прегресс тут'}]}
+    place = Place('turn:0', 'final', item=turn, canon=set(), audio_sec=90.0)
+    place.final = turn['raw']
+    st = SimpleNamespace(gloss=[], dsum='', turns=[turn], protect=[], known=())
+    d = Deps(None, pipeline)
+    reg = final_tools(place, d, Slices(d, str(silence.parent), str(silence), 't'), st=st, journal=[], meter={})
+    import pytest
+    with pytest.raises(ToolError, match='не предлагала'):
+        await reg.call('apply_fix', was='тут', now='там')                 # модель сочинила замену
+    place.fixes = [{'was': 'прегресс', 'now': 'регресс', 'ok': False, 'why': 'known_term'}]
+    with pytest.raises(ToolError, match='звук не за замену'):
+        await reg.call('apply_fix', was='прегресс', now='регресс')        # без голоса звука
+    assert place.final == 'это прегресс тут'
+
+
+async def test_apply_swaps_is_hidden_from_the_policy_and_refused_from_the_loop():
+    import pipeline
+    from graph.deps import Deps
+    from graph.places import Slices, arbitrate_tools
+    d = Deps(None, pipeline)
+    reg = arbitrate_tools(_place(), d, Slices(d, '/tmp', '/tmp/x.wav', 't'), journal=[], meter={})
+    names = [x['function']['name'] for x in reg.schemas()]
+    assert 'apply_swaps' not in names and 'finish' in names and 'listen' in names
+    import pytest
+    with pytest.raises(ToolError, match='нет инструмента'):
+        await reg.call('apply_swaps')
