@@ -38,6 +38,14 @@ _SYS = (
     '(МГУ, ФНС, ИИ) — НЕ включай. Сортируй по важности. Верни СТРОГО '
     'JSON {"terms":[{"heard":..,"canonicals":[..]}]}, без иного текста.'
 )
+# Самооценка (ADR-0030, 2и): модель помечает, ЗНАЕТ ли она каноник как реальное название, или это
+# догадка по звучанию. В подсказку пасса-2 идут только известные. Строка добавляется к промпту и поле
+# к схеме ТОЛЬКО по флагу — иначе выход стадии для чужого корпуса менялся бы молча.
+_SYS_SELFLABEL = (
+    ' Для КАЖДОЙ пары добавь "known": true, если каноник — реальное название, которое ты знаешь '
+    '(продукт, технология, компания, стандарт, человек), и false, если это догадка по звучанию или '
+    'слово, которого ты не знаешь.'
+)
 
 # Потолок — ПРЕДОХРАНИТЕЛЬ, не экономия: самый жирный честный глоссарий батча ~1500 токенов,
 # запас пятикратный — до 8000 доходит только мусор деген-петли, и она обрубается за ~1.5 минуты.
@@ -54,6 +62,16 @@ _SCHEMA = {
         'properties': {'heard': {'type': 'string'},
                        'canonicals': {'type': 'array', 'items': {'type': 'string'}}},
         'required': ['heard', 'canonicals']}}},
+    'required': ['terms'],
+}
+_SCHEMA_SELFLABEL = {
+    'type': 'object',
+    'properties': {'terms': {'type': 'array', 'items': {
+        'type': 'object',
+        'properties': {'heard': {'type': 'string'},
+                       'canonicals': {'type': 'array', 'items': {'type': 'string'}},
+                       'known': {'type': 'boolean'}},
+        'required': ['heard', 'canonicals', 'known']}}},
     'required': ['terms'],
 }
 
@@ -138,7 +156,7 @@ def _sentence_batches(text: str, max_chars: int = 8000):
         yield ' '.join(cur)
 
 
-async def _one_batch(llm, batch: str, tag: str) -> list[dict] | None:
+async def _one_batch(llm, batch: str, tag: str, selflabel: bool = False) -> list[dict] | None:
     """Один батч. Ретраи (битый JSON деген-петли, спайки) — в RetryingLLM (config.py), не здесь:
     политика одна на все стадии. Исчерпал попытки → батч скипается с логом, дедуп по второму
     проходу страхует.
@@ -147,8 +165,10 @@ async def _one_batch(llm, batch: str, tag: str) -> list[dict] | None:
     `build_glossary` отличает живой эндпоинт от мёртвого (см. там)."""
     try:
         res = await llm.complete_json(
-            [{'role': 'system', 'content': _SYS}, {'role': 'user', 'content': batch}],
-            schema=_SCHEMA, schema_name='glossary', max_tokens=_GLOSSARY_MAX_TOKENS)
+            [{'role': 'system', 'content': _SYS + (_SYS_SELFLABEL if selflabel else '')},
+             {'role': 'user', 'content': batch}],
+            schema=_SCHEMA_SELFLABEL if selflabel else _SCHEMA, schema_name='glossary',
+            max_tokens=_GLOSSARY_MAX_TOKENS)
         return (res or {}).get('terms') or []
     except Exception as e:
         logging.getLogger('asr').warning(
@@ -156,7 +176,7 @@ async def _one_batch(llm, batch: str, tag: str) -> list[dict] | None:
         return None
 
 
-async def build_glossary(full_text: str, llm, passes: int = 2) -> list[dict]:
+async def build_glossary(full_text: str, llm, passes: int = 2, selflabel: bool = False) -> list[dict]:
     """[{heard, canonicals:[...]}] по важности, дедуп по heard. llm — morag LLMClient.
 
     Каждый батч зовётся `passes` раз, результаты объединяются. Замерено на ep20 (один и тот же
@@ -169,7 +189,7 @@ async def build_glossary(full_text: str, llm, passes: int = 2) -> list[dict]:
     batches = list(_sentence_batches(full_text))
     calls = [(f'{i}/{len(batches)}#{p}', b)
              for p in range(1, max(1, passes) + 1) for i, b in enumerate(batches, 1)]
-    results = await asyncio.gather(*(_one_batch(llm, b, tag) for tag, b in calls))
+    results = await asyncio.gather(*(_one_batch(llm, b, tag, selflabel) for tag, b in calls))
 
     # Сорвались ВСЕ вызовы — это не «терминов не нашлось», а мёртвый эндпоинт, и молчать про это
     # нельзя: без глоссария пасс-2 идёт без подсказок, а финал-раунд без каноников. Замерено на
@@ -199,7 +219,10 @@ async def build_glossary(full_text: str, llm, passes: int = 2) -> list[dict]:
             key = heard.lower()
             if cans and key not in seen:
                 seen.add(key)
-                out.append({'heard': heard, 'canonicals': cans})
+                entry = {'heard': heard, 'canonicals': cans}
+                if selflabel and isinstance(r.get('known'), bool):
+                    entry['known'] = r['known']
+                out.append(entry)
     return out
 
 
@@ -282,5 +305,50 @@ def reconcile(glossary: list[dict], known: list[str] | tuple[str, ...] = (),
         cans = list(dict.fromkeys(cans))
         if cans:
             out.append({**entry, 'canonicals': cans})
+    return out
+
+
+_LATIN_WORD = re.compile(r'[A-Za-z]+')
+
+
+def witnessed(glossary: list[dict], known: list[str] | tuple[str, ...] = (),
+              vocabulary: set[str] | frozenset[str] | None = None, en_threshold: float = 3.0,
+              log: list[dict] | None = None) -> list[dict]:
+    """A. Латинский каноник глоссария остаётся, только если его знает хоть один свидетель:
+    известные написания (`known`: профиль, подсказки записи, написания снаружи), словарь домена
+    (`vocabulary` — латинские слова, живущие в его текстах) или английский словарь (частотник).
+    Нет свидетеля — не знание: догадка модели в подсказку не идёт. Каноники кириллицей не
+    трогаем — в подсказку они и так проходят только подтверждёнными. Правил про буквы и звучание
+    здесь нет: критерий один — существование свидетеля (владелец, 28.09)."""
+    from .arbitrate import key
+    kkeys = {key(str(k)) for k in known if k}
+    vocab = {v.lower() for v in (vocabulary or ())}
+    out = []
+    for entry in glossary or ():
+        cans = []
+        for c in entry.get('canonicals') or ():
+            c = str(c)
+            words = [w.lower() for w in _LATIN_WORD.findall(c)]
+            if not words or key(c) in kkeys or all(w in vocab or (_HAS_WF and _zipf(w, 'en') >= en_threshold)
+                                                    for w in words):
+                cans.append(c)
+            elif log is not None:
+                log.append({'heard': entry.get('heard'), 'was': c, 'now': None, 'why': 'нет свидетеля'})
+        if cans:
+            out.append({**entry, 'canonicals': cans})
+    return out
+
+
+def selflabelled(glossary: list[dict], log: list[dict] | None = None) -> list[dict]:
+    """B. Отбор по самооценке модели: пары, помеченные `known: false`, уходят; без пометки — остаются
+    (глоссарий без поля — прежний, ничего не теряет)."""
+    out = []
+    for entry in glossary or ():
+        if entry.get('known') is False:
+            if log is not None:
+                log.append({'heard': entry.get('heard'), 'was': ', '.join(map(str, entry.get('canonicals') or ())),
+                            'now': None, 'why': 'модель: догадка'})
+            continue
+        out.append(entry)
     return out
 

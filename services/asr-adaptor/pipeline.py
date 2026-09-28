@@ -27,7 +27,7 @@ from stages.chunking import chunk as chunk_fn
 from stages.chunking import gap_chunks
 from stages.final_round import apply_fixes, correct, doc_summary, has_entity_signal, recall_entities
 from fingerprint import one_line, stack_fingerprint
-from stages.glossary import build_glossary, reconcile, relevant
+from stages.glossary import build_glossary, reconcile, relevant, selflabelled, witnessed
 from stages.hints import build_hints, hinted as hinted_canonicals, merge as merge_hints
 from stages.namer import name_speakers
 from stages.prompt_budget import WhisperTokenCounter, build_prompt
@@ -493,7 +493,7 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
         # же черновиком) независимы — идут ПАРАЛЛЕЛЬНО, лишнего времени стадия не стоит.
         h = hints or {}
         gloss, seed = await asyncio.gather(
-            build_glossary(full_text, llm),
+            build_glossary(full_text, llm, **({'selflabel': True} if CFG.glossary_selflabel else {})),
             build_hints(full_text, llm, terms=h.get('terms') or (), names=h.get('names') or (),
                         about=h.get('about') or title))
         gloss = merge_hints(seed, gloss)
@@ -505,6 +505,17 @@ async def run_pipeline(audio_path: str, llm, *, episode: str = '', title: str = 
             tm['n_reconciled'] = len(rec_log)
             if rec_log:
                 log.info('глоссарий: сверка с известными написаниями — подменено %d', len(rec_log))
+        if CFG.glossary_selflabel or CFG.glossary_witness:
+            drop_log: list[dict] = []
+            if CFG.glossary_selflabel:
+                gloss = selflabelled(gloss, log=drop_log)
+            if CFG.glossary_witness:
+                gloss = witnessed(gloss, known=list(CFG.always_terms) + [str(t) for k_ in ('terms', 'names', 'spellings')
+                                                                         for t in (h.get(k_) or ()) if t],
+                                  vocabulary=set(str(v) for v in (h.get('vocabulary') or ())), log=drop_log)
+            tm['n_glossary_dropped'] = len(drop_log)
+            if drop_log:
+                log.info('глоссарий: без свидетеля / по самооценке выброшено %d каноников', len(drop_log))
         hint_set = hinted_canonicals(seed)
         tm['glossary_s'] = round(time.monotonic() - _t, 1)
         tm['n_glossary'] = len(gloss)  # размер глоссария — чем кормим подсказку пасса-2 (бюджет ≤200 ток.)

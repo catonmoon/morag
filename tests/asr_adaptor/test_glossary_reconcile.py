@@ -43,3 +43,41 @@ def test_unknown_latin_canonical_is_left_alone():
 
 def test_empty_input_is_fine():
     assert G.reconcile([]) == []
+
+
+def test_witnessed_keeps_only_latin_canonicals_someone_vouches_for():
+    """A: известное написание, словарь домена или английский словарь; иначе каноник уходит."""
+    log = []
+    out = G.witnessed([{'heard': 'Гитлаб', 'canonicals': ['GitLab']},
+                       {'heard': 'пре-альфа', 'canonicals': ['prealpha']},
+                       {'heard': 'лейбл', 'canonicals': ['label']},
+                       {'heard': 'Постгрес', 'canonicals': ['Postgres']},
+                       {'heard': 'Квен', 'canonicals': ['Qwen', 'Квен']}],
+                      known=['Postgres'], vocabulary={'gitlab'}, log=log)
+    assert [e['canonicals'] for e in out] == [['GitLab'], ['label'], ['Postgres'], ['Квен']]
+    assert {r['was'] for r in log} == {'prealpha', 'Qwen'} and all(r['why'] == 'нет свидетеля' for r in log)
+
+
+def test_selflabelled_drops_only_what_the_model_called_a_guess():
+    out = G.selflabelled([{'heard': 'a', 'canonicals': ['A'], 'known': True},
+                          {'heard': 'b', 'canonicals': ['B'], 'known': False},
+                          {'heard': 'c', 'canonicals': ['C']}])
+    assert [e['heard'] for e in out] == ['a', 'c']
+
+
+async def test_selflabel_asks_the_model_for_the_flag_and_keeps_it(monkeypatch):
+    calls = []
+
+    class LLM:
+        async def complete_json(self, messages, schema, schema_name, max_tokens):
+            calls.append((messages[0]['content'], schema))
+            return {'terms': [{'heard': 'кубернетис', 'canonicals': ['Kubernetes'], 'known': True},
+                              {'heard': 'ремка', 'canonicals': ['Remka'], 'known': False}]}
+
+    monkeypatch.setattr(G, '_HAS_WF', False)
+    out = await G.build_glossary('Кубернетис и ремка.', LLM(), passes=1, selflabel=True)
+    assert [(e['heard'], e.get('known')) for e in out] == [('кубернетис', True), ('ремка', False)]
+    assert 'known' in calls[0][1]['properties']['terms']['items']['properties'] and '"known"' in calls[0][0]
+    out = await G.build_glossary('Кубернетис.', LLM(), passes=1)
+    assert 'known' not in out[0] and 'known' not in calls[-1][1]['properties']['terms']['items']['properties']
+
