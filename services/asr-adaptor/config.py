@@ -97,6 +97,12 @@ class Config:
     pipeline: str = field(default_factory=lambda: _pipeline_mode(_env('ASR_PIPELINE', 'legacy')))
     # Файл переопределений промптов стадий (TOML, см. prompts.py). Пусто — встроенные тексты.
     prompts_file: str = field(default_factory=lambda: _env('ASR_PROMPTS', ''))
+    # Политика решения по месту в графе: `rule` — правила конвейера явными шагами (граф равен
+    # линейному конвейеру), `llm` — оркестратор через function calling выбирает инструменты сам.
+    graph_policy: str = field(default_factory=lambda: 'llm' if _env('ASR_GRAPH_POLICY', 'rule').strip().lower() == 'llm' else 'rule')
+    # Бюджет шагов на одно место (кусок арбитража, реплика финал-раунда). Правилам хватает семи
+    # (ворота, два уха, правила, третий голос, применить); LLM-оркестратору сверх того — нечего.
+    graph_place_steps: int = field(default_factory=lambda: int(_env('ASR_GRAPH_PLACE_STEPS', '8')))
     whisper_tokenizer: str = field(default_factory=lambda: _env('ASR_WHISPER_TOKENIZER', 'openai/whisper-large-v3'))
     # Форма подсказки пасса-2 (префикс перед списком написаний). Пусто — умолчание движка.
     prompt_prefix: str = field(default_factory=lambda: _env('ASR_PROMPT_PREFIX', ''))

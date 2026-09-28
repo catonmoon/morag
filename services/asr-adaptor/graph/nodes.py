@@ -240,10 +240,16 @@ async def relisten(st: State, d: Deps, ev: Emitter) -> None:
 
 
 # --- arbitrate ----------------------------------------------------------------------------------
-# Шаг 1: прямой перенос `_second` из конвейера. Шаг 2 разложит его на инструменты и цикл по месту
-# с политикой (правила = эта же последовательность; LLM-оркестратор — выбор инструментов).
+# Место = кусок пасса-2. Инструменты (`graph/places.py`) + цикл по месту (`graph/loop.py`) +
+# политика (`graph/policy.py`): правила повторяют `_second` линейного конвейера шаг в шаг, LLM-
+# оркестратор выбирает те же инструменты сам. Учёт ворот и третьего голоса — тот же, что в
+# конвейере (`timing.arbitrate_gate`), по истории места.
 
 async def arbitrate(st: State, d: Deps, ev: Emitter) -> None:
+    from graph.loop import Place, decide_place
+    from graph.places import Slices, arbitrate_tools
+    from graph.policy import make_policy
+
     cfg = d.cfg
     A = d.arbitrate_stage
     chunks, hints, gloss = st.chunks, st.hints, st.gloss
@@ -255,59 +261,57 @@ async def arbitrate(st: State, d: Deps, ev: Emitter) -> None:
     gated = {'слушали': 0, 'пропущено': 0}
     failed = {'n': 0}      # куски, где стадия не вышла (бэкенд упал): в артефакт, не только в лог
     arbitrate_log: list[dict] = []
+    policy = make_policy(cfg, d.llm)
 
-    async def _second(i: int, c: dict) -> None:
+    def _account(place: Place) -> None:
+        """Ворота и третий голос — по истории места, теми же счётчиками, что у конвейера."""
+        gate = place.last('reader_flags')
+        if gate is not None and place.count('reader_flags') and 'error' not in gate:
+            if gate.get('suspicious'):
+                place.chunk['reader_flags'] = gate['suspicious']
+                gated['слушали'] += 1
+            else:
+                gated['пропущено'] += 1
+        if cfg.clean_ear == 'demand':
+            for tool, args, res in place.history:
+                if tool == 'listen' and args.get('ear') == 'clean' and isinstance(res, dict) and 'error' not in res:
+                    gated['третий голос'] = gated.get('третий голос', 0) + 1
+                    gated['секунд третьего голоса'] = round(gated.get('секунд третьего голоса', 0)
+                                                            + (res['b'] - res['a']), 1)
+
+    async def _place(i: int, c: dict) -> None:
         if not c.get('raw'):
             return
-        if cfg.arbitrate_gate == 'reader':
-            # Ворота читателя: второй раз слушаем только то, что выглядит невменяемо.
-            flags = await A.reader_flags(d.llm, c['raw'], gate_terms)
-            if not flags:
-                gated['пропущено'] += 1
-                return
-            c['reader_flags'] = flags
-            gated['слушали'] += 1
-        sl = str(Path(st.tmp) / f'a{i}.wav')
+        nb = (float(chunks[i - 1]['start']) if i > 0 else float(c['start']),
+              float(chunks[i + 1]['end']) if i + 1 < len(chunks) else float(c['end']))
+        place = Place(f'chunk:{i}', 'arbitrate', chunk=c, canon=canon, gate_terms=gate_terms,
+                      audio_sec=st.audio_sec, neighbours=nb)
+        slices = Slices(d, st.tmp, st.wav, f'a{i}')
+        reg = arbitrate_tools(place, d, slices, journal=st.journal, meter=st.meter)
         try:
-            await asyncio.to_thread(d._slice, st.wav, c['start'], c['end'], sl)
-            async with d._res('whisper', cfg.whisper_slots):
-                second = await asyncio.to_thread(
-                    lambda: d.audio_clients.asr(sl, '', model=cfg.second_model))
-                clean = None
-                if cfg.clean_ear == 'always':
-                    clean = await asyncio.to_thread(lambda: d.audio_clients.asr(sl, ''))
-                elif cfg.clean_ear == 'demand':
-                    # Третий голос по требованию: только если после второго уха остались
-                    # споры, не решённые ни правилом, ни свидетелем.
-                    _, first = A.arbitrate(c['raw'], second['text'], None, canon, ratio=cfg.arbitrate_ratio)
-                    disputes = [x for x in first if x['by'] == 'спорно']
-                    if disputes:
-                        # Окном, а не словом (ADR-0030): кусок · 30 с вокруг спора · с соседями.
-                        nb = (float(chunks[i - 1]['start']) if i > 0 else float(c['start']),
-                              float(chunks[i + 1]['end']) if i + 1 < len(chunks) else float(c['end']))
-                        a, b = A.ear_window(c, disputes, cfg.clean_ear_window, st.audio_sec, nb)
-                        sl3 = str(Path(st.tmp) / f'e{i}.wav')
-                        try:
-                            await asyncio.to_thread(d._slice, st.wav, a, b, sl3)
-                            clean = await asyncio.to_thread(lambda: d.audio_clients.asr(sl3, ''))
-                        finally:
-                            Path(sl3).unlink(missing_ok=True)
-                        gated['третий голос'] = gated.get('третий голос', 0) + 1
-                        gated['секунд третьего голоса'] = round(gated.get('секунд третьего голоса', 0) + (b - a), 1)
+            fin = await decide_place(place, policy, reg, cfg.graph_place_steps)
+            _account(place)
+            decisions = []
+            if fin.decision == 'apply' and place.heard.get('second') is not None:
+                decisions = (await reg.call('apply_swaps'))['decisions']
+            for x in decisions:
+                row = {'start': round(c['start'], 2), 'end': round(c['end'], 2), **x}
+                arbitrate_log.append(row)
+                ev.emit('arbitrate.swap', **{'from': row['start'], 'to': row['end']},
+                        was=x['was'], now=x['now'], by=x['by'], taken=x.get('taken', False))
+            st.decisions.append({'place': place.name, 'start': round(c['start'], 2), 'end': round(c['end'], 2),
+                                 'decision': fin.decision, 'why': fin.why, 'steps': len(place.history),
+                                 'taken': sum(1 for x in decisions if x.get('taken')),
+                                 **({'exhausted': True} if place.exhausted else {})})
         except Exception as error:      # noqa: BLE001 — стадия не имеет права ронять запись
+            _account(place)
             failed['n'] += 1
             log.warning('арбитраж %.1f-%.1f с не вышел: %s: %s',
                         c['start'], c['end'], type(error).__name__, error)
-            return
         finally:
-            Path(sl).unlink(missing_ok=True)
-        for x in A.apply(c, second['text'], (clean or {}).get('text'), canon, ratio=cfg.arbitrate_ratio):
-            row = {'start': round(c['start'], 2), 'end': round(c['end'], 2), **x}
-            arbitrate_log.append(row)
-            ev.emit('arbitrate.swap', **{'from': row['start'], 'to': row['end']},
-                    was=x['was'], now=x['now'], by=x['by'], taken=x.get('taken', False))
+            slices.cleanup()
 
-    await asyncio.gather(*(_second(i, c) for i, c in enumerate(chunks)))
+    await asyncio.gather(*(_place(i, c) for i, c in enumerate(chunks)))
     arbitrate_log.sort(key=lambda r: (r['start'], r['i']))
     st.arbitrate_log = arbitrate_log
     st.tm['arbitrate_s'] = round(time.monotonic() - _t, 1)
