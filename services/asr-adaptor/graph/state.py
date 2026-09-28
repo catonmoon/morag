@@ -7,7 +7,10 @@
 """
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field, fields
+from pathlib import Path
 from typing import Any
 
 
@@ -19,6 +22,7 @@ class State:
     title: str = ''
     url: str = ''
     hints: dict = field(default_factory=dict)
+    policy: str = ''                                # политика на этот прогон: '' — из конфига
     t0: float = 0.0
     tmp: str = ''
     ticket: int | None = None
@@ -71,3 +75,42 @@ class State:
     def checkpoint_fields(cls) -> list[str]:
         """Имена полей, которые едут в чекпойнт (биометрия и объекты — нет)."""
         return [f.name for f in fields(cls) if f.metadata.get('checkpoint', True)]
+
+    # --- чекпойнт -------------------------------------------------------------------------------
+    # ⚠️ Реплики держат ссылки на те же словари, что и куски (`turns[].chunks`, `segments`), а
+    # JSON эти связи не знает: после загрузки правка куска не отразится в реплике. Узлы после
+    # `turns` куски уже не трогают, поэтому это безопасно — но помнить стоит.
+
+    def to_json(self) -> dict:
+        out: dict = {}
+        for name in self.checkpoint_fields():
+            v = getattr(self, name)
+            if isinstance(v, (frozenset, set, tuple)):
+                v = sorted(v) if isinstance(v, (frozenset, set)) else list(v)
+            out[name] = v
+        return out
+
+    @classmethod
+    def from_json(cls, data: dict) -> 'State':
+        st = cls(audio_path=str(data.get('audio_path') or ''))
+        for name in cls.checkpoint_fields():
+            if name in data:
+                setattr(st, name, data[name])
+        st.hint_set = frozenset(st.hint_set or ())
+        st.known = tuple(st.known or ())
+        return st
+
+    def save(self, path: str | Path) -> None:
+        """Атомарно и под 0600: в чекпойнте расшифровка целиком, ей на диске не место открытой."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + '.tmp')
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+            json.dump(self.to_json(), fh, ensure_ascii=False, default=str)
+        os.replace(tmp, path)
+
+    @classmethod
+    def load(cls, path: str | Path) -> 'State':
+        with open(path, encoding='utf-8') as fh:
+            return cls.from_json(json.load(fh))

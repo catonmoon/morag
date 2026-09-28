@@ -6,7 +6,7 @@
 — место остаётся КАК ЕСТЬ (`fallback` политики), и это записывается: агент, который «почти
 решил», не имеет права оставить полурешение.
 
-⚠️ Вето — в коде узла, ПОСЛЕ цикла и независимо от политики: потеря слов, известные слова,
+⚠️ Вето — в коде инструментов и узла, независимо от политики: потеря слов, известные слова,
 вставка на краю. Политика может выбрать инструмент, но не может обойти правила применения.
 """
 from __future__ import annotations
@@ -32,19 +32,31 @@ class Finish:
 class Place:
     """Контекст одного места: что дано, что сделано (история наблюдений), что услышано и решено."""
 
-    def __init__(self, name: str, kind: str, *, chunk: dict, canon: set, gate_terms: list,
-                 audio_sec: float, neighbours: tuple[float, float] | None = None) -> None:
+    def __init__(self, name: str, kind: str, *, item: dict, canon: set, gate_terms: list = (),
+                 audio_sec: float = 0.0, neighbours: tuple[float, float] | None = None,
+                 index: int = 0) -> None:
         self.name = name
         self.kind = kind                      # 'arbitrate' | 'final'
-        self.chunk = chunk
+        self.item = item                      # кусок пасса-2 или реплика
+        self.index = index
         self.canon = canon
-        self.gate_terms = gate_terms
+        self.gate_terms = list(gate_terms)
         self.audio_sec = audio_sec
         self.neighbours = neighbours
         self.history: list[tuple[str, dict, Any]] = []   # (инструмент, аргументы, результат)
-        self.heard: dict[str, dict] = {}                 # ухо → {'text', 'a', 'b'}
-        self.decisions: list[dict] = []                  # последний разбор правилами
+        self.heard: dict[str, Any] = {}                  # ухо / слово → что услышано
+        self.decisions: list[dict] = []                  # последний разбор правилами (арбитраж)
+        self.final: str = ''                             # текст реплики после правок (финал-раунд)
+        self.fixes: list[dict] = []                      # вердикты правки (финал-раунд)
+        self.recalled: str = ''
+        self.extra: dict = {}                            # память политики (LLM: сообщения)
+        self.registry: Registry | None = None            # ставит цикл — политике нужны схемы
+        self.budget: int = 0
         self.exhausted = False
+
+    @property
+    def chunk(self) -> dict:
+        return self.item
 
     def observe(self, action: Action, result: Any) -> None:
         self.history.append((action.tool, dict(action.args), result))
@@ -66,7 +78,9 @@ class Place:
 
 async def decide_place(place: Place, policy, registry: Registry, steps: int) -> Finish:
     """Гонять политику по месту, пока она не скажет `finish` или не кончится бюджет шагов."""
-    for _ in range(max(1, steps)):
+    place.registry = registry
+    place.budget = max(1, steps)
+    for _ in range(place.budget):
         act = await policy.next(place)
         if isinstance(act, Finish):
             return act

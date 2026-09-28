@@ -16,7 +16,7 @@ def _cfg(**over):
 
 
 def _place() -> Place:
-    return Place('chunk:1', 'arbitrate', chunk={'raw': 'это прегресс тут', 'start': 20.0, 'end': 35.0},
+    return Place('chunk:1', 'arbitrate', item={'raw': 'это прегресс тут', 'start': 20.0, 'end': 35.0},
                  canon=set(), gate_terms=[], audio_sec=90.0, neighbours=(0.0, 50.0))
 
 
@@ -136,3 +136,153 @@ async def test_finish_tool_call_ends_the_place_with_its_decision():
 
     fin = await decide_place(_place(), ViaTool(), Fake(), 4)
     assert fin.decision == 'skip' and fin.why == 'нечего делать'
+
+
+# --- финал-раунд: правила ------------------------------------------------------------------------
+
+def _final_place() -> Place:
+    turn = {'raw': 'это прегресс тут', 'start': 20.0, 'segments': [{'start': 20.0, 'end': 35.0, 'text': 'это прегресс тут'}]}
+    return Place('turn:0', 'final', item=turn, canon=set(), gate_terms=['Postgres'], audio_sec=90.0)
+
+
+class FakeFinal:
+    def __init__(self, place: Place, *, said='was', fixes=True):
+        self.place, self.said, self.fixes = place, said, fixes
+        self.calls: list = []
+        self.meter: dict = {}
+
+    def schemas(self):
+        return []
+
+    async def call(self, name, **args):
+        self.calls.append(name if not args else (name, args))
+        f = self.place.fixes
+        if name == 'recall':
+            return {'recalled': 'регресс'}
+        if name == 'correct_turn':
+            self.place.fixes = ([{'was': 'прегресс', 'now': 'регресс', 'ok': False, 'why': 'known_term'}]
+                                if self.fixes else [])
+            return {'text': 'это прегресс тут', 'fixes': self.place.fixes, 'changed': False}
+        if name == 'listen':
+            return {'word': args['word'], 'found': True, 'text': 'это регресс тут', 'a': 5.0, 'b': 35.0}
+        if name == 'sound_prefers':
+            if self.said != 'now':
+                f[0]['why'] = f'known_term (ear: {self.said})'
+            return {'said': self.said}
+        if name == 'apply_fix':
+            f[0].update(ok=True, why='known_term→ear:now')
+            return {'applied': True}
+        if name == 'finish':
+            return dict(args)
+        raise ToolError(f'нет инструмента «{name}»')
+
+
+async def test_final_rules_recall_then_correct_then_apply():
+    place = _final_place()
+    fake = FakeFinal(place)
+    fin = await decide_place(place, RulePolicy(_cfg(protect_known=False, final_ear=False)), fake, 12)
+    assert fake.calls == ['recall', 'correct_turn'] and fin.decision == 'apply'
+
+
+async def test_final_rules_listen_to_a_rejected_known_word_and_apply_only_when_the_sound_agrees():
+    cfg = _cfg(protect_known=True, final_ear=True)
+    place = _final_place()
+    fake = FakeFinal(place, said='now')
+    fin = await decide_place(place, RulePolicy(cfg), fake, 12)
+    assert fake.calls == ['recall', 'correct_turn', ('listen', {'word': 'прегресс'}),
+                          ('sound_prefers', {'was': 'прегресс', 'now': 'регресс'}),
+                          ('apply_fix', {'was': 'прегресс', 'now': 'регресс'})]
+    assert fin.decision == 'apply' and place.fixes[0]['why'] == 'known_term→ear:now'
+
+    place = _final_place()
+    fake = FakeFinal(place, said='was')
+    fin = await decide_place(place, RulePolicy(cfg), fake, 12)
+    assert fake.calls[-1] == ('sound_prefers', {'was': 'прегресс', 'now': 'регресс'})
+    assert fin.decision == 'apply' and place.fixes[0]['why'] == 'known_term (ear: was)'
+
+    place = _final_place()
+    fake = FakeFinal(place, fixes=False)
+    fin = await decide_place(place, RulePolicy(cfg), fake, 12)
+    assert fake.calls == ['recall', 'correct_turn'] and fin.decision == 'apply'
+
+
+# --- LLM-оркестратор ------------------------------------------------------------------------------
+
+from graph.policy import LLMPolicy  # noqa: E402
+
+
+def _tc(name, args, cid='c1'):
+    return {'id': cid, 'type': 'function', 'function': {'name': name, 'arguments': args}}
+
+
+class ScriptedLLM:
+    """Отвечает по сценарию: список ответов модели, по одному на вызов."""
+
+    def __init__(self, script):
+        self.script = list(script)
+        self.seen: list[list[dict]] = []
+
+    async def complete_with_tools(self, messages, tools, **kw):
+        self.seen.append([dict(m) for m in messages])
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return {'choices': [{'message': item, 'finish_reason': 'tool_calls' if item.get('tool_calls') else 'stop'}]}
+
+
+async def test_llm_policy_drives_the_tools_it_chose_and_feeds_results_back():
+    import json
+    llm = ScriptedLLM([
+        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('reader_flags', '{}', 'a')]},
+        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('listen', '{"ear": "second", "window": "same"}', 'b')]},
+        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('finish', '{"decision": "apply", "why": "ок"}', 'c')]},
+    ])
+    fake = Fake(suspicious=['прегресс'])
+    fake.schemas = lambda: [{'type': 'function', 'function': {'name': 'x'}}]
+    place = _place()
+    fin = await decide_place(place, LLMPolicy(_cfg(), llm), fake, 8)
+    assert fin.decision == 'apply' and fin.why == 'ок'
+    assert [c if isinstance(c, str) else c[0] for c in fake.calls] == ['reader_flags', 'listen', 'finish']
+    # второй вызов модели видит результат первого инструмента под его id
+    second = llm.seen[1]
+    assert second[0]['role'] == 'system' and 'оркестратор' in second[0]['content']
+    assert 'кусок' in second[1]['content'] and 'прегресс' in second[1]['content']
+    assert second[-1]['role'] == 'tool' and second[-1]['tool_call_id'] == 'a'
+    assert json.loads(second[-1]['content'])['suspicious'] == ['прегресс']
+    assert fake.meter['orchestrator_calls'] == 3
+
+
+async def test_llm_policy_reports_bad_arguments_and_asks_again_then_gives_up_softly():
+    llm = ScriptedLLM([
+        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('listen', '{"ear": ', 'a')]},   # битый JSON
+        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('finish', '{"decision": "skip"}', 'b')]},
+    ])
+    fake = Fake()
+    fake.schemas = lambda: []
+    fin = await decide_place(_place(), LLMPolicy(_cfg(), llm), fake, 8)
+    assert fin.decision == 'skip'
+    assert fake.meter['orchestrator_bad_args'] == 1
+    err = llm.seen[1][-1]
+    assert err['role'] == 'tool' and 'не JSON' in err['content']
+
+
+async def test_llm_policy_without_a_tool_call_or_with_a_dead_model_leaves_the_place_as_is():
+    fake = Fake()
+    fake.schemas = lambda: []
+    fin = await decide_place(_place(), LLMPolicy(_cfg(), ScriptedLLM([{'role': 'assistant', 'content': 'готово'}])), fake, 8)
+    assert fin.decision == 'skip' and 'готово' in fin.why and fake.calls == []
+    fin = await decide_place(_place(), LLMPolicy(_cfg(), ScriptedLLM([RuntimeError('шлюз')])), fake, 8)
+    assert fin.decision == 'skip' and 'RuntimeError' in fin.why
+
+
+async def test_llm_policy_bad_tool_name_becomes_an_observation_not_a_crash():
+    llm = ScriptedLLM([
+        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('guess', '{}', 'a')]},
+        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('finish', '{"decision": "skip", "why": "нет такого"}', 'b')]},
+    ])
+    fake = Fake()
+    fake.schemas = lambda: []
+    place = _place()
+    fin = await decide_place(place, LLMPolicy(_cfg(), llm), fake, 8)
+    assert fin.decision == 'skip'
+    assert 'error' in place.history[0][2] and 'guess' in place.history[0][2]['error']

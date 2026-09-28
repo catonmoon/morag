@@ -20,6 +20,9 @@ def test_runner_picks_the_implementation():
     assert app._runner('legacy') is pipeline.run_pipeline
     assert app._runner('graph') is run_graph
     assert app._runner('') is pipeline.run_pipeline
+    llm_arm = app._runner('graph-llm')
+    assert llm_arm.func is run_graph and llm_arm.keywords == {'policy': 'llm'}
+    assert app._runner('graph:rule').keywords == {'policy': 'rule'}
 
 
 async def test_retrying_llm_wraps_tool_calls_in_the_retry_policy():

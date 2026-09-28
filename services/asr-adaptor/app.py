@@ -36,10 +36,14 @@ if _PROMPTS:
 
 
 def _runner(mode: str):
-    """`legacy` — `pipeline.run_pipeline`; `graph` — `graph.run.run_graph` (та же сигнатура)."""
-    if mode == 'graph':
+    """`legacy` — `pipeline.run_pipeline`; `graph` — `graph.run.run_graph` (та же сигнатура);
+    `graph-rule` / `graph-llm` — граф с политикой на этот прогон (три руки на одном стенде)."""
+    mode = (mode or '').strip().lower().replace(':', '-')
+    if mode.startswith('graph'):
+        from functools import partial  # noqa: PLC0415
         from graph.run import run_graph  # noqa: PLC0415 — граф грузится, только если его выбрали
-        return run_graph
+        kind = mode.partition('-')[2]
+        return partial(run_graph, policy=kind) if kind in ('rule', 'llm') else run_graph
     return run_pipeline
 
 

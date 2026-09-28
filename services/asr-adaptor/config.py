@@ -100,9 +100,16 @@ class Config:
     # Политика решения по месту в графе: `rule` — правила конвейера явными шагами (граф равен
     # линейному конвейеру), `llm` — оркестратор через function calling выбирает инструменты сам.
     graph_policy: str = field(default_factory=lambda: 'llm' if _env('ASR_GRAPH_POLICY', 'rule').strip().lower() == 'llm' else 'rule')
-    # Бюджет шагов на одно место (кусок арбитража, реплика финал-раунда). Правилам хватает семи
-    # (ворота, два уха, правила, третий голос, применить); LLM-оркестратору сверх того — нечего.
-    graph_place_steps: int = field(default_factory=lambda: int(_env('ASR_GRAPH_PLACE_STEPS', '8')))
+    # Бюджет шагов на одно место (кусок арбитража, реплика финал-раунда). Правилам хватает: арбитраж —
+    # до пяти (ворота, два уха, правила, третий голос), реплика — два плюс три на каждую замену
+    # известного слова; LLM-оркестратору сверх того — нечего.
+    graph_place_steps: int = field(default_factory=lambda: int(_env('ASR_GRAPH_PLACE_STEPS', '12')))
+    # Каталог чекпойнтов графа: после каждого узла состояние пишется в JSON (0600, без центроидов
+    # голосов), `run_graph(resume=<файл>)` продолжает с первого непройденного узла. Пусто — выключено.
+    graph_checkpoints: str = field(default_factory=lambda: _env('ASR_GRAPH_CHECKPOINTS', ''))
+    # Свои события графа в ленте (`graph.node` со счётчиком после каждого узла). Выключено — лента
+    # байт в байт как у конвейера: её читает окно загрузки записи.
+    graph_events: bool = field(default_factory=lambda: _flag('ASR_GRAPH_EVENTS', '0'))
     whisper_tokenizer: str = field(default_factory=lambda: _env('ASR_WHISPER_TOKENIZER', 'openai/whisper-large-v3'))
     # Форма подсказки пасса-2 (префикс перед списком написаний). Пусто — умолчание движка.
     prompt_prefix: str = field(default_factory=lambda: _env('ASR_PROMPT_PREFIX', ''))

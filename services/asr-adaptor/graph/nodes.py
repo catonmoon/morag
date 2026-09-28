@@ -261,7 +261,7 @@ async def arbitrate(st: State, d: Deps, ev: Emitter) -> None:
     gated = {'слушали': 0, 'пропущено': 0}
     failed = {'n': 0}      # куски, где стадия не вышла (бэкенд упал): в артефакт, не только в лог
     arbitrate_log: list[dict] = []
-    policy = make_policy(cfg, d.llm)
+    policy = make_policy(cfg, d.llm, st.policy)
 
     def _account(place: Place) -> None:
         """Ворота и третий голос — по истории места, теми же счётчиками, что у конвейера."""
@@ -284,8 +284,8 @@ async def arbitrate(st: State, d: Deps, ev: Emitter) -> None:
             return
         nb = (float(chunks[i - 1]['start']) if i > 0 else float(c['start']),
               float(chunks[i + 1]['end']) if i + 1 < len(chunks) else float(c['end']))
-        place = Place(f'chunk:{i}', 'arbitrate', chunk=c, canon=canon, gate_terms=gate_terms,
-                      audio_sec=st.audio_sec, neighbours=nb)
+        place = Place(f'chunk:{i}', 'arbitrate', item=c, canon=canon, gate_terms=gate_terms,
+                      audio_sec=st.audio_sec, neighbours=nb, index=i)
         slices = Slices(d, st.tmp, st.wav, f'a{i}')
         reg = arbitrate_tools(place, d, slices, journal=st.journal, meter=st.meter)
         try:
@@ -355,9 +355,20 @@ async def turns(st: State, d: Deps, ev: Emitter) -> None:
 
 
 # --- final-round --------------------------------------------------------------------------------
-# Шаг 1: через `pipeline._final_round` с портом уха. Шаг 3 разложит реплику на цикл по месту.
+# Место = реплика. Триаж — КОДОМ (короткая реплика или без сигнала сущности — ни одного вызова),
+# дальше цикл по месту с политикой: правила повторяют `_final_round` конвейера шаг в шаг (вспомнить
+# → предложить → [ухо для отвергнутых замен известных слов]), LLM-оркестратор выбирает сам.
+# Отказоустойчивость трёхслойная, как в конвейере: два захода на месте (в RetryingLLM), добивочный
+# проход через sweep_delay, потом `correction_failed` в артефакте — НЕ «до успеха».
+
+SWEEP_DELAY_S = 30.0
+
 
 async def final_round(st: State, d: Deps, ev: Emitter) -> None:
+    from graph.loop import Place, decide_place
+    from graph.places import Slices, final_tools
+    from graph.policy import make_policy
+
     cfg = d.cfg
     turns_ = st.turns
     ev.stage('final-round')
@@ -374,44 +385,76 @@ async def final_round(st: State, d: Deps, ev: Emitter) -> None:
         st.known = tuple(dict.fromkeys(
             [x for x in list((st.hints or {}).get('terms') or ()) + list((st.hints or {}).get('names') or ())
              if isinstance(x, str)] + [x for x in (cfg.always_terms or ()) if x]))
+    policy = make_policy(cfg, d.llm, st.policy)
+    sem = asyncio.Semaphore(max(1, cfg.round_concurrency))
+    done = 0
+    canon = d.arbitrate_stage.canon_from(st.hints, st.gloss)
+    gate_terms = [x for x in list((st.hints or {}).get('terms') or ()) + list((st.hints or {}).get('names') or ())
+                  if isinstance(x, str)]
 
-    async def _ear(turn: dict, was: str) -> str | None:
-        """Чистое ухо на 30 с вокруг спорного слова реплики — окно, не слово (ADR-0030)."""
-        segs = turn.get('segments') or []
-        if not segs:
-            return None
-        at = None
-        for sg in segs:                              # точные времена от декодера, если есть
-            for w in sg.get('words') or ():
-                if (w.get('word') or '').strip().strip('.,!?;:«»"').lower() == was.strip('.,!?;:«»"').lower():
-                    at = float(w['start'])
-                    break
-            if at is not None:
-                break
-        if at is None:                               # иначе — по доле слова в реплике
-            words = (turn.get('raw') or '').split()
-            pos = next((k for k, w in enumerate(words)
-                        if w.strip('.,!?;:«»"').lower() == was.strip('.,!?;:«»"').lower()), None)
-            if pos is None:
-                return None
-            a0, b0 = segs[0]['start'], segs[-1]['end']
-            at = a0 + (b0 - a0) * pos / max(1, len(words))
-        sl = str(Path(st.tmp) / f'ear{int(at * 100)}.wav')
+    async def one(i: int, t: dict) -> tuple[bool, bool]:
+        nonlocal done
+        raw = t['raw']
+        if len(raw.split()) < 3 or not d.has_entity_signal(raw, st.gloss):
+            t['final'] = raw
+            return False, False
+        ok = False
+        place = Place(f'turn:{i}', 'final', item=t, canon=canon, gate_terms=gate_terms,
+                      audio_sec=st.audio_sec, index=i)
+        place.final = raw
+        slices = Slices(d, st.tmp, st.wav, f'ear{i}')
         try:
-            await asyncio.to_thread(d._slice, st.wav, max(0.0, at - 15), min(st.audio_sec, at + 15), sl)
-            async with d._res('whisper', cfg.whisper_slots):
-                got = await asyncio.to_thread(lambda: d.audio_clients.asr(sl, ''))
-            return got.get('text') or ''
-        except Exception as error:      # noqa: BLE001 — ухо не роняет запись
-            log.warning('арбитраж звуком не вышел (%s): %s', was, error)
-            return None
+            async with sem:
+                reg = final_tools(place, d, slices, st=st, journal=st.journal, meter=st.meter)
+                fin = await decide_place(place, policy, reg, cfg.graph_place_steps)
+                fixes = place.fixes
+                if fin.decision == 'apply':
+                    t['final'] = place.final
+                else:
+                    t['final'] = raw
+                    for f in fixes:
+                        f['ok'], f['why'] = False, f"{f.get('why', '')} (место пропущено: {fin.why})"
+                if fixes:
+                    # ⚠️ Текст ПЕРЕД правками и в одном блоке с ними: события одной реплики уходят
+                    # подряд, без await между ними, и в ленте не перемешаются с соседними.
+                    piece, whole = d._window(raw, fixes)
+                    ev.emit('turn.text', turn=i, start=round(t['start'], 1), text=piece, whole=whole)
+                for f in fixes:
+                    ev.emit('turn.fix', turn=i, start=round(t['start'], 1), **f)
+                t['fixes'] = fixes
+                st.decisions.append({'place': place.name, 'start': round(t['start'], 2),
+                                     'decision': fin.decision, 'why': fin.why, 'steps': len(place.history),
+                                     'fixes': len(fixes), 'applied': sum(1 for f in fixes if f.get('ok')),
+                                     **({'exhausted': True} if place.exhausted else {})})
+            ok = True
+        except Exception as e:      # noqa: BLE001 — реплика остаётся сырой, запись живёт
+            t['final'] = raw
+            log.warning('final-round failed at %.1fs (%s: %s)', t['start'], type(e).__name__, str(e)[:120])
         finally:
-            Path(sl).unlink(missing_ok=True)
+            slices.cleanup()
+        done += 1
+        # Реплики считаются ПАРАЛЛЕЛЬНО плюс добивочный проход — события приходят не в порядке
+        # записи, клиенту нужен тайм-код.
+        ev.emit('turn.done', turn=i, start=round(t['start'], 1), done=done, n=len(turns_),
+                changed=bool(ok and t.get('final') != raw), failed=not ok)
+        if done % 20 == 0:
+            ev.step(f'final-round {done}')
+        return True, not ok
 
-    n_round, n_failed = await d._final_round(
-        turns_, st.dsum, st.gloss, d.llm, cfg.round_concurrency, ev.step, st.protect, emit=ev.emit,
-        **({'protect': st.known} if st.known else {}),
-        **({'ear': _ear} if (cfg.protect_known and cfg.final_ear) else {}))
+    res = await asyncio.gather(*(one(i, t) for i, t in enumerate(turns_)))
+    n_round = sum(1 for c, _ in res if c)
+    failed_idx = [i for i, (_, f) in enumerate(res) if f]
+    if failed_idx:
+        log.warning('final-round: %d реплик сорвались — добивочный проход через %.0fс',
+                    len(failed_idx), SWEEP_DELAY_S)
+        await asyncio.sleep(SWEEP_DELAY_S)
+        res2 = await asyncio.gather(*(one(i, turns_[i]) for i in failed_idx))
+        failed_idx = [i for i, (_, f) in zip(failed_idx, res2) if f]
+    for i in failed_idx:
+        turns_[i]['correction_failed'] = True
+        log.warning('final-round: реплика %.1fs осталась сырой — помечена correction_failed', turns_[i]['start'])
+    n_failed = len(failed_idx)
+
     st.raw_side = {f"{t['start']:.1f}": {'raw': t['raw'], 'final': t['final']}
                    for t in turns_ if t['final'] != t['raw']}
     st.tm['round_s'] = round(time.monotonic() - _t, 1)

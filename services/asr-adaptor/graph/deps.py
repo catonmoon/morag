@@ -26,7 +26,7 @@ NAMES = (
     'chunk_fn', 'gap_chunks', 'chunking_min_s',
     # финал-раунд и наминг
     'doc_summary', 'has_entity_signal', 'recall_entities', 'correct', 'apply_fixes',
-    '_final_round', '_ear_prefers', '_around', 'name_speakers',
+    '_final_round', '_ear_prefers', '_around', '_window', 'name_speakers',
     # лента
     '_emit_spans', '_emit_draft', '_project',
     # отпечаток установки
