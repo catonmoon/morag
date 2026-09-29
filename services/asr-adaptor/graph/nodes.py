@@ -148,6 +148,9 @@ async def chunking(st: State, d: Deps, ev: Emitter) -> None:
 
 # --- pass2 --------------------------------------------------------------------------------------
 
+SCREEN_PAD = 10.0      # экран «рядом с куском»: показ, пересекающий кусок с запасом в 10 с
+SCREEN_MAX = 12        # не больше стольких слов экрана на кусок: бюджет подсказки — 200 токенов
+
 async def pass2(st: State, d: Deps, ev: Emitter) -> None:
     cfg = d.cfg
     chunks = st.chunks
@@ -160,12 +163,31 @@ async def pass2(st: State, d: Deps, ev: Emitter) -> None:
     if cfg.prompt_glossary == 'substitute':
         for k in _known_spellings(cfg, st.hints or {}):
             spell_map.setdefault(d.arbitrate_stage.sound(d.arbitrate_stage.key(k)), k)
+    screen = [x for x in (st.hints or {}).get('screen') or () if isinstance(x, dict)]
+    n_screen_chunks = 0
     for i, c in enumerate(chunks):
         src = c['text'] or d._neighbour_text(chunks, i)
         canon = d.relevant(src, st.gloss)
+        hint_set = st.hint_set
+        if screen:
+            # Экран в подсказку: написания, которые были на экране В ЭТИ секунды (слайд, код, окно
+            # программы). Замер 29.09 на пяти эталонах: из 47 латинских слов правок владельца 26
+            # конвейер пишет сам, когда слово есть в подсказке, а 20 не попадали в неё вовсе — и
+            # это как раз то, что знает только экран (имена таблиц и признаков, адреса, пакеты):
+            # глоссарий строится по черновику речи, где эти слова искажены до неузнаваемости.
+            # Идут после постоянных терминов, как подтверждённые (мимо фильтра латиницы): их
+            # написал автор слайда. ⚠️ Пустой `screen` — подсказка прежняя байт в байт.
+            near = [w for x in screen
+                    if float(x.get('t0', 0)) <= c['end'] + SCREEN_PAD and float(x.get('t1', 0)) >= c['start'] - SCREEN_PAD
+                    for w in x.get('terms') or () if isinstance(w, str) and w]
+            near = list(dict.fromkeys(near))[:SCREEN_MAX]
+            if near:
+                n_screen_chunks += 1
+                canon = list(dict.fromkeys(near + canon))
+                hint_set = frozenset(st.hint_set | {w.casefold() for w in near})
         if any(x.casefold() in st.hint_set for x in canon):
             n_hinted_chunks += 1
-        prompt = d.build_prompt(canon, st.counter, cfg.prompt_budget, cfg.always_terms, st.hint_set,
+        prompt = d.build_prompt(canon, st.counter, cfg.prompt_budget, cfg.always_terms, hint_set,
                                 # ⚠️ Форму и выключатель глоссария передаём ТОЛЬКО когда они
                                 # заданы: заглушки в тестах и чужие обёртки знают прежнюю сигнатуру.
                                 **({'prefix': cfg.prompt_prefix} if cfg.prompt_prefix else {}),
@@ -196,6 +218,8 @@ async def pass2(st: State, d: Deps, ev: Emitter) -> None:
     ev.stage_done('pass2', st.tm['pass2_s'], n=len(chunks), n_broken=n_broken, n_retried=st.tm['n_retried'])
     if st.seed:
         st.tm['n_chunks_hinted'] = n_hinted_chunks
+    if screen:
+        st.tm['n_chunks_screen'] = n_screen_chunks
     if n_broken:
         st.tm['n_broken_chunks'] = n_broken
         log.warning('pass2: %d чанк(ов) из %d не расшифрованы — запись собрана без них',
@@ -366,7 +390,24 @@ async def turns(st: State, d: Deps, ev: Emitter) -> None:
 SWEEP_DELAY_S = 30.0
 
 
+def editor_on(cfg, st: State) -> bool:
+    """Редактор вместо финал-раунда: на прогон (`pipeline=graph-editor`) или конфигом."""
+    return (st.policy or getattr(cfg, 'graph_policy', '')) == 'editor'
+
+
+async def editor(st: State, d: Deps, ev: Emitter) -> None:
+    from graph.editor import run_editor
+    await run_editor(st, d, ev)
+
+
 async def final_round(st: State, d: Deps, ev: Emitter) -> None:
+    if editor_on(d.cfg, st):
+        # Правку текста делает редактор ПОСЛЕ голосов (он видит, кто говорит); здесь — только
+        # сборка сырого текста реплик, без единого вызова модели.
+        for t in st.turns:
+            t['raw'] = ' '.join(c['raw'] for c in t['chunks'] if c['raw']).strip()
+            t['final'] = t['raw']
+        return
     from graph.loop import Place, decide_place
     from graph.places import Slices, final_tools
     from graph.policy import make_policy
@@ -560,13 +601,14 @@ NODES: list[tuple[str, object, object]] = [
     ('glossary', glossary, None),
     ('chunking', chunking, None),
     ('pass2', pass2, None),
-    ('relisten', relisten, lambda cfg: bool(cfg.relisten)),
-    ('arbitrate', arbitrate, lambda cfg: bool(cfg.second_model)),
+    ('relisten', relisten, lambda cfg, st: bool(cfg.relisten)),
+    ('arbitrate', arbitrate, lambda cfg, st: bool(cfg.second_model)),
     ('turns', turns, None),
     ('final_round', final_round, None),
     ('speakers', speakers, None),
-    ('naming', naming, lambda cfg: bool(cfg.enable_naming)),
+    ('naming', naming, lambda cfg, st: bool(cfg.enable_naming)),
+    ('editor', editor, lambda cfg, st: editor_on(cfg, st)),
     ('assemble', assemble, None),
-    ('align', align, lambda cfg: bool(cfg.enable_align)),
+    ('align', align, lambda cfg, st: bool(cfg.enable_align)),
     ('coverage', coverage, None),
 ]

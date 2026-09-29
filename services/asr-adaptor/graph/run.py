@@ -68,7 +68,7 @@ async def run_graph(audio_path: str, llm, *, episode: str = '', title: str = '',
     st.ticket = d._take_ticket()  # порядок реестра = порядок поступления выпусков
     try:
         for name, fn, when in nodes.NODES:
-            if when is not None and not when(cfg):
+            if when is not None and not when(cfg, st):
                 continue
             if name in st.done:
                 continue

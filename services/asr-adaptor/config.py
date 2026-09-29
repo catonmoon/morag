@@ -99,7 +99,7 @@ class Config:
     prompts_file: str = field(default_factory=lambda: _env('ASR_PROMPTS', ''))
     # Политика решения по месту в графе: `rule` — правила конвейера явными шагами (граф равен
     # линейному конвейеру), `llm` — оркестратор через function calling выбирает инструменты сам.
-    graph_policy: str = field(default_factory=lambda: 'llm' if _env('ASR_GRAPH_POLICY', 'rule').strip().lower() == 'llm' else 'rule')
+    graph_policy: str = field(default_factory=lambda: _env('ASR_GRAPH_POLICY', 'rule').strip().lower() if _env('ASR_GRAPH_POLICY', 'rule').strip().lower() in ('llm', 'editor') else 'rule')
     # Бюджет шагов на одно место (кусок арбитража, реплика финал-раунда). Правилам хватает: арбитраж —
     # до пяти (ворота, два уха, правила, третий голос), реплика — два плюс три на каждую замену
     # известного слова; LLM-оркестратору сверх того — нечего.

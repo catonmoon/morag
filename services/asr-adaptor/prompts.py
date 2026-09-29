@@ -37,6 +37,7 @@ REGISTRY: dict[str, tuple[str, str]] = {
     'namer.intro.system': ('stages.namer', '_SYS'),
     'namer.guests.system': ('stages.namer', '_GUESTS_SYS'),
     'policy.orchestrator.system': ('graph.policy', 'ORCHESTRATOR_SYS'),
+    'editor.system': ('graph.editor', 'EDITOR_SYS'),
 }
 
 # Слоты, которые переопределение обязано сохранить.
@@ -44,6 +45,7 @@ SLOTS: dict[str, tuple[str, ...]] = {
     'final.correct.system': ('@CORPUS@', '@EXAMPLE@', '@NAMERULE@'),
     'namer.intro.system': ('@CORPUS@',),
     'namer.guests.system': ('@CORPUS@',),
+    'editor.system': ('@CORPUS@',),
 }
 
 
