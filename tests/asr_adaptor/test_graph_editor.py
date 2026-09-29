@@ -51,16 +51,19 @@ def _tools(silence, known=('Kafka',)):
     return st, ps, reg
 
 
-async def test_canon_witness_accepts_a_known_spelling_that_sounds_alike(rich, silence):
+async def test_canon_alone_confirms_only_the_spelling_of_what_already_sounds_the_same(rich, silence):
     st, ps, reg = _tools(silence)
     res = await reg.call('propose', was='Кавка', now='Kafka', at=21.0, witness='canon')
+    assert not res['accepted'] and 'звук' in res['why'], 'звучит иначе («в» и «ф») — нужен звук, канона мало'
+    st.turns[1]['final'] = 'дальше про Кафка и очередь'
+    res = await reg.call('propose', was='Кафка', now='Kafka', at=21.0, witness='canon')
     assert res['accepted'] and st.turns[1]['final'] == 'дальше про Kafka и очередь'
     res = await reg.call('propose', was='очередь', now='Redis', at=21.0, witness='canon')
     assert not res['accepted'] and 'канон' in res['why'], 'написания нет в каноне — отказ'
 
 
 async def test_sound_witness_needs_a_listened_window_that_supports_the_words(rich, silence):
-    st, ps, reg = _tools(silence)
+    st, ps, reg = _tools(silence, known=('Kafka', 'Postgres'))
     res = await reg.call('propose', was='речь-20', now='печь-30', at=0.0, witness='sound')
     assert not res['accepted'] and 'не переслушано' in res['why']
     heard = await reg.call('listen', t0=15.0, t1=45.0)                 # заглушка слышит «печь-30»
@@ -104,10 +107,11 @@ class Script:
 
 async def test_page_loop_runs_several_tools_per_answer_and_keeps_broken_calls_out_of_history(rich, silence):
     st, ps, reg = _tools(silence)
+    st.turns[1]['final'] = 'дальше про Кафка и очередь'
     llm = Script([
         {'role': 'assistant', 'content': '', 'tool_calls': [
             _tc('lookup', '{"word": "Кавка"}', 'a'),
-            _tc('propose', '{"was": "Кавка", "now": "Kafka", "at": 21.0, "witness": "canon"}', 'b'),
+            _tc('propose', '{"was": "Кафка", "now": "Kafka", "at": 21.0, "witness": "canon"}', 'b'),
             _tc('listen', '{"t0": 1', 'c')]},                                  # битые аргументы
         {'role': 'assistant', 'content': '', 'tool_calls': [_tc('finish', '{}', 'd')]},
     ])
@@ -164,11 +168,11 @@ async def test_spelling_needs_canon_and_canon_needs_a_term_that_sounds_alike(ric
     st, ps, reg = _tools(silence, known=('Kafka', 'Kubernetes', 'очередью'))
     ps.heard.append((20.0, 50.0, 'clean', 'дальше про Кавка и очередь'))
     res = await reg.call('propose', was='Кавка', now='Kavka', at=21.0, witness='sound')
-    assert not res['accepted'] and 'написания' in res['why'], 'звучит так же — это написание, ухо не судит'
+    assert not res['accepted'] and 'написания' in res['why'], 'латиницу пишет канон, ухо написаний не судит'
     res = await reg.call('propose', was='Кавка', now='Kubernetes', at=21.0, witness='canon')
-    assert not res['accepted'] and 'не звучит' in res['why'], 'канон не подменяет непохожее слово'
+    assert not res['accepted'] and 'звук' in res['why'], 'канон не подменяет слово, которого никто не слышал'
     res = await reg.call('propose', was='очередь', now='очередью', at=21.0, witness='canon')
-    assert not res['accepted'] and 'терминов' in res['why'], 'обычное слово — только звуком'
-    got = await reg.call('lookup', word='Кавка')
+    assert not res['accepted'] and 'формы' in res['why'], 'другая форма слова — только если ухо её сказало'
+    got = await reg.call('lookup', word='Кафка')
     assert got['known_spellings'] == ['Kafka'], 'непохожее написание — приманка, а не подсказка'
     assert st.turns[1]['final'] == 'дальше про Кавка и очередь'
