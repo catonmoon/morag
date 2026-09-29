@@ -265,10 +265,16 @@ def editor_tools(ps: PageState, st, d, slices: Slices, known: list[str], canon: 
             t['final'] = pattern.sub(now.replace('\\', r'\\'), before, count=1)
             verdicts = [{'was': was, 'now': now, 'ok': True, 'why': ''}]
         else:
+            # Вето финал-раунда судит ТОЛЬКО то, что правка меняет (`old → new`), а место задаёт весь
+            # `was`: редактор берёт соседние слова для точности адреса, и лимит «три слова в was»
+            # отвергал верные правки за контекст (первый круг стенда: 9 верных из 24 отказов —
+            # «мы стремим как раз в Кавку»). Правится фраза, потом фраза встаёт в реплику.
             verdicts: list[dict] = []
-            t['final'], _, _ = d.apply_fixes(before, [{'was': was, 'now': now}], list(known),
-                                             list(cfg.always_terms), log_to=verdicts,
-                                             **({'protect': st.known} if st.known else {}))
+            core = [{'was': old, 'now': new}] if old and new else [{'was': was, 'now': now}]
+            phrase, _, _ = d.apply_fixes(was.strip(), core, list(known), list(cfg.always_terms),
+                                         log_to=verdicts, **({'protect': st.known} if st.known else {}))
+            if verdicts and verdicts[-1].get('ok'):
+                t['final'] = pattern.sub(lambda _m: phrase, before, count=1)
         v = verdicts[-1] if verdicts else {'ok': False, 'why': 'не применилась'}
         row.update(ok=bool(v.get('ok')), why=v.get('why') or ('вставка' if insertion else ''), turn=ti)
         ps.fixes.append(row)

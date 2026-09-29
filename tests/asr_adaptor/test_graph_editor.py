@@ -176,3 +176,13 @@ async def test_spelling_needs_canon_and_canon_needs_a_term_that_sounds_alike(ric
     got = await reg.call('lookup', word='Кафка')
     assert got['known_spellings'] == ['Kafka'], 'непохожее написание — приманка, а не подсказка'
     assert st.turns[1]['final'] == 'дальше про Кавка и очередь'
+
+
+async def test_context_words_locate_the_edit_but_the_veto_judges_only_the_change(rich, silence):
+    """Первый круг стенда 29.09: 9 верных правок из 24 отказов — «too_long» за слова-адрес вокруг."""
+    st, ps, reg = _tools(silence)
+    st.turns[1]['final'] = 'дальше про Кафка и очередь из пяти длинных слов'
+    res = await reg.call('propose', was='дальше про Кафка и очередь', now='дальше про Kafka и очередь',
+                         at=21.0, witness='canon')
+    assert res['accepted'], res
+    assert st.turns[1]['final'] == 'дальше про Kafka и очередь из пяти длинных слов'
