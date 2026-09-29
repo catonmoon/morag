@@ -36,8 +36,7 @@ REGISTRY: dict[str, tuple[str, str]] = {
     'arbitrate.reader.system': ('stages.arbitrate', 'READER_SYS'),
     'namer.intro.system': ('stages.namer', '_SYS'),
     'namer.guests.system': ('stages.namer', '_GUESTS_SYS'),
-    'policy.orchestrator.system': ('graph.policy', 'ORCHESTRATOR_SYS'),
-    'editor.system': ('graph.editor', 'EDITOR_SYS'),
+    'editor.system': ('conveyor.editor', 'EDITOR_SYS'),
 }
 
 # Слоты, которые переопределение обязано сохранить.

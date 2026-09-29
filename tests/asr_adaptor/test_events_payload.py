@@ -13,6 +13,7 @@ import pytest
 from test_pipeline_recovery import AUDIO_S, backend, wav  # noqa: F401 — фикстуры переиспользуем
 
 import pipeline
+from conveyor.run import run_conveyor
 
 
 async def _events(wav_path, **kw) -> list[dict]:
@@ -26,7 +27,7 @@ async def _events(wav_path, **kw) -> list[dict]:
         m['seq'] = seq[0]
         seen.append(m)
 
-    await pipeline.run_pipeline(str(wav_path), llm=None, episode='ep1', progress=progress, **kw)
+    await run_conveyor(str(wav_path), llm=None, episode='ep1', progress=progress, **kw)
     return seen
 
 

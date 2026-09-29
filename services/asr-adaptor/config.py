@@ -41,11 +41,6 @@ def _clean_ear_mode(raw: str) -> str:
     return 'always' if v in ('1', 'true', 'yes', 'on', 'always') else ''
 
 
-def _pipeline_mode(raw: str) -> str:
-    """`graph` — конвейер как граф состояний (`graph/`), всё остальное — прежний `legacy`."""
-    return 'graph' if (raw or '').strip().lower() in ('graph', 'граф') else 'legacy'
-
-
 def _enable_thinking() -> bool | None:
     """Reasoning-флаг для LLMClient (env `ASR_LLM_ENABLE_THINKING`). Пусто/none → None: НЕ слать
     reasoning-параметр (для non-reasoning моделей типа grok-4.20-non-reasoning он невалиден → 400).
@@ -89,27 +84,22 @@ class Config:
 
     # --- прочее ---
     mode: str = field(default_factory=lambda: _env('ASR_MODE', 'async'))  # async | sync
-    # Какой конвейер гонит запись: `legacy` — `pipeline.run_pipeline` (умолчание, байт в байт
-    # прежний), `graph` — тот же конвейер как граф состояний (`graph/run.py`): узлы, инструменты,
-    # заменяемая политика решения по месту, журнал вызовов. Эксперимент: граф удаляется каталогом.
-    # Поле формы `pipeline=` у `POST /v1/audio/transcriptions` перебивает на одну запись — A/B на
-    # одном стенде без перезапуска.
-    pipeline: str = field(default_factory=lambda: _pipeline_mode(_env('ASR_PIPELINE', 'legacy')))
     # Файл переопределений промптов стадий (TOML, см. prompts.py). Пусто — встроенные тексты.
     prompts_file: str = field(default_factory=lambda: _env('ASR_PROMPTS', ''))
-    # Политика решения по месту в графе: `rule` — правила конвейера явными шагами (граф равен
-    # линейному конвейеру), `llm` — оркестратор через function calling выбирает инструменты сам.
-    graph_policy: str = field(default_factory=lambda: _env('ASR_GRAPH_POLICY', 'rule').strip().lower() if _env('ASR_GRAPH_POLICY', 'rule').strip().lower() in ('llm', 'editor') else 'rule')
+    # Редактор расшифровки (`conveyor/editor.py`): агент читает страницы черновика после голосов и
+    # предлагает правки со свидетелем вместо финал-раунда. Выключено — финал-раунд, как раньше.
+    # Поле формы `editor=1|0` у `POST /v1/audio/transcriptions` перебивает на одну запись.
+    editor: bool = field(default_factory=lambda: _flag('ASR_EDITOR', '0'))
     # Бюджет шагов на одно место (кусок арбитража, реплика финал-раунда). Правилам хватает: арбитраж —
     # до пяти (ворота, два уха, правила, третий голос), реплика — два плюс три на каждую замену
-    # известного слова; LLM-оркестратору сверх того — нечего.
-    graph_place_steps: int = field(default_factory=lambda: int(_env('ASR_GRAPH_PLACE_STEPS', '12')))
-    # Каталог чекпойнтов графа: после каждого узла состояние пишется в JSON (0600, без центроидов
-    # голосов), `run_graph(resume=<файл>)` продолжает с первого непройденного узла. Пусто — выключено.
-    graph_checkpoints: str = field(default_factory=lambda: _env('ASR_GRAPH_CHECKPOINTS', ''))
-    # Свои события графа в ленте (`graph.node` со счётчиком после каждого узла). Выключено — лента
-    # байт в байт как у конвейера: её читает окно загрузки записи.
-    graph_events: bool = field(default_factory=lambda: _flag('ASR_GRAPH_EVENTS', '0'))
+    # известного слова.
+    place_steps: int = field(default_factory=lambda: int(_env('ASR_PLACE_STEPS', '12')))
+    # Каталог чекпойнтов конвейера: после каждого узла состояние пишется в JSON (0600, без центроидов
+    # голосов), `run_conveyor(resume=<файл>)` продолжает с первого непройденного узла. Пусто — выключено.
+    checkpoints: str = field(default_factory=lambda: _env('ASR_CHECKPOINTS', ''))
+    # Свои события конвейера в ленте (`conveyor.node` со счётчиком после каждого узла). Выключено —
+    # лента прежняя: её читает окно загрузки записи.
+    node_events: bool = field(default_factory=lambda: _flag('ASR_NODE_EVENTS', '0'))
     whisper_tokenizer: str = field(default_factory=lambda: _env('ASR_WHISPER_TOKENIZER', 'openai/whisper-large-v3'))
     # Форма подсказки пасса-2 (префикс перед списком написаний). Пусто — умолчание движка.
     prompt_prefix: str = field(default_factory=lambda: _env('ASR_PROMPT_PREFIX', ''))
@@ -312,10 +302,10 @@ class RetryingLLM:
             lambda: self._client.complete_json(*args, **kwargs), 'complete_json')
 
     async def complete_with_tools(self, *args, **kwargs):
-        """Function calling (LLM-оркестратор графа) — под той же политикой ретраев.
+        """Function calling (редактор расшифровки) — под той же политикой ретраев.
 
         До этого метод уходил в клиент через `__getattr__` МИМО ретраев: спайк шлюза посреди
-        цикла по месту ронял бы решение, а не ждал десять секунд, как остальные стадии."""
+        цикла редактора ронял бы решение, а не ждал десять секунд, как остальные стадии."""
         kwargs = self._with_rep(kwargs)
         return await self._policy.call(
             lambda: self._client.complete_with_tools(*args, **kwargs), 'complete_with_tools')

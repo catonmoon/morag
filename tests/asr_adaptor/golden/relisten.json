@@ -1,0 +1,211 @@
+{
+ "calls": [
+  "{\"a\": 0.0, \"b\": 20.0, \"model\": \"\", \"prompt\": \"\\u043a\\u0430\\u043d\\u043e\\u043d\\u0438\\u043a\\u0438\", \"words\": false}",
+  "{\"a\": 0.0, \"b\": 20.3, \"model\": \"\", \"prompt\": \"\", \"words\": false}",
+  "{\"a\": 0.0, \"b\": 21.5, \"model\": \"\", \"prompt\": \"\", \"words\": false}",
+  "{\"a\": 18.5, \"b\": 36.5, \"model\": \"\", \"prompt\": \"\", \"words\": false}",
+  "{\"a\": 20.0, \"b\": 35.0, \"model\": \"\", \"prompt\": \"\\u043a\\u0430\\u043d\\u043e\\u043d\\u0438\\u043a\\u0438\", \"words\": false}",
+  "{\"a\": 33.5, \"b\": 51.5, \"model\": \"\", \"prompt\": \"\", \"words\": false}",
+  "{\"a\": 35.0, \"b\": 50.0, \"model\": \"\", \"prompt\": \"\\u043a\\u0430\\u043d\\u043e\\u043d\\u0438\\u043a\\u0438\", \"words\": false}",
+  "{\"a\": 48.5, \"b\": 90.0, \"model\": \"\", \"prompt\": \"\", \"words\": false}",
+  "{\"a\": 50.0, \"b\": 90.0, \"model\": \"\", \"prompt\": \"\\u043a\\u0430\\u043d\\u043e\\u043d\\u0438\\u043a\\u0438\", \"words\": false}"
+ ],
+ "events": [
+  "{\"audio_sec\": 90.0, \"env\": \"macbook37t4y3 · da7b483+dirty · py3.13.5 · tiktoken0.12.0 transformers5.2.0 wordfreq3.1.1 · grok-4.20-0309-non-reasoning\", \"t\": \"job.meta\"}",
+  "{\"bulk\": true, \"from\": 0.0, \"t\": \"draft.window\", \"text\": \"начало разговора\", \"to\": 30.0}",
+  "{\"bulk\": true, \"from\": 30.0, \"t\": \"draft.window\", \"text\": \"продолжение разговора\", \"to\": 60.0}",
+  "{\"changed\": 0, \"failed\": 0, \"n\": 1, \"stage\": \"final-round\", \"t\": \"stage.end\"}",
+  "{\"conflicts\": [], \"mapping\": {\"SPEAKER_00\": \"Speaker_0\"}, \"names\": {}, \"t\": \"spk.map\"}",
+  "{\"draft\": \"\", \"from\": 20.0, \"i\": 2, \"n\": 4, \"prompt\": \"каноники\", \"spk\": \"SPEAKER_00\", \"t\": \"chunk.start\", \"terms\": [], \"to\": 35.0}",
+  "{\"draft\": \"\", \"from\": 35.0, \"i\": 3, \"n\": 4, \"prompt\": \"каноники\", \"spk\": \"SPEAKER_00\", \"t\": \"chunk.start\", \"terms\": [], \"to\": 50.0}",
+  "{\"draft\": \"начало разговора\", \"from\": 0.0, \"i\": 1, \"n\": 4, \"prompt\": \"каноники\", \"spk\": \"SPEAKER_00\", \"t\": \"chunk.start\", \"terms\": [], \"to\": 20.0}",
+  "{\"draft\": \"продолжение разговора\", \"from\": 50.0, \"i\": 4, \"n\": 4, \"prompt\": \"каноники\", \"spk\": \"SPEAKER_00\", \"t\": \"chunk.start\", \"terms\": [], \"to\": 90.0}",
+  "{\"from\": 0.0, \"i\": 1, \"kind\": \"sparse\", \"now\": \"начало речь-0 конец\", \"t\": \"relisten.span\", \"to\": 20.0, \"verdict\": \"речь\", \"was\": \"начало речь-0 конец\"}",
+  "{\"from\": 20.0, \"i\": 2, \"kind\": \"sparse\", \"now\": \"начало печь-15 конец\", \"t\": \"relisten.span\", \"to\": 35.0, \"verdict\": \"речь\", \"was\": \"начало речь-20 конец\"}",
+  "{\"from\": 35.0, \"i\": 3, \"kind\": \"sparse\", \"now\": \"начало печь-30 конец\", \"t\": \"relisten.span\", \"to\": 50.0, \"verdict\": \"речь\", \"was\": \"начало речь-35 конец\"}",
+  "{\"from\": 50.0, \"i\": 4, \"kind\": \"char\", \"now\": \"начало речь-48 конец\", \"t\": \"relisten.span\", \"to\": 90.0, \"verdict\": \"речь\", \"was\": \"ИИИИИИИИИИИИ петля\"}",
+  "{\"i\": 1, \"n_seg\": 1, \"raw\": \"начало речь-0 конец\", \"retried\": true, \"t\": \"chunk.done\"}",
+  "{\"i\": 2, \"n_seg\": 1, \"raw\": \"начало речь-20 конец\", \"retried\": false, \"t\": \"chunk.done\"}",
+  "{\"i\": 3, \"n_seg\": 1, \"raw\": \"начало речь-35 конец\", \"retried\": false, \"t\": \"chunk.done\"}",
+  "{\"i\": 4, \"n_seg\": 1, \"raw\": \"ИИИИИИИИИИИИ петля\", \"retried\": false, \"t\": \"chunk.done\"}",
+  "{\"n\": 0, \"n_hinted\": 0, \"stage\": \"glossary\", \"t\": \"stage.end\", \"terms\": []}",
+  "{\"n\": 0, \"stage\": \"align\", \"t\": \"stage.end\"}",
+  "{\"n\": 1, \"stage\": \"diarize\", \"t\": \"stage.end\"}",
+  "{\"n\": 2, \"stage\": \"pass1\", \"t\": \"stage.end\"}",
+  "{\"n\": 4, \"n_broken\": 0, \"n_retried\": 1, \"stage\": \"pass2\", \"t\": \"stage.end\"}",
+  "{\"n\": 4, \"stage\": \"relisten\", \"t\": \"stage.end\", \"без изменений\": 0, \"петля осталась\": 0, \"речь\": 4, \"тишина\": 0}",
+  "{\"spans\": [[0.0, 90.0, 0]], \"speakers\": [\"SPEAKER_00\"], \"t\": \"diar.spans\"}",
+  "{\"stage\": \"align\", \"t\": \"stage.start\"}",
+  "{\"stage\": \"diarize\", \"t\": \"stage.start\"}",
+  "{\"stage\": \"final-round\", \"t\": \"stage.start\"}",
+  "{\"stage\": \"glossary\", \"t\": \"stage.start\"}",
+  "{\"stage\": \"pass1\", \"t\": \"stage.start\"}",
+  "{\"stage\": \"pass2\", \"t\": \"stage.start\"}",
+  "{\"stage\": \"relisten\", \"t\": \"stage.start\"}",
+  "{\"stage\": \"speakers\", \"t\": \"stage.start\"}"
+ ],
+ "order": [
+  "{\"audio_sec\": 90.0, \"env\": \"macbook37t4y3 · da7b483+dirty · py3.13.5 · tiktoken0.12.0 transformers5.2.0 wordfreq3.1.1 · grok-4.20-0309-non-reasoning\", \"t\": \"job.meta\"}",
+  "diarize",
+  "{\"stage\": \"diarize\", \"t\": \"stage.start\"}",
+  "{\"n\": 1, \"stage\": \"diarize\", \"t\": \"stage.end\"}",
+  "pass1",
+  "{\"stage\": \"pass1\", \"t\": \"stage.start\"}",
+  "{\"n\": 2, \"stage\": \"pass1\", \"t\": \"stage.end\"}",
+  "glossary",
+  "{\"stage\": \"glossary\", \"t\": \"stage.start\"}",
+  "{\"n\": 0, \"n_hinted\": 0, \"stage\": \"glossary\", \"t\": \"stage.end\", \"terms\": []}",
+  "pass2",
+  "{\"stage\": \"pass2\", \"t\": \"stage.start\"}",
+  "{\"n\": 4, \"n_broken\": 0, \"n_retried\": 1, \"stage\": \"pass2\", \"t\": \"stage.end\"}",
+  "relisten",
+  "{\"stage\": \"relisten\", \"t\": \"stage.start\"}",
+  "{\"n\": 4, \"stage\": \"relisten\", \"t\": \"stage.end\", \"без изменений\": 0, \"петля осталась\": 0, \"речь\": 4, \"тишина\": 0}",
+  "final-round",
+  "{\"stage\": \"final-round\", \"t\": \"stage.start\"}",
+  "{\"changed\": 0, \"failed\": 0, \"n\": 1, \"stage\": \"final-round\", \"t\": \"stage.end\"}",
+  "speakers",
+  "{\"stage\": \"speakers\", \"t\": \"stage.start\"}",
+  "{\"conflicts\": [], \"mapping\": {\"SPEAKER_00\": \"Speaker_0\"}, \"names\": {}, \"t\": \"spk.map\"}",
+  "align",
+  "{\"stage\": \"align\", \"t\": \"stage.start\"}",
+  "{\"n\": 0, \"stage\": \"align\", \"t\": \"stage.end\"}"
+ ],
+ "result": {
+  "coverage": {
+   "audio_sec": 90.0,
+   "empty_chunks": [],
+   "lost_sec": 0,
+   "lost_spots": [],
+   "min_gap_s": 5.0,
+   "pass1_covered_sec": 60.0,
+   "pass1_hole_sec": 30.0,
+   "pass1_holes": [
+    [
+     20.0,
+     50.0
+    ]
+   ],
+   "recovered_chunks": 2,
+   "recovered_sec": 36.0,
+   "retried_chunks": 1,
+   "unheard": [
+    [
+     20.0,
+     50.0
+    ]
+   ],
+   "unheard_sec": 30.0
+  },
+  "doc_summary": "",
+  "glossary": [],
+  "markdown": "---\ntitle: Демо\nurl: \n---\n\n[Speaker_0] <!-- t:0.0 --> начало речь-0 конец начало печь-15 конец начало печь-30 конец начало речь-48 конец\n",
+  "name_conflicts": [],
+  "raw_sidecar": {},
+  "relisten": [
+   {
+    "end": 20.0,
+    "kind": "sparse",
+    "now": "начало речь-0 конец",
+    "start": 0.0,
+    "verdict": "речь",
+    "was": "начало речь-0 конец"
+   },
+   {
+    "end": 35.0,
+    "kind": "sparse",
+    "now": "начало печь-15 конец",
+    "start": 20.0,
+    "verdict": "речь",
+    "was": "начало речь-20 конец"
+   },
+   {
+    "end": 50.0,
+    "kind": "sparse",
+    "now": "начало печь-30 конец",
+    "start": 35.0,
+    "verdict": "речь",
+    "was": "начало речь-35 конец"
+   },
+   {
+    "end": 90.0,
+    "kind": "char",
+    "now": "начало речь-48 конец",
+    "start": 50.0,
+    "verdict": "речь",
+    "was": "ИИИИИИИИИИИИ петля"
+   }
+  ],
+  "speaker_map": {
+   "SPEAKER_00": "Speaker_0"
+  },
+  "speaker_names": {},
+  "text": "начало речь-0 конец начало печь-15 конец начало печь-30 конец начало речь-48 конец",
+  "timing": {
+   "n_chunks": 4,
+   "n_glossary": 0,
+   "n_relistened": 4,
+   "n_retried": 1,
+   "n_round_turns": 0
+  },
+  "turns": [
+   {
+    "end": 90.0,
+    "raw": "начало речь-0 конец начало печь-15 конец начало печь-30 конец начало речь-48 конец",
+    "segments": [
+     {
+      "end": 21.5,
+      "start": 0.0,
+      "text": "начало речь-0 конец"
+     },
+     {
+      "end": 36.5,
+      "start": 18.5,
+      "text": "начало печь-15 конец"
+     },
+     {
+      "end": 51.5,
+      "start": 33.5,
+      "text": "начало печь-30 конец"
+     },
+     {
+      "end": 90.0,
+      "start": 48.5,
+      "text": "начало речь-48 конец"
+     }
+    ],
+    "speaker": "Speaker_0",
+    "speaker_id": "Speaker_0",
+    "start": 0.0,
+    "text": "начало речь-0 конец начало печь-15 конец начало печь-30 конец начало речь-48 конец"
+   }
+  ],
+  "words": null
+ },
+ "segments": [
+  {
+   "end": 21.5,
+   "id": 0,
+   "start": 0.0,
+   "text": "начало речь-0 конец"
+  },
+  {
+   "end": 36.5,
+   "id": 1,
+   "start": 18.5,
+   "text": "начало печь-15 конец"
+  },
+  {
+   "end": 51.5,
+   "id": 2,
+   "start": 33.5,
+   "text": "начало печь-30 конец"
+  },
+  {
+   "end": 90.0,
+   "id": 3,
+   "start": 48.5,
+   "text": "начало речь-48 конец"
+  }
+ ]
+}

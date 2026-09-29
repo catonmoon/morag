@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from graph.tools import Registry, Tool, ToolError, validate
+from conveyor.tools import Registry, Tool, ToolError, validate
 
 LISTEN = {'properties': {'ear': {'type': 'string', 'enum': ['second', 'clean']},
                          'window': {'type': 'string', 'enum': ['same', 'chunk']},

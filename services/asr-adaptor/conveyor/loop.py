@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from graph.tools import Registry, ToolError
+from conveyor.tools import Registry, ToolError
 
 
 @dataclass

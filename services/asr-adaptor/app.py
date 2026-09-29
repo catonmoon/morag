@@ -20,7 +20,7 @@ import audio_clients
 import jobs
 import prompts
 from config import CFG
-from pipeline import run_pipeline
+from conveyor.run import run_conveyor
 
 # Без этого INFO-записи конвейера (сводка о покрытии) не доходят до лога: uvicorn настраивает
 # свои логгеры, а корневой остаётся на WARNING.
@@ -35,16 +35,15 @@ if _PROMPTS:
     logging.getLogger('asr').info('промпты из %s: %s', CFG.prompts_file, ', '.join(_PROMPTS))
 
 
-def _runner(mode: str):
-    """`legacy` — `pipeline.run_pipeline`; `graph` — `graph.run.run_graph` (та же сигнатура);
-    `graph-rule` / `graph-llm` — граф с политикой на этот прогон (три руки на одном стенде)."""
-    mode = (mode or '').strip().lower().replace(':', '-')
-    if mode.startswith('graph'):
-        from functools import partial  # noqa: PLC0415
-        from graph.run import run_graph  # noqa: PLC0415 — граф грузится, только если его выбрали
-        kind = mode.partition('-')[2]
-        return partial(run_graph, policy=kind) if kind in ('rule', 'llm', 'editor') else run_graph
-    return run_pipeline
+def _runner(editor: str):
+    """Конвейер на одну запись; `editor=1|0` из формы перебивает `ASR_EDITOR`, пусто — конфиг."""
+    from functools import partial  # noqa: PLC0415
+    v = (editor or '').strip().lower()
+    if v in ('1', 'true', 'yes', 'on'):
+        return partial(run_conveyor, editor=True)
+    if v in ('0', 'false', 'no', 'off'):
+        return partial(run_conveyor, editor=False)
+    return run_conveyor
 
 
 def _enriched(r: dict) -> dict:
@@ -70,7 +69,7 @@ def _enriched(r: dict) -> dict:
                        # ⚠️ Отпечаток установки обязан дойти до АРТЕФАКТА, а не только до
                        # результата конвейера: `x_enriched` собирается по явному списку полей,
                        # и новое поле здесь легко забыть. Так и вышло — тест проверял результат
-                       # `run_pipeline`, то есть не ту границу, и молчал.
+                       # прежнего `run_pipeline`, то есть не ту границу, и молчал.
                        'env': r.get('env', {}),
                        # Журнал переслушивания: где была порча, что услышало чистое ухо и что
                        # решили. Пусто — ключа нет вовсе, чтобы старые читатели не менялись.
@@ -81,9 +80,8 @@ def _enriched(r: dict) -> dict:
                        **({'arbitration': r['arbitration']} if r.get('arbitration') else {}),
                        # Вердикты финал-раунда: что предложила модель, что принял код и почему.
                        **({'fixes': r['fixes']} if r.get('fixes') else {}),
-                       # Граф (ASR_PIPELINE=graph): пройденные узлы, журнал инструментов, счётчики.
-                       # У линейного конвейера ключа нет — прежний артефакт байт в байт.
-                       **({'graph': r['graph']} if r.get('graph') else {})},
+                       # Конвейер: пройденные узлы, журнал инструментов и решений редактора, счётчики.
+                       **({'conveyor': r['conveyor']} if r.get('conveyor') else {})},
     }
 
 
@@ -135,9 +133,9 @@ def models():
 async def transcribe(file: UploadFile = File(...), model: str = Form('asr-adaptor'),
                      response_format: str = Form('verbose_json'), mode: str = Form(''),
                      episode: str = Form(''), title: str = Form(''), url: str = Form(''),
-                     hints: str = Form(''), events: str = Form(''), pipeline: str = Form('')):
-    # `pipeline=legacy|graph` — выбор конвейера на ОДНУ запись (A/B без перезапуска); пусто — конфиг.
-    run = _runner(pipeline.strip().lower() if pipeline.strip() else CFG.pipeline)
+                     hints: str = Form(''), events: str = Form(''), editor: str = Form('')):
+    # `editor=1|0` — редактор на ОДНУ запись (A/B без перезапуска); пусто — конфиг.
+    run = _runner(editor)
     suffix = Path(file.filename or 'audio').suffix or '.mp3'
     tmp = tempfile.mktemp(suffix=suffix)
     Path(tmp).write_bytes(await file.read())

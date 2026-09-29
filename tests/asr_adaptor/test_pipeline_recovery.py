@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 import pipeline
+from conveyor.run import run_conveyor
 from app import _enriched
 
 SR = 16000
@@ -91,7 +92,7 @@ def backend(monkeypatch, wav) -> FakeBackend:
 
 
 async def test_gap_left_by_pass1_is_recovered_into_the_transcript(backend, wav):
-    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+    r = await run_conveyor(str(wav), llm=None, episode='ep1')
 
     # Отпечаток установки едет в артефакте: через год видно, чем сделана эта расшифровка.
     assert r['env'].get('host') and r['env'].get('packages')
@@ -105,7 +106,7 @@ async def test_gap_left_by_pass1_is_recovered_into_the_transcript(backend, wav):
 
 
 async def test_empty_answer_is_retried_without_prompt_and_with_padding(backend, wav):
-    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+    r = await run_conveyor(str(wav), llm=None, episode='ep1')
 
     retries = [c for c in backend.calls if not c['prompt']]
     assert len(retries) == 1
@@ -135,7 +136,7 @@ async def test_hole_inside_a_chunk_is_not_recovered(backend, wav, monkeypatch):
 
     monkeypatch.setattr(pipeline.audio_clients, 'asr', asr)
 
-    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+    r = await run_conveyor(str(wav), llm=None, episode='ep1')
 
     assert r['coverage']['pass1_holes'] == [[10.0, 16.0]]  # дыра видна в отчёте
     assert r['coverage']['unheard'] == []                  # но пасс-2 её услышит сам
@@ -151,7 +152,7 @@ async def test_music_gap_is_not_invented(backend, wav, monkeypatch):
                         lambda p: [{'start': 0.0, 'end': 20.0, 'speaker': 'SPEAKER_00'},
                                    {'start': 50.0, 'end': AUDIO_S, 'speaker': 'SPEAKER_00'}])
 
-    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+    r = await run_conveyor(str(wav), llm=None, episode='ep1')
 
     assert r['coverage']['recovered_chunks'] == 0
     assert 'речь-20' not in r['markdown']
@@ -159,7 +160,7 @@ async def test_music_gap_is_not_invented(backend, wav, monkeypatch):
 
 
 async def test_turns_carry_real_segment_times(backend, wav):
-    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+    r = await run_conveyor(str(wav), llm=None, episode='ep1')
 
     for t in r['turns']:
         assert t['end'] > t['start']
@@ -173,7 +174,7 @@ async def test_turns_carry_real_segment_times(backend, wav):
 
 async def test_alignment_failure_does_not_break_the_transcript(backend, wav):
     """Торча в этом окружении нет — стадия обязана упасть мягко, транскрипт остаётся."""
-    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+    r = await run_conveyor(str(wav), llm=None, episode='ep1')
 
     assert r['words'] is None
     assert r['markdown'] and r['turns']
@@ -185,7 +186,7 @@ async def test_word_times_off_by_default_keeps_the_call_and_artifact_unchanged(b
     """Флаг выключен — клиент зовётся ПРЕЖНЕЙ сигнатурой (заглушка её и знает: `asr(path, prompt)`,
     лишний аргумент уронил бы её TypeError), а в сегментах нет поля `words`."""
     assert pipeline.CFG.word_times is False
-    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+    r = await run_conveyor(str(wav), llm=None, episode='ep1')
 
     assert backend.calls, 'пасс-2 не звал бэкенд'
     assert all('words' not in s for t in r['turns'] for s in t['segments'])
@@ -207,7 +208,7 @@ async def test_word_times_are_shifted_to_absolute_time(backend, wav, monkeypatch
 
     monkeypatch.setattr(pipeline.audio_clients, 'asr', with_words)
     monkeypatch.setattr(pipeline.CFG, 'word_times', True)
-    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+    r = await run_conveyor(str(wav), llm=None, episode='ep1')
 
     # ⚠️ Слова просят у КУСКОВ пасса-2, не у пасса-1 по всему файлу: тот лишь нарезает чанки.
     chunk_calls = [w for first, w in seen if not first]

@@ -95,11 +95,11 @@ echo "[$EPID] $(stat -f%z "$AUDIO" 2>/dev/null || stat -c%s "$AUDIO") bytes; sub
 HINTS=""
 [ -n "${HINTS_FILE:-}" ] && [ -s "${HINTS_FILE:-}" ] && HINTS=$(cat "$HINTS_FILE")
 
-# Какой конвейер гонит запись: `PIPELINE=graph` — граф состояний (эксперимент, см. graph/),
-# пусто — как настроен адаптер (`ASR_PIPELINE`, по умолчанию прежний конвейер). Поле формы
-# перебивает конфиг на одну запись — так две реализации сравниваются на одном стенде без рестарта.
+# Редактор расшифровки на эту запись: `EDITOR_RUN=1|0`; пусто — как настроен адаптер (`ASR_EDITOR`).
+# Поле формы перебивает конфиг на одну запись — так руки сравниваются на одном стенде без рестарта.
+# ⚠️ Не `EDITOR`: это переменная оболочки (текстовый редактор), она стоит у многих.
 extra=()
-[ -n "${PIPELINE:-}" ] && extra+=(-F "pipeline=${PIPELINE}")
+[ -n "${EDITOR_RUN:-}" ] && extra+=(-F "editor=${EDITOR_RUN}")
 
 RESP=$(curl -fsS --max-time 600 -X POST "$BASE/v1/audio/transcriptions" \
   -F "file=@${AUDIO};type=audio/mpeg" -F "mode=async" -F "episode=${EPID}" \

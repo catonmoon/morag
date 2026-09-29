@@ -28,8 +28,8 @@ import re
 import time
 from difflib import SequenceMatcher
 
-from graph.places import Slices
-from graph.tools import Registry, Tool, ToolError
+from conveyor.places import Slices
+from conveyor.tools import Registry, Tool, ToolError
 
 log = logging.getLogger('asr')
 
@@ -311,7 +311,7 @@ def editor_tools(ps: PageState, st, d, slices: Slices, known: list[str], canon: 
 # --- цикл страницы -------------------------------------------------------------------------------
 
 def system_prompt(corpus_desc: str) -> str:
-    import graph.editor as me  # noqa: PLC0415 — константу могли переопределить из файла промптов
+    import conveyor.editor as me  # noqa: PLC0415 — константу могли переопределить из файла промптов
     return me.EDITOR_SYS.replace('@CORPUS@', corpus_desc or 'рабочей встречи')
 
 

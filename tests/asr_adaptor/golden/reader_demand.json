@@ -1,0 +1,192 @@
+{
+ "calls": [
+  "{\"a\": 0.0, \"b\": 20.0, \"model\": \"\", \"prompt\": \"\\u043a\\u0430\\u043d\\u043e\\u043d\\u0438\\u043a\\u0438\", \"words\": false}",
+  "{\"a\": 0.0, \"b\": 20.3, \"model\": \"\", \"prompt\": \"\", \"words\": false}",
+  "{\"a\": 12.5, \"b\": 42.5, \"model\": \"\", \"prompt\": \"\", \"words\": false}",
+  "{\"a\": 20.0, \"b\": 35.0, \"model\": \"\", \"prompt\": \"\\u043a\\u0430\\u043d\\u043e\\u043d\\u0438\\u043a\\u0438\", \"words\": false}",
+  "{\"a\": 20.0, \"b\": 35.0, \"model\": \"other\", \"prompt\": \"\", \"words\": false}",
+  "{\"a\": 35.0, \"b\": 50.0, \"model\": \"\", \"prompt\": \"\\u043a\\u0430\\u043d\\u043e\\u043d\\u0438\\u043a\\u0438\", \"words\": false}",
+  "{\"a\": 50.0, \"b\": 90.0, \"model\": \"\", \"prompt\": \"\\u043a\\u0430\\u043d\\u043e\\u043d\\u0438\\u043a\\u0438\", \"words\": false}"
+ ],
+ "events": [
+  "{\"audio_sec\": 90.0, \"env\": \"macbook37t4y3 · da7b483+dirty · py3.13.5 · tiktoken0.12.0 transformers5.2.0 wordfreq3.1.1 · grok-4.20-0309-non-reasoning\", \"t\": \"job.meta\"}",
+  "{\"bulk\": true, \"from\": 0.0, \"t\": \"draft.window\", \"text\": \"начало разговора\", \"to\": 30.0}",
+  "{\"bulk\": true, \"from\": 30.0, \"t\": \"draft.window\", \"text\": \"продолжение разговора\", \"to\": 60.0}",
+  "{\"by\": \"голосование\", \"from\": 20.0, \"now\": \"печь-15\", \"t\": \"arbitrate.swap\", \"taken\": true, \"to\": 35.0, \"was\": \"речь-20\"}",
+  "{\"changed\": 0, \"failed\": 0, \"n\": 1, \"stage\": \"final-round\", \"t\": \"stage.end\"}",
+  "{\"conflicts\": [], \"mapping\": {\"SPEAKER_00\": \"Speaker_0\"}, \"names\": {}, \"t\": \"spk.map\"}",
+  "{\"draft\": \"\", \"from\": 20.0, \"i\": 2, \"n\": 4, \"prompt\": \"каноники\", \"spk\": \"SPEAKER_00\", \"t\": \"chunk.start\", \"terms\": [], \"to\": 35.0}",
+  "{\"draft\": \"\", \"from\": 35.0, \"i\": 3, \"n\": 4, \"prompt\": \"каноники\", \"spk\": \"SPEAKER_00\", \"t\": \"chunk.start\", \"terms\": [], \"to\": 50.0}",
+  "{\"draft\": \"начало разговора\", \"from\": 0.0, \"i\": 1, \"n\": 4, \"prompt\": \"каноники\", \"spk\": \"SPEAKER_00\", \"t\": \"chunk.start\", \"terms\": [], \"to\": 20.0}",
+  "{\"draft\": \"продолжение разговора\", \"from\": 50.0, \"i\": 4, \"n\": 4, \"prompt\": \"каноники\", \"spk\": \"SPEAKER_00\", \"t\": \"chunk.start\", \"terms\": [], \"to\": 90.0}",
+  "{\"i\": 1, \"n_seg\": 1, \"raw\": \"начало речь-0 конец\", \"retried\": true, \"t\": \"chunk.done\"}",
+  "{\"i\": 2, \"n_seg\": 1, \"raw\": \"начало речь-20 конец\", \"retried\": false, \"t\": \"chunk.done\"}",
+  "{\"i\": 3, \"n_seg\": 1, \"raw\": \"начало речь-35 конец\", \"retried\": false, \"t\": \"chunk.done\"}",
+  "{\"i\": 4, \"n_seg\": 1, \"raw\": \"ИИИИИИИИИИИИ петля\", \"retried\": false, \"t\": \"chunk.done\"}",
+  "{\"n\": 0, \"n_hinted\": 0, \"stage\": \"glossary\", \"t\": \"stage.end\", \"terms\": []}",
+  "{\"n\": 0, \"stage\": \"align\", \"t\": \"stage.end\"}",
+  "{\"n\": 1, \"stage\": \"arbitrate\", \"t\": \"stage.end\", \"вето\": 0, \"голосование\": 1, \"канон\": 0, \"пропущено\": 3, \"секунд третьего голоса\": 30.0, \"слушали\": 1, \"спорно\": 0, \"третий голос\": 1, \"частота\": 0}",
+  "{\"n\": 1, \"stage\": \"diarize\", \"t\": \"stage.end\"}",
+  "{\"n\": 2, \"stage\": \"pass1\", \"t\": \"stage.end\"}",
+  "{\"n\": 4, \"n_broken\": 0, \"n_retried\": 1, \"stage\": \"pass2\", \"t\": \"stage.end\"}",
+  "{\"spans\": [[0.0, 90.0, 0]], \"speakers\": [\"SPEAKER_00\"], \"t\": \"diar.spans\"}",
+  "{\"stage\": \"align\", \"t\": \"stage.start\"}",
+  "{\"stage\": \"arbitrate\", \"t\": \"stage.start\"}",
+  "{\"stage\": \"diarize\", \"t\": \"stage.start\"}",
+  "{\"stage\": \"final-round\", \"t\": \"stage.start\"}",
+  "{\"stage\": \"glossary\", \"t\": \"stage.start\"}",
+  "{\"stage\": \"pass1\", \"t\": \"stage.start\"}",
+  "{\"stage\": \"pass2\", \"t\": \"stage.start\"}",
+  "{\"stage\": \"speakers\", \"t\": \"stage.start\"}"
+ ],
+ "order": [
+  "{\"audio_sec\": 90.0, \"env\": \"macbook37t4y3 · da7b483+dirty · py3.13.5 · tiktoken0.12.0 transformers5.2.0 wordfreq3.1.1 · grok-4.20-0309-non-reasoning\", \"t\": \"job.meta\"}",
+  "diarize",
+  "{\"stage\": \"diarize\", \"t\": \"stage.start\"}",
+  "{\"n\": 1, \"stage\": \"diarize\", \"t\": \"stage.end\"}",
+  "pass1",
+  "{\"stage\": \"pass1\", \"t\": \"stage.start\"}",
+  "{\"n\": 2, \"stage\": \"pass1\", \"t\": \"stage.end\"}",
+  "glossary",
+  "{\"stage\": \"glossary\", \"t\": \"stage.start\"}",
+  "{\"n\": 0, \"n_hinted\": 0, \"stage\": \"glossary\", \"t\": \"stage.end\", \"terms\": []}",
+  "pass2",
+  "{\"stage\": \"pass2\", \"t\": \"stage.start\"}",
+  "{\"n\": 4, \"n_broken\": 0, \"n_retried\": 1, \"stage\": \"pass2\", \"t\": \"stage.end\"}",
+  "arbitrate",
+  "{\"stage\": \"arbitrate\", \"t\": \"stage.start\"}",
+  "{\"n\": 1, \"stage\": \"arbitrate\", \"t\": \"stage.end\", \"вето\": 0, \"голосование\": 1, \"канон\": 0, \"пропущено\": 3, \"секунд третьего голоса\": 30.0, \"слушали\": 1, \"спорно\": 0, \"третий голос\": 1, \"частота\": 0}",
+  "final-round",
+  "{\"stage\": \"final-round\", \"t\": \"stage.start\"}",
+  "{\"changed\": 0, \"failed\": 0, \"n\": 1, \"stage\": \"final-round\", \"t\": \"stage.end\"}",
+  "speakers",
+  "{\"stage\": \"speakers\", \"t\": \"stage.start\"}",
+  "{\"conflicts\": [], \"mapping\": {\"SPEAKER_00\": \"Speaker_0\"}, \"names\": {}, \"t\": \"spk.map\"}",
+  "align",
+  "{\"stage\": \"align\", \"t\": \"stage.start\"}",
+  "{\"n\": 0, \"stage\": \"align\", \"t\": \"stage.end\"}"
+ ],
+ "result": {
+  "arbitration": [
+   {
+    "by": "голосование",
+    "end": 35.0,
+    "i": 1,
+    "now": "печь-15",
+    "start": 20.0,
+    "taken": true,
+    "was": "речь-20"
+   }
+  ],
+  "coverage": {
+   "audio_sec": 90.0,
+   "empty_chunks": [],
+   "lost_sec": 0,
+   "lost_spots": [],
+   "min_gap_s": 5.0,
+   "pass1_covered_sec": 60.0,
+   "pass1_hole_sec": 30.0,
+   "pass1_holes": [
+    [
+     20.0,
+     50.0
+    ]
+   ],
+   "recovered_chunks": 2,
+   "recovered_sec": 30.0,
+   "retried_chunks": 1,
+   "unheard": [
+    [
+     20.0,
+     50.0
+    ]
+   ],
+   "unheard_sec": 30.0
+  },
+  "doc_summary": "",
+  "glossary": [],
+  "markdown": "---\ntitle: Демо\nurl: \n---\n\n[Speaker_0] <!-- t:0.0 --> начало речь-0 конец начало печь-15 конец начало речь-35 конец ИИИИИИИИИИИИ петля\n",
+  "name_conflicts": [],
+  "raw_sidecar": {},
+  "speaker_map": {
+   "SPEAKER_00": "Speaker_0"
+  },
+  "speaker_names": {},
+  "text": "начало речь-0 конец начало печь-15 конец начало речь-35 конец ИИИИИИИИИИИИ петля",
+  "timing": {
+   "arbitrate_gate": {
+    "пропущено": 3,
+    "секунд третьего голоса": 30.0,
+    "слушали": 1,
+    "третий голос": 1
+   },
+   "n_chunks": 4,
+   "n_glossary": 0,
+   "n_retried": 1,
+   "n_round_turns": 0
+  },
+  "turns": [
+   {
+    "end": 90.0,
+    "raw": "начало речь-0 конец начало печь-15 конец начало речь-35 конец ИИИИИИИИИИИИ петля",
+    "segments": [
+     {
+      "avg_logprob": -0.3,
+      "end": 20.3,
+      "start": 0.0,
+      "text": "начало речь-0 конец"
+     },
+     {
+      "avg_logprob": -0.3,
+      "end": 35.0,
+      "start": 20.0,
+      "text": "начало печь-15 конец"
+     },
+     {
+      "avg_logprob": -0.3,
+      "end": 50.0,
+      "start": 35.0,
+      "text": "начало речь-35 конец"
+     },
+     {
+      "avg_logprob": -0.3,
+      "end": 90.0,
+      "start": 50.0,
+      "text": "ИИИИИИИИИИИИ петля"
+     }
+    ],
+    "speaker": "Speaker_0",
+    "speaker_id": "Speaker_0",
+    "start": 0.0,
+    "text": "начало речь-0 конец начало печь-15 конец начало речь-35 конец ИИИИИИИИИИИИ петля"
+   }
+  ],
+  "words": null
+ },
+ "segments": [
+  {
+   "end": 20.3,
+   "id": 0,
+   "start": 0.0,
+   "text": "начало речь-0 конец"
+  },
+  {
+   "end": 35.0,
+   "id": 1,
+   "start": 20.0,
+   "text": "начало печь-15 конец"
+  },
+  {
+   "end": 50.0,
+   "id": 2,
+   "start": 35.0,
+   "text": "начало речь-35 конец"
+  },
+  {
+   "end": 90.0,
+   "id": 3,
+   "start": 50.0,
+   "text": "ИИИИИИИИИИИИ петля"
+  }
+ ]
+}

@@ -3,14 +3,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from graph.loop import Action, Finish, Place, decide_place
-from graph.policy import RulePolicy
-from graph.tools import Registry, Tool, ToolError
+from conveyor.loop import Action, Finish, Place, decide_place
+from conveyor.policy import RulePolicy
+from conveyor.tools import Registry, Tool, ToolError
 
 
 def _cfg(**over):
     base = dict(arbitrate_gate='', second_model='other', clean_ear='', clean_ear_window='chunk',
-                arbitrate_ratio=100.0, whisper_slots=1, graph_place_steps=8)
+                arbitrate_ratio=100.0, whisper_slots=1, place_steps=8)
     base.update(over)
     return SimpleNamespace(**base)
 
@@ -44,7 +44,7 @@ class Fake:
 
 async def _run(cfg, fake):
     place = _place()
-    fin = await decide_place(place, RulePolicy(cfg), fake, cfg.graph_place_steps)
+    fin = await decide_place(place, RulePolicy(cfg), fake, cfg.place_steps)
     return fin, [n if not a else (n, a) for n, a in fake.calls], place
 
 
@@ -206,99 +206,14 @@ async def test_final_rules_listen_to_a_rejected_known_word_and_apply_only_when_t
     assert fake.calls == ['recall', 'correct_turn'] and fin.decision == 'apply'
 
 
-# --- LLM-оркестратор ------------------------------------------------------------------------------
-
-from graph.policy import LLMPolicy  # noqa: E402
-
-
-def _tc(name, args, cid='c1'):
-    return {'id': cid, 'type': 'function', 'function': {'name': name, 'arguments': args}}
-
-
-class ScriptedLLM:
-    """Отвечает по сценарию: список ответов модели, по одному на вызов."""
-
-    def __init__(self, script):
-        self.script = list(script)
-        self.seen: list[list[dict]] = []
-
-    async def complete_with_tools(self, messages, tools, **kw):
-        self.seen.append([dict(m) for m in messages])
-        item = self.script.pop(0)
-        if isinstance(item, Exception):
-            raise item
-        return {'choices': [{'message': item, 'finish_reason': 'tool_calls' if item.get('tool_calls') else 'stop'}]}
-
-
-async def test_llm_policy_drives_the_tools_it_chose_and_feeds_results_back():
-    import json
-    llm = ScriptedLLM([
-        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('reader_flags', '{}', 'a')]},
-        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('listen', '{"ear": "second", "window": "same"}', 'b')]},
-        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('finish', '{"decision": "apply", "why": "ок"}', 'c')]},
-    ])
-    fake = Fake(suspicious=['прегресс'])
-    fake.schemas = lambda: [{'type': 'function', 'function': {'name': 'x'}}]
-    place = _place()
-    fin = await decide_place(place, LLMPolicy(_cfg(), llm), fake, 8)
-    assert fin.decision == 'apply' and fin.why == 'ок'
-    assert [c if isinstance(c, str) else c[0] for c in fake.calls] == ['reader_flags', 'listen', 'finish']
-    # второй вызов модели видит результат первого инструмента под его id
-    second = llm.seen[1]
-    assert second[0]['role'] == 'system' and 'оркестратор' in second[0]['content']
-    assert 'кусок' in second[1]['content'] and 'прегресс' in second[1]['content']
-    assert second[-1]['role'] == 'tool' and second[-1]['tool_call_id'] == 'a'
-    assert json.loads(second[-1]['content'])['suspicious'] == ['прегресс']
-    assert fake.meter['orchestrator_calls'] == 3
-
-
-async def test_llm_policy_reports_bad_arguments_and_asks_again_then_gives_up_softly():
-    llm = ScriptedLLM([
-        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('listen', '{"ear": ', 'a')]},   # битый JSON
-        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('finish', '{"decision": "skip"}', 'b')]},
-    ])
-    fake = Fake()
-    fake.schemas = lambda: []
-    fin = await decide_place(_place(), LLMPolicy(_cfg(), llm), fake, 8)
-    assert fin.decision == 'skip'
-    assert fake.meter['orchestrator_bad_args'] == 1
-    err = llm.seen[1][-1]
-    assert err['role'] == 'user' and 'не JSON' in err['content']
-    # битый вызов в историю не попал: шлюз разбирает аргументы прошлых вызовов и отвечает 400
-    assert not any(m.get('tool_calls') for m in llm.seen[1])
-
-
-async def test_llm_policy_without_a_tool_call_or_with_a_dead_model_leaves_the_place_as_is():
-    fake = Fake()
-    fake.schemas = lambda: []
-    fin = await decide_place(_place(), LLMPolicy(_cfg(), ScriptedLLM([{'role': 'assistant', 'content': 'готово'}])), fake, 8)
-    assert fin.decision == 'skip' and 'готово' in fin.why and fake.calls == []
-    fin = await decide_place(_place(), LLMPolicy(_cfg(), ScriptedLLM([RuntimeError('шлюз')])), fake, 8)
-    assert fin.decision == 'skip' and 'RuntimeError' in fin.why
-
-
-async def test_llm_policy_bad_tool_name_becomes_an_observation_not_a_crash():
-    llm = ScriptedLLM([
-        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('guess', '{}', 'a')]},
-        {'role': 'assistant', 'content': '', 'tool_calls': [_tc('finish', '{"decision": "skip", "why": "нет такого"}', 'b')]},
-    ])
-    fake = Fake()
-    fake.schemas = lambda: []
-    place = _place()
-    fin = await decide_place(place, LLMPolicy(_cfg(), llm), fake, 8)
-    assert fin.decision == 'skip'
-    assert 'error' in place.history[0][2] and 'guess' in place.history[0][2]['error']
-
-
-
 # --- вето в коде: модель выбирает инструменты, текст меняют только правила и звук -------------------
 
 async def test_apply_fix_refuses_what_correct_turn_did_not_propose_or_the_sound_did_not_confirm(rich, silence):
     """Живой прогон 28.09: с открытым apply_fix модель сама писала текст. Теперь — отказ в коде."""
     from types import SimpleNamespace
     import pipeline
-    from graph.deps import Deps
-    from graph.places import Slices, final_tools
+    from conveyor.deps import Deps
+    from conveyor.places import Slices, final_tools
     turn = {'raw': 'это прегресс тут', 'start': 20.0, 'segments': [{'start': 20.0, 'end': 35.0, 'text': 'это прегресс тут'}]}
     place = Place('turn:0', 'final', item=turn, canon=set(), audio_sec=90.0)
     place.final = turn['raw']
@@ -316,8 +231,8 @@ async def test_apply_fix_refuses_what_correct_turn_did_not_propose_or_the_sound_
 
 async def test_apply_swaps_is_hidden_from_the_policy_and_refused_from_the_loop():
     import pipeline
-    from graph.deps import Deps
-    from graph.places import Slices, arbitrate_tools
+    from conveyor.deps import Deps
+    from conveyor.places import Slices, arbitrate_tools
     d = Deps(None, pipeline)
     reg = arbitrate_tools(_place(), d, Slices(d, '/tmp', '/tmp/x.wav', 't'), journal=[], meter={})
     names = [x['function']['name'] for x in reg.schemas()]

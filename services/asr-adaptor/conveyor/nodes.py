@@ -1,10 +1,10 @@
-"""Узлы графа: одна стадия — одна функция `async def node(st, d, ev)`.
+"""Узлы конвейера: одна стадия — одна функция `async def node(st, d, ev)`.
 
 Каждый узел читает поля `State`, пишет свои и зовёт помощники конвейера через `Deps`. Порядок и
-условия — `NODES` внизу. Тексты логов, события ленты и поля таймингов те же, что у
-`pipeline.run_pipeline`: золотой тест держит оба конвейера равными на одних заглушках.
+условия — `NODES` внизу. Тексты логов, события ленты и поля таймингов те же, что у прежнего
+линейного `run_pipeline` (заменён 29.09): золотой тест сверяет их со снимком `tests/asr_adaptor/golden/`.
 
-⚠️ Порт сделан НАМЕРЕННО дословно, включая комментарии-«почему» из конвейера там, где они
+⚠️ Порт сделан НАМЕРЕННО дословно, включая комментарии-«почему» из прежнего конвейера там, где они
 объясняют неочевидное решение: узел без объяснения через месяц перепишут «как проще».
 """
 from __future__ import annotations
@@ -15,9 +15,9 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-from graph.deps import Deps
-from graph.events import Emitter
-from graph.state import State
+from conveyor.deps import Deps
+from conveyor.events import Emitter
+from conveyor.state import State
 
 log = logging.getLogger('asr')
 
@@ -270,9 +270,9 @@ async def relisten(st: State, d: Deps, ev: Emitter) -> None:
 # конвейере (`timing.arbitrate_gate`), по истории места.
 
 async def arbitrate(st: State, d: Deps, ev: Emitter) -> None:
-    from graph.loop import Place, decide_place
-    from graph.places import Slices, arbitrate_tools
-    from graph.policy import make_policy
+    from conveyor.loop import Place, decide_place
+    from conveyor.places import Slices, arbitrate_tools
+    from conveyor.policy import make_policy
 
     cfg = d.cfg
     A = d.arbitrate_stage
@@ -285,7 +285,7 @@ async def arbitrate(st: State, d: Deps, ev: Emitter) -> None:
     gated = {'слушали': 0, 'пропущено': 0}
     failed = {'n': 0}      # куски, где стадия не вышла (бэкенд упал): в артефакт, не только в лог
     arbitrate_log: list[dict] = []
-    policy = make_policy(cfg, d.llm, st.policy)
+    policy = make_policy(cfg, d.llm)
 
     def _account(place: Place) -> None:
         """Ворота и третий голос — по истории места, теми же счётчиками, что у конвейера."""
@@ -313,7 +313,7 @@ async def arbitrate(st: State, d: Deps, ev: Emitter) -> None:
         slices = Slices(d, st.tmp, st.wav, f'a{i}')
         reg = arbitrate_tools(place, d, slices, journal=st.journal, meter=st.meter)
         try:
-            fin = await decide_place(place, policy, reg, cfg.graph_place_steps)
+            fin = await decide_place(place, policy, reg, cfg.place_steps)
             _account(place)
             decisions = []
             # Решения правил применяет КОД, если второе ухо слушали, — независимо от слова политики:
@@ -391,12 +391,12 @@ SWEEP_DELAY_S = 30.0
 
 
 def editor_on(cfg, st: State) -> bool:
-    """Редактор вместо финал-раунда: на прогон (`pipeline=graph-editor`) или конфигом."""
-    return (st.policy or getattr(cfg, 'graph_policy', '')) == 'editor'
+    """Редактор вместо финал-раунда: на прогон (поле формы `editor=`) или конфигом (`ASR_EDITOR`)."""
+    return bool(cfg.editor) if st.editor is None else st.editor
 
 
 async def editor(st: State, d: Deps, ev: Emitter) -> None:
-    from graph.editor import run_editor
+    from conveyor.editor import run_editor
     await run_editor(st, d, ev)
 
 
@@ -408,9 +408,9 @@ async def final_round(st: State, d: Deps, ev: Emitter) -> None:
             t['raw'] = ' '.join(c['raw'] for c in t['chunks'] if c['raw']).strip()
             t['final'] = t['raw']
         return
-    from graph.loop import Place, decide_place
-    from graph.places import Slices, final_tools
-    from graph.policy import make_policy
+    from conveyor.loop import Place, decide_place
+    from conveyor.places import Slices, final_tools
+    from conveyor.policy import make_policy
 
     cfg = d.cfg
     turns_ = st.turns
@@ -428,7 +428,7 @@ async def final_round(st: State, d: Deps, ev: Emitter) -> None:
         st.known = tuple(dict.fromkeys(
             [x for x in list((st.hints or {}).get('terms') or ()) + list((st.hints or {}).get('names') or ())
              if isinstance(x, str)] + [x for x in (cfg.always_terms or ()) if x]))
-    policy = make_policy(cfg, d.llm, st.policy)
+    policy = make_policy(cfg, d.llm)
     sem = asyncio.Semaphore(max(1, cfg.round_concurrency))
     done = 0
     canon = d.arbitrate_stage.canon_from(st.hints, st.gloss)
@@ -449,7 +449,7 @@ async def final_round(st: State, d: Deps, ev: Emitter) -> None:
         try:
             async with sem:
                 reg = final_tools(place, d, slices, st=st, journal=st.journal, meter=st.meter)
-                fin = await decide_place(place, policy, reg, cfg.graph_place_steps)
+                fin = await decide_place(place, policy, reg, cfg.place_steps)
                 fixes = place.fixes
                 # Текст — то, что прошло вето правки и звука; слово политики на него не влияет.
                 t['final'] = place.final

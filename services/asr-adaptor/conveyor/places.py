@@ -10,8 +10,8 @@ import asyncio
 import logging
 from pathlib import Path
 
-from graph.loop import Place
-from graph.tools import Registry, Tool, ToolError
+from conveyor.loop import Place
+from conveyor.tools import Registry, Tool, ToolError
 
 log_warning = logging.getLogger('asr').warning
 

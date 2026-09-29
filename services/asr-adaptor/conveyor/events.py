@@ -1,8 +1,8 @@
-"""Лента событий графа — ТА ЖЕ форма, что у `pipeline.run_pipeline`.
+"""Лента событий конвейера — та же форма, что у прежнего линейного конвейера.
 
 Окно загрузки записи читает `job.meta`, `diar.spans`, `draft.window`, `chunk.*`, `relisten.span`,
-`arbitrate.swap`, `turn.*`, `spk.*`, `stage.*` — граф обязан отдавать их байт в байт (золотой тест
-ленты в `tests/asr_adaptor/test_graph_equivalence.py`). Строка прогресса (`step`) — тоже прежняя:
+`arbitrate.swap`, `turn.*`, `spk.*`, `stage.*` — их форму держит золотой тест (снимок ленты в
+`tests/asr_adaptor/golden/`). Строка прогресса (`step`) — тоже прежняя:
 по ней живёт чужой клиент, который ленту не просит.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ class Emitter:
     ⚠️ `emit` обёрнут в try/except намеренно: показ работы — украшение, и оно не имеет права
     уронить расшифровку. ⚠️⚠️ Первый аргумент `emit` — ПОЗИЦИОННЫЙ (`/`): у событий есть поле
     `kind`, и с именованным параметром прогон падал на «multiple values for argument 'kind'»
-    после всей тяжёлой работы (см. `pipeline.run_pipeline.emit`).
+    после всей тяжёлой работы.
     """
 
     def __init__(self, progress, t0: float) -> None:

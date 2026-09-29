@@ -1,11 +1,11 @@
-"""Прогон графа: `run_graph` — та же сигнатура и тот же результат, что у `pipeline.run_pipeline`.
+"""Прогон конвейера: `run_conveyor` — узлы по `nodes.NODES`, условие узла читается из конфига.
 
-Узлы идут по `nodes.NODES`; условие узла читается из конфига. Билет реестра голосов берётся ДО
-первого await и отпускается в `finally` — той же цепочкой `pipeline._take_ticket/_release_turn`,
-что у линейного конвейера: нумерация `Speaker_N` параллельных выпусков одна на оба.
+Результат — в форме прежнего линейного конвейера (его заменил этот, 29.09) плюс ключ `conveyor`.
+Билет реестра голосов берётся ДО первого await и отпускается в `finally` (`pipeline._take_ticket/
+_release_turn`): нумерация `Speaker_N` параллельных выпусков идёт в порядке поступления.
 
-Чекпойнты (`ASR_GRAPH_CHECKPOINTS=<каталог>`): состояние пишется после каждого узла;
-`run_graph(resume=<файл>)` продолжает с первого непройденного узла. Это ответ на «402 на
+Чекпойнты (`ASR_CHECKPOINTS=<каталог>`): состояние пишется после каждого узла;
+`run_conveyor(resume=<файл>)` продолжает с первого непройденного узла. Это ответ на «402 на
 финал-раунде после десяти минут GPU» и дешёвый способ настраивать промпты финал-раунда без звука.
 ⚠️ Звук при возобновлении нужен снова: временный каталог прежнего прогона удалён, узел `prepare`
 проходится заново (дёшево — конвертация в wav).
@@ -18,16 +18,16 @@ import tempfile
 import time
 from pathlib import Path
 
-from graph import nodes
-from graph.deps import Deps
-from graph.events import Emitter
-from graph.state import State
+from conveyor import nodes
+from conveyor.deps import Deps
+from conveyor.events import Emitter
+from conveyor.state import State
 
 log = logging.getLogger('asr')
 
 
 def result(st: State) -> dict:
-    """Результат в форме `run_pipeline` плюс ключ `graph` (узлы, журнал, решения, счётчики)."""
+    """Результат прежней формы плюс ключ `conveyor` (узлы, журнал, решения, счётчики)."""
     return {'markdown': st.markdown, 'text': st.text, 'turns': st.out_turns,
             'raw_sidecar': st.raw_side, 'timing': st.tm, 'speaker_map': st.mapping,
             'speaker_names': st.name_map, 'name_conflicts': st.name_conflicts,
@@ -37,16 +37,16 @@ def result(st: State) -> dict:
             **({'relisten': st.relisten_log} if st.relisten_log else {}),
             **({'arbitration': st.arbitrate_log} if st.arbitrate_log else {}),
             **({'fixes': st.round_log} if st.round_log else {}),
-            'graph': {'nodes': list(st.done),
+            'conveyor': {'nodes': list(st.done),
                       **({'journal': st.journal} if st.journal else {}),
                       **({'decisions': st.decisions} if st.decisions else {}),
                       **({'meter': st.meter} if st.meter else {})}}
 
 
-async def run_graph(audio_path: str, llm, *, episode: str = '', title: str = '',
+async def run_conveyor(audio_path: str, llm, *, episode: str = '', title: str = '',
                     url: str = '', hints: dict | None = None, progress=None,
-                    resume: str | None = None, policy: str = '') -> dict:
-    """`policy` — `rule` | `llm` на этот прогон (поле формы `pipeline=graph-llm`); пусто — конфиг."""
+                    resume: str | None = None, editor: bool | None = None) -> dict:
+    """`editor` — редактор на этот прогон (поле формы `editor=`); None — как в конфиге."""
     d = Deps(llm)
     cfg = d.cfg
     if resume:
@@ -56,15 +56,15 @@ async def run_graph(audio_path: str, llm, *, episode: str = '', title: str = '',
         if 'chunking' in st.done:
             st.counter = d.WhisperTokenCounter(cfg.whisper_tokenizer)
         st.tm['resumed_from'] = str(resume)
-        log.info('граф: возобновление с чекпойнта %s, пройдено %s', resume, ', '.join(st.done))
+        log.info('конвейер: возобновление с чекпойнта %s, пройдено %s', resume, ', '.join(st.done))
     else:
         st = State(audio_path=audio_path, episode=episode, title=title, url=url, hints=hints or {},
-                   policy=policy, t0=time.monotonic(), tmp=tempfile.mkdtemp(prefix='asr_'))
-    if policy:
-        st.policy = policy
+                   editor=editor, t0=time.monotonic(), tmp=tempfile.mkdtemp(prefix='asr_'))
+    if editor is not None:
+        st.editor = editor
     ev = Emitter(progress, st.t0)
-    ckpt = (Path(cfg.graph_checkpoints) / f"{st.episode or 'adhoc'}-{int(time.time())}.json"
-            if cfg.graph_checkpoints else None)
+    ckpt = (Path(cfg.checkpoints) / f"{st.episode or 'adhoc'}-{int(time.time())}.json"
+            if cfg.checkpoints else None)
     st.ticket = d._take_ticket()  # порядок реестра = порядок поступления выпусков
     try:
         for name, fn, when in nodes.NODES:
@@ -74,8 +74,8 @@ async def run_graph(audio_path: str, llm, *, episode: str = '', title: str = '',
                 continue
             await fn(st, d, ev)
             st.done.append(name)
-            if cfg.graph_events:
-                ev.emit('graph.node', node=name, meter=dict(st.meter))
+            if cfg.node_events:
+                ev.emit('conveyor.node', node=name, meter=dict(st.meter))
             if ckpt is not None:
                 try:
                     st.save(ckpt)
@@ -84,11 +84,11 @@ async def run_graph(audio_path: str, llm, *, episode: str = '', title: str = '',
         order = [n for n, _, _ in nodes.NODES]
         st.done.sort(key=order.index)          # после возобновления `prepare` шёл последним
         st.tm['total_s'] = round(time.monotonic() - st.t0, 1)
-        if st.policy:
-            st.tm['graph_policy'] = st.policy
+        if nodes.editor_on(cfg, st):
+            st.tm['editor'] = True
         out = result(st)
         if ckpt is not None:
-            out['graph']['checkpoint'] = str(ckpt)
+            out['conveyor']['checkpoint'] = str(ckpt)
         return out
     finally:
         d._release_turn(st.ticket)  # идемпотентно: упавший выпуск не вешает очередь реестра

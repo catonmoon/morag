@@ -5,6 +5,7 @@ import pytest
 from pathlib import Path
 
 import pipeline
+from conveyor.run import run_conveyor
 from stages import arbitrate as A
 from test_pipeline_recovery import PASS1, backend, wav  # noqa: F401 — фикстуры
 
@@ -79,7 +80,7 @@ def test_apply_keeps_punctuation_and_patches_segments_and_decoder_words():
 
 async def test_stage_is_absent_without_a_second_model(backend, wav):
     assert pipeline.CFG.second_model == ''
-    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+    r = await run_conveyor(str(wav), llm=None, episode='ep1')
     assert not r.get('arbitration')
 
 
@@ -97,7 +98,7 @@ async def test_stage_asks_the_second_model_and_journals_the_swap(backend, wav, m
 
     monkeypatch.setattr(pipeline.audio_clients, 'asr', asr)
     monkeypatch.setattr(pipeline.CFG, 'second_model', 'other')
-    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+    r = await run_conveyor(str(wav), llm=None, episode='ep1')
 
     assert 'other' in calls and '' in calls                    # вторая модель спрошена, первая — тоже
     assert r['arbitration'] and all(d['by'] == 'частота' and d['taken'] for d in r['arbitration'])
@@ -157,7 +158,7 @@ async def test_reader_gate_listens_only_where_the_reader_points(backend, wav, mo
     monkeypatch.setattr(pipeline.CFG, 'second_model', 'other')
     monkeypatch.setattr(pipeline.CFG, 'arbitrate_gate', 'reader')
     monkeypatch.setattr(pipeline.CFG, 'clean_ear', '')
-    r = await pipeline.run_pipeline(str(wav), llm=Reader(), episode='ep1')
+    r = await run_conveyor(str(wav), llm=Reader(), episode='ep1')
 
     assert asked, 'читателя не спросили'
     gate = r['timing']['arbitrate_gate']
@@ -216,7 +217,7 @@ async def test_clean_ear_on_demand_is_called_only_where_a_dispute_remains(backen
         a, b = backend.slices[path]
         if model == 'other':
             text = 'он поставила задачу' if a < 30 else 'это чисто тут'   # спор только в первом куске
-        elif Path(path).stem.startswith('e'):                             # третий голос — своим окном
+        elif Path(path).stem.startswith('a'):                             # третий голос — срез арбитража (a<кусок>_<t0>_<t1>)
             clean_calls.append((path, a, b)); text = 'он поставила задачу'
             return {'text': text, 'segments': [{'start': 0.0, 'end': b - a, 'text': text}]}
         else:
@@ -229,7 +230,7 @@ async def test_clean_ear_on_demand_is_called_only_where_a_dispute_remains(backen
     monkeypatch.setattr(pipeline.CFG, 'clean_ear', 'demand')
     monkeypatch.setattr(pipeline.CFG, 'clean_ear_window', 'window30')
     monkeypatch.setattr(pipeline.CFG, 'arbitrate_gate', '')
-    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+    r = await run_conveyor(str(wav), llm=None, episode='ep1')
 
     gate = r['timing']['arbitrate_gate']
     assert gate['третий голос'] >= 1 and len(clean_calls) == gate['третий голос']
@@ -245,7 +246,7 @@ async def test_protect_known_runs_end_to_end(backend, wav, monkeypatch):
     monkeypatch.setattr(pipeline, '_RES_SEMS', {})
     monkeypatch.setattr(pipeline.CFG, 'protect_known', True)
     monkeypatch.setattr(pipeline.CFG, 'final_ear', True)
-    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1',
+    r = await run_conveyor(str(wav), llm=None, episode='ep1',
                                     hints={'terms': ['Postgres'], 'names': ['Мария Кузнецова']})
     assert r['turns'] and r['markdown']
 
@@ -277,7 +278,7 @@ async def test_always_terms_stay_protected_when_known_word_protection_is_off(bac
     monkeypatch.setattr(pipeline, 'recall_entities', nothing)
     monkeypatch.setattr(pipeline.CFG, 'always_terms', ('Kubernetes',))
     monkeypatch.setattr(pipeline.CFG, 'protect_known', False)
-    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+    r = await run_conveyor(str(wav), llm=None, episode='ep1')
 
     verdicts = [f for f in r.get('fixes') or [] if f['was'] == 'Kubernetes']
     assert verdicts and all(f['why'] == 'breaks_term' for f in verdicts)
@@ -300,7 +301,7 @@ async def test_backend_death_during_arbitration_is_counted_in_the_artifact(backe
     monkeypatch.setattr(pipeline.CFG, 'second_model', 'other')
     monkeypatch.setattr(pipeline.CFG, 'clean_ear', '')
     monkeypatch.setattr(pipeline.CFG, 'arbitrate_gate', '')
-    r = await pipeline.run_pipeline(str(wav), llm=None, episode='ep1')
+    r = await run_conveyor(str(wav), llm=None, episode='ep1')
 
     assert not r.get('arbitration')                            # журнал пуст — ключа нет
     assert r['timing']['arbitrate_failed'] >= 1

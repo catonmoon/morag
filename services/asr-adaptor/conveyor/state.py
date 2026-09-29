@@ -22,7 +22,7 @@ class State:
     title: str = ''
     url: str = ''
     hints: dict = field(default_factory=dict)
-    policy: str = ''                                # политика на этот прогон: '' — из конфига
+    editor: bool | None = None                      # редактор на этот прогон: None — из конфига
     t0: float = 0.0
     tmp: str = ''
     ticket: int | None = None

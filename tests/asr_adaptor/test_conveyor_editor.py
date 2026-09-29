@@ -8,11 +8,11 @@ import pytest
 
 import pipeline
 from fakes import HINTS
-from graph import editor as E
-from graph.deps import Deps
-from graph.places import Slices
-from graph.run import run_graph
-from graph.tools import ToolError
+from conveyor import editor as E
+from conveyor.deps import Deps
+from conveyor.places import Slices
+from conveyor.run import run_conveyor
+from conveyor.tools import ToolError
 
 
 def _turns():
@@ -127,13 +127,13 @@ async def test_page_loop_runs_several_tools_per_answer_and_keeps_broken_calls_ou
     assert json.loads([m for m in second if m['role'] == 'tool'][0]['content'])['known_spellings'] == ['Kafka']
 
 
-async def test_graph_with_editor_skips_the_final_round_and_runs_the_editor_after_speakers(rich, silence):
-    r = await run_graph(str(silence), llm=Script([]), episode='ep1', hints=HINTS, policy='editor')
-    nodes = r['graph']['nodes']
+async def test_conveyor_with_editor_skips_the_final_round_and_runs_the_editor_after_speakers(rich, silence):
+    r = await run_conveyor(str(silence), llm=Script([]), episode='ep1', hints=HINTS, editor=True)
+    nodes = r['conveyor']['nodes']
     assert nodes.index('editor') > nodes.index('speakers') and nodes.index('editor') < nodes.index('assemble')
     assert r['timing']['n_editor_pages'] >= 1
     assert not any(f.get('why') == 'known_term' for f in r.get('fixes') or ()), 'финал-раунд не звался'
-    assert r['graph']['meter']['editor_calls'] >= 1
+    assert r['conveyor']['meter']['editor_calls'] >= 1
 
 
 # --- экран в подсказку пасса-2 ----------------------------------------------------------------------
@@ -148,7 +148,7 @@ async def test_screen_terms_go_into_the_prompt_of_the_chunk_they_were_shown_with
     monkeypatch.setattr(pipeline, 'build_prompt', build_prompt)
     hints = dict(HINTS, screen=[{'t0': 0.0, 't1': 12.0, 'terms': ['orders.orders', 'pyspark']},
                                 {'t0': 70.0, 't1': 90.0, 'terms': ['order_total']}])
-    r = await run_graph(str(silence), llm=object(), episode='ep1', hints=hints)
+    r = await run_conveyor(str(silence), llm=object(), episode='ep1', hints=hints)
     first, last = seen[0], seen[-1]
     assert first[0][:2] == ['orders.orders', 'pyspark'] and 'pyspark' in first[1], 'слова экрана — первыми и мимо фильтра'
     assert 'order_total' not in first[0] and 'order_total' in last[0], 'только показ рядом с куском'
@@ -159,7 +159,7 @@ async def test_without_screen_the_prompt_input_is_unchanged(rich, silence, monke
     seen: list = []
     monkeypatch.setattr(pipeline, 'build_prompt',
                         lambda terms, counter, budget, always=(), hinted=(): seen.append(list(terms)) or 'каноники')
-    r = await run_graph(str(silence), llm=object(), episode='ep1', hints=HINTS)
+    r = await run_conveyor(str(silence), llm=object(), episode='ep1', hints=HINTS)
     assert all(t == [] for t in seen) and 'n_chunks_screen' not in r['timing']
 
 
