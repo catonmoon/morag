@@ -98,12 +98,14 @@ HINTS=""
 # Редактор расшифровки на эту запись: `EDITOR_RUN=1|0`; пусто — как настроен адаптер (`ASR_EDITOR`).
 # Поле формы перебивает конфиг на одну запись — так руки сравниваются на одном стенде без рестарта.
 # ⚠️ Не `EDITOR`: это переменная оболочки (текстовый редактор), она стоит у многих.
+# ⚠️ Массив раскрывается как ${extra[@]+"${extra[@]}"}: системный bash 3.2 на маке под `set -u`
+# считает пустой массив незаданным и роняет КАЖДЫЙ прогон без поля (ловилось 30.09 живьём).
 extra=()
 [ -n "${EDITOR_RUN:-}" ] && extra+=(-F "editor=${EDITOR_RUN}")
 
 RESP=$(curl -fsS --max-time 600 -X POST "$BASE/v1/audio/transcriptions" \
   -F "file=@${AUDIO};type=audio/mpeg" -F "mode=async" -F "episode=${EPID}" \
-  -F "title=${TITLE}" -F "url=${SRC}" -F "hints=${HINTS}" "${extra[@]}")
+  -F "title=${TITLE}" -F "url=${SRC}" -F "hints=${HINTS}" ${extra[@]+"${extra[@]}"})
 JID=$(printf '%s' "$RESP" | python3 -c 'import sys,json;print(json.load(sys.stdin)["job_id"])')
 echo "[$EPID] job $JID; polling..."
 
