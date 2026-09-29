@@ -157,3 +157,18 @@ async def test_without_screen_the_prompt_input_is_unchanged(rich, silence, monke
                         lambda terms, counter, budget, always=(), hinted=(): seen.append(list(terms)) or 'каноники')
     r = await run_graph(str(silence), llm=object(), episode='ep1', hints=HINTS)
     assert all(t == [] for t in seen) and 'n_chunks_screen' not in r['timing']
+
+
+async def test_spelling_needs_canon_and_canon_needs_a_term_that_sounds_alike(rich, silence):
+    """Свидетели по родам правки (второй живой прогон 29.09: из 8 принятых верна 1, порча 3)."""
+    st, ps, reg = _tools(silence, known=('Kafka', 'Kubernetes', 'очередью'))
+    ps.heard.append((20.0, 50.0, 'clean', 'дальше про Кавка и очередь'))
+    res = await reg.call('propose', was='Кавка', now='Kavka', at=21.0, witness='sound')
+    assert not res['accepted'] and 'написания' in res['why'], 'звучит так же — это написание, ухо не судит'
+    res = await reg.call('propose', was='Кавка', now='Kubernetes', at=21.0, witness='canon')
+    assert not res['accepted'] and 'не звучит' in res['why'], 'канон не подменяет непохожее слово'
+    res = await reg.call('propose', was='очередь', now='очередью', at=21.0, witness='canon')
+    assert not res['accepted'] and 'терминов' in res['why'], 'обычное слово — только звуком'
+    got = await reg.call('lookup', word='Кавка')
+    assert got['known_spellings'] == ['Kafka'], 'непохожее написание — приманка, а не подсказка'
+    assert st.turns[1]['final'] == 'дальше про Кавка и очередь'

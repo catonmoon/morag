@@ -34,6 +34,13 @@ LISTEN_S_PER_MIN = 30.0    # бюджет прослушивания: полми
 WINDOW_MIN, WINDOW_MAX = 20.0, 30.0   # окно слушать не короче куска: по слову — вдвое меньше попаданий
 SUPPORT = 0.75             # похожесть по звучанию: новое слово «услышано», если в окне есть такое
 MAX_INSERT = 20            # вставка потерянной речи — не длиннее стольких слов
+# Свидетели по родам правки (второй живой прогон, 29.09: из 8 принятых правок верна 1, порча 3).
+SPELLING_SIM = 0.85        # старое и новое звучат как одно слово → правка НАПИСАНИЯ: ухо её не
+                           # свидетельствует («Grafana Lab» → «GrafanaLabs», 0.95, принималось звуком)
+CANON_SIM = 0.7            # канон подтверждает только написание того, что так и звучит: «джейсоне» →
+                           # JSON 0.77, «эирфлоу» → Airflow 0.71; незнакомое имя → чужой термин канона (0.57) и
+                           # короткое название → непохожее имя канона (0.60) проходили прежний порог
+                           # арбитража (0.55) и портили текст
 
 EDITOR_SYS = (
     'Ты — редактор автоматической расшифровки русской речи с записи @CORPUS@. Тебе дана страница '
@@ -110,6 +117,38 @@ def _words(text: str) -> list[str]:
     return re.findall(r'[\w+#.-]+', text or '', re.U)
 
 
+def changed(A, was: str, now: str) -> tuple[str, str]:
+    """Что правка меняет на самом деле: слова без общего начала и конца. Сверка — по написанию:
+    «Post-Gres» → «PostGres» звучит одинаково, но это правка, и её род — написание."""
+    a, b = _words(was), _words(now)
+    ka, kb = a, b
+    i = 0
+    while i < min(len(a), len(b)) and ka[i] == kb[i]:
+        i += 1
+    j = 0
+    while j < min(len(a), len(b)) - i and ka[-1 - j] == kb[-1 - j]:
+        j += 1
+    return ' '.join(a[i:len(a) - j]), ' '.join(b[i:len(b) - j])
+
+
+TERM_FREQ = 1e-8            # zipf 1: реже — не слово языка (фамилия, имя системы); формы обычных слов
+                            # лежат выше («очередью» — 7e-7), и порог частоты арбитража (5e-6) их пропускал
+
+
+def is_term(A, word: str, known=()) -> bool:
+    """Термин, а не обычное слово: латиница, не слово языка или имя, которое запись знает с заглавной.
+    Канон — свидетель написания терминов; «большой проект» → «большой продукт» он доказывать не вправе
+    (это звук)."""
+    if re.search(r'[A-Za-z]', word):
+        return True
+    f = A.freq(A.key(word), 'ru')
+    if f is None or f < TERM_FREQ:
+        return True
+    s = A.sound(word)
+    return word[:1].isupper() and any(p[:1].isupper() and SequenceMatcher(a=s, b=A.sound(p)).ratio() >= 0.8
+                                      for k in known for p in str(k).split())
+
+
 def heard_supports(A, heard: str, was: str, now: str) -> tuple[bool, str]:
     """Поддерживает ли услышанное новые слова правки. Возвращает (да/нет, причина)."""
     hs = [A.sound(A.key(w)) for w in _words(heard) if A.key(w)]
@@ -177,7 +216,7 @@ def editor_tools(ps: PageState, st, d, slices: Slices, known: list[str], canon: 
 
     async def lookup(word: str) -> dict:
         scored = sorted(((A.similar(word, k), k) for k in known), reverse=True)
-        hits = [k for s, k in scored if s >= 0.5][:5]
+        hits = [k for s, k in scored if s >= CANON_SIM][:5]   # непохожее — не подсказка, а приманка
         return {'word': word, 'known_spellings': hits}
 
     async def propose(was: str, now: str, at: float, witness: str, why: str = '') -> dict:
@@ -191,7 +230,11 @@ def editor_tools(ps: PageState, st, d, slices: Slices, known: list[str], canon: 
             raise ToolError(f'«{was}» нет в реплике с {t["start"]:.1f} с дословно',
                             hint='was копируй из текста страницы символ в символ')
         verdict = ''
-        if witness == 'sound':
+        old, new = changed(A, was, now)
+        spelling = bool(old and new) and A.similar(old, new) >= SPELLING_SIM
+        if witness == 'sound' and spelling:
+            verdict = 'это правка написания: звук её не доказывает, свидетель — canon'
+        elif witness == 'sound':
             wins = [h for h in ps.heard if h[0] - 1.0 <= float(at) <= h[1] + 1.0]
             if not wins:
                 verdict = 'нет свидетеля: окно вокруг места не переслушано'
@@ -200,12 +243,13 @@ def editor_tools(ps: PageState, st, d, slices: Slices, known: list[str], canon: 
                 if not any(o for o, _ in ok):
                     verdict = 'звук не подтверждает: ' + ok[-1][1]
         elif witness == 'canon':
-            key_words = [w for w in _words(now) if A.key(w) and A.sound(A.key(w)) not in
-                         {A.sound(A.key(x)) for x in _words(was)}]
+            key_words = [w for w in _words(new) if A.key(w)]
             if not key_words or not all(A.in_canon(w, canon) for w in key_words):
                 verdict = 'канон не знает нового написания'
-            elif A.similar(was, now) < A.SIM:
+            elif not old or not new or A.similar(old, new) < CANON_SIM:
                 verdict = 'написание из канона не звучит как исходное'
+            elif not all(is_term(A, w, known) for w in key_words):
+                verdict = 'канон свидетельствует написание терминов, обычное слово — только звуком'
         else:
             verdict = 'неизвестный свидетель'
         if verdict:
