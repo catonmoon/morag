@@ -15,7 +15,7 @@
   "{\"a\": 50.0, \"b\": 90.0, \"model\": \"other\", \"prompt\": \"\", \"words\": false}"
  ],
  "events": [
-  "{\"audio_sec\": 90.0, \"env\": \"macbook37t4y3 · da7b483+dirty · py3.13.5 · tiktoken0.12.0 transformers5.2.0 wordfreq3.1.1 · grok-4.20-0309-non-reasoning\", \"t\": \"job.meta\"}",
+  "{\"audio_sec\": 90.0, \"t\": \"job.meta\"}",
   "{\"bulk\": true, \"from\": 0.0, \"t\": \"draft.window\", \"text\": \"начало разговора\", \"to\": 30.0}",
   "{\"bulk\": true, \"from\": 30.0, \"t\": \"draft.window\", \"text\": \"продолжение разговора\", \"to\": 60.0}",
   "{\"by\": \"голосование\", \"from\": 20.0, \"now\": \"печь-15\", \"t\": \"arbitrate.swap\", \"taken\": true, \"to\": 35.0, \"was\": \"речь-20\"}",
@@ -48,7 +48,7 @@
   "{\"stage\": \"speakers\", \"t\": \"stage.start\"}"
  ],
  "order": [
-  "{\"audio_sec\": 90.0, \"env\": \"macbook37t4y3 · da7b483+dirty · py3.13.5 · tiktoken0.12.0 transformers5.2.0 wordfreq3.1.1 · grok-4.20-0309-non-reasoning\", \"t\": \"job.meta\"}",
+  "{\"audio_sec\": 90.0, \"t\": \"job.meta\"}",
   "diarize",
   "{\"stage\": \"diarize\", \"t\": \"stage.start\"}",
   "{\"n\": 1, \"stage\": \"diarize\", \"t\": \"stage.end\"}",

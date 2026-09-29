@@ -7,7 +7,7 @@
   "{\"a\": 50.0, \"b\": 90.0, \"model\": \"\", \"prompt\": \"\\u043a\\u0430\\u043d\\u043e\\u043d\\u0438\\u043a\\u0438\", \"words\": false}"
  ],
  "events": [
-  "{\"audio_sec\": 90.0, \"env\": \"macbook37t4y3 · da7b483+dirty · py3.13.5 · tiktoken0.12.0 transformers5.2.0 wordfreq3.1.1 · grok-4.20-0309-non-reasoning\", \"t\": \"job.meta\"}",
+  "{\"audio_sec\": 90.0, \"t\": \"job.meta\"}",
   "{\"bulk\": true, \"from\": 0.0, \"t\": \"draft.window\", \"text\": \"начало разговора\", \"to\": 30.0}",
   "{\"bulk\": true, \"from\": 30.0, \"t\": \"draft.window\", \"text\": \"продолжение разговора\", \"to\": 60.0}",
   "{\"changed\": 1, \"failed\": 0, \"n\": 1, \"stage\": \"final-round\", \"t\": \"stage.end\"}",
@@ -38,7 +38,7 @@
   "{\"start\": 0.0, \"t\": \"turn.text\", \"text\": \"начало речь-0 конец начало речь-20 конец начало речь-35 конец ИИИИИИИИИИИИ петля\", \"turn\": 0, \"whole\": true}"
  ],
  "order": [
-  "{\"audio_sec\": 90.0, \"env\": \"macbook37t4y3 · da7b483+dirty · py3.13.5 · tiktoken0.12.0 transformers5.2.0 wordfreq3.1.1 · grok-4.20-0309-non-reasoning\", \"t\": \"job.meta\"}",
+  "{\"audio_sec\": 90.0, \"t\": \"job.meta\"}",
   "diarize",
   "{\"stage\": \"diarize\", \"t\": \"stage.start\"}",
   "{\"n\": 1, \"stage\": \"diarize\", \"t\": \"stage.end\"}",
