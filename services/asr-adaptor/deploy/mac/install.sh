@@ -120,10 +120,14 @@ done
 mkvenv() {                      # mkvenv <имя> <описание> <pip-аргументы...>
   local name="$1" desc="$2"; shift 2
   local v="$VENVS/$name"
-  if [[ -x "$v/bin/python" ]]; then ok "venv $name уже есть"; else
+  # ⚠️ «Есть» — это интерпретатор, который ЗАПУСКАЕТСЯ, а не файл на месте: окружение питона
+  # непереносимо (в bin/ абсолютные ссылки на питон, из которого его сделали), и после переезда
+  # каталога установки ссылка ведёт в никуда. Такое окружение собираем заново с --clear — поверх
+  # старого каталога `venv` падает с «No such file or directory» (живая установка 30.09).
+  if [[ -x "$v/bin/python" ]] && "$v/bin/python" -c '' 2>/dev/null; then ok "venv $name уже есть"; else
     if [[ $CHECK_ONLY -eq 1 ]]; then warn "venv $name — нет ($desc)"; return 0; fi
     say "venv $name — $desc"
-    "$PY" -m venv "$v"
+    "$PY" -m venv --clear "$v"
     "$v/bin/pip" install --quiet --upgrade pip wheel
   fi
   [[ $CHECK_ONLY -eq 1 ]] && return 0
