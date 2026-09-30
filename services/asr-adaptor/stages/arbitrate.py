@@ -189,17 +189,19 @@ def arbitrate(raw: str, second: str, clean: str | None, canon: set[str], *, lang
                 if vote_words_only and not (freq(kn, lang) or 0) > 0:
                     continue                          # имя или не-слово: большинству не верим
                 if in_was:
-                    decisions.append({'i': i, 'was': was, 'now': now, 'by': 'вето', 'taken': False})
+                    decisions.append({'i': i, 'was': was, 'now': now, 'by': 'вето', 'taken': False,
+                                      'clean': clean_at[i]})
                     continue
                 by = 'голосование'
+            heard3 = {'clean': clean_at[i]} if i in clean_at else {}   # вариант третьего голоса — в журнал
             if by is None:
                 # Спор, который не решили ни правило, ни свидетель. В журнал — «спорно»: агент не
                 # имеет права выбирать по вкусу, но и молчать о споре не должен; по этой пометке
                 # конвейер решает, звать ли третий голос (чистое ухо по требованию).
-                decisions.append({'i': i, 'was': was, 'now': now, 'by': 'спорно', 'taken': False})
+                decisions.append({'i': i, 'was': was, 'now': now, 'by': 'спорно', 'taken': False, **heard3})
                 continue
             out[i] = _put(was, now)
-            decisions.append({'i': i, 'was': was, 'now': out[i], 'by': by, 'taken': True})
+            decisions.append({'i': i, 'was': was, 'now': out[i], 'by': by, 'taken': True, **heard3})
     return ' '.join(out), decisions
 
 

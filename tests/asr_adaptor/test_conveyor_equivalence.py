@@ -52,6 +52,9 @@ def _norm_events(items: list) -> tuple[list[str], list[str]]:
         # `env` в `job.meta` — отпечаток установки (машина, коммит движка, модель): он про МАШИНУ, не
         # про поведение, и снимок с ним ломался на следующем же коммите.
         body = {k: v for k, v in e.items() if k not in ('at', 'sec', 'env')}
+        # Счётчик «разобрано N» у параллельных мест зависит от того, кто закончил первым, — не от поведения.
+        if body.get('t') in ('arbitrate.chunk', 'editor.done'):
+            body.pop('done', None)
         everything.append(json.dumps(body, ensure_ascii=False, sort_keys=True))
         if e['t'] in ('stage.start', 'stage.end', 'job.meta', 'spk.map'):
             order.append(json.dumps(body, ensure_ascii=False, sort_keys=True))

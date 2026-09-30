@@ -323,20 +323,32 @@ async def arbitrate(st: State, d: Deps, ev: Emitter) -> None:
             for x in decisions:
                 row = {'start': round(c['start'], 2), 'end': round(c['end'], 2), **x}
                 arbitrate_log.append(row)
+                # Варианты, из которых шёл выбор: первое ухо (`was`), второе (`now`), третий голос
+                # (`clean`, если звали) — окно загрузки показывает их на слове.
                 ev.emit('arbitrate.swap', **{'from': row['start'], 'to': row['end']},
-                        was=x['was'], now=x['now'], by=x['by'], taken=x.get('taken', False))
+                        was=x['was'], now=x['now'], by=x['by'], taken=x.get('taken', False),
+                        **({'clean': x['clean']} if x.get('clean') else {}))
             st.decisions.append({'place': place.name, 'start': round(c['start'], 2), 'end': round(c['end'], 2),
                                  'decision': fin.decision, 'why': fin.why, 'steps': len(place.history),
                                  'taken': sum(1 for x in decisions if x.get('taken')),
                                  **({'exhausted': True} if place.exhausted else {})})
+            # Счётчик для окна загрузки: сколько кусков разобрано и ЧТО пометил читатель — ради
+            # этих слов кусок и слушали вторым ухом (пусто — ворота его пропустили).
+            progress['done'] += 1
+            ev.emit('arbitrate.chunk', done=progress['done'], n=progress['n'],
+                    **{'from': round(c['start'], 2), 'to': round(c['end'], 2)},
+                    heard=place.heard.get('second') is not None,
+                    flags=list(c.get('reader_flags') or ()))
         except Exception as error:      # noqa: BLE001 — стадия не имеет права ронять запись
             _account(place)
             failed['n'] += 1
+            progress['done'] += 1
             log.warning('арбитраж %.1f-%.1f с не вышел: %s: %s',
                         c['start'], c['end'], type(error).__name__, error)
         finally:
             slices.cleanup()
 
+    progress = {'done': 0, 'n': sum(1 for c in chunks if c.get('raw'))}
     await asyncio.gather(*(_place(i, c) for i, c in enumerate(chunks)))
     arbitrate_log.sort(key=lambda r: (r['start'], r['i']))
     st.arbitrate_log = arbitrate_log

@@ -64,7 +64,8 @@ def test_voting_takes_the_ear_but_canon_vetoes_the_majority():
     canon = {A.sound('SQL')}
     text, dec = A.arbitrate('пишем SQL запрос', 'пишем скуль запрос', 'пишем скуль запрос', canon)
     assert text == 'пишем SQL запрос'
-    assert dec == [{'i': 1, 'was': 'SQL', 'now': 'скуль', 'by': 'вето', 'taken': False}]
+    # `clean` — вариант третьего голоса: журнал хранит ВСЕ варианты, из которых шёл выбор
+    assert dec == [{'i': 1, 'was': 'SQL', 'now': 'скуль', 'by': 'вето', 'taken': False, 'clean': 'скуль'}]
 
 
 def test_apply_keeps_punctuation_and_patches_segments_and_decoder_words():

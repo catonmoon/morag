@@ -2,7 +2,9 @@
 
 Окно загрузки записи читает `job.meta`, `diar.spans`, `draft.window`, `chunk.*`, `relisten.span`,
 `arbitrate.swap`, `turn.*`, `spk.*`, `stage.*` — их форму держит золотой тест (снимок ленты в
-`tests/asr_adaptor/golden/`). Строка прогресса (`step`) — тоже прежняя:
+`tests/asr_adaptor/golden/`). С 30.09 ещё `arbitrate.chunk` (счётчик и пометки читателя),
+`arbitrate.swap.clean` (вариант третьего голоса) и события редактора `editor.page`,
+`editor.listen`, `editor.done`, `turn.fix.witness`. Строка прогресса (`step`) — тоже прежняя:
 по ней живёт чужой клиент, который ленту не просит.
 """
 from __future__ import annotations

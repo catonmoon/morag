@@ -189,7 +189,7 @@ class PageState:
 
 
 def editor_tools(ps: PageState, st, d, slices: Slices, known: list[str], canon: set,
-                 *, journal: list, meter: dict) -> Registry:
+                 *, journal: list, meter: dict, ev=None) -> Registry:
     cfg = d.cfg
     A = d.arbitrate_stage
     turns = st.turns
@@ -212,6 +212,8 @@ def editor_tools(ps: PageState, st, d, slices: Slices, known: list[str], canon: 
         text = r.get('text') or ''
         ps.listened += b - a
         ps.heard.append((a, b, ear, text))
+        if ev is not None:      # окно загрузки: где редактор сомневается и что услышало ухо
+            ev.emit('editor.listen', page=ps.pid, ear=ear, text=text, **{'from': round(a, 1), 'to': round(b, 1)})
         return {'t0': round(a, 1), 't1': round(b, 1), 'ear': ear, 'text': text}
 
     async def lookup(word: str) -> dict:
@@ -398,20 +400,25 @@ async def run_editor(st, d, ev) -> None:
         prev = pages[ps.pid - 1][-2:] if ps.pid else []
         prev_tail = page_text(prev, turns) if prev else ''
         slices = Slices(d, st.tmp, st.wav, f'ed{ps.pid}')
-        reg = editor_tools(ps, st, d, slices, known, canon, journal=st.journal, meter=st.meter)
+        reg = editor_tools(ps, st, d, slices, known, canon, journal=st.journal, meter=st.meter, ev=ev)
         try:
             async with sem:
+                ev.emit('editor.page', page=ps.pid, of=len(states), **{'from': round(ps.a, 1), 'to': round(ps.b, 1)})
                 await edit_page(ps, reg, d.llm, turns=turns, system=system, about=st.dsum or st.title,
                                 known=known, prev_tail=prev_tail, meter=st.meter)
         finally:
             slices.cleanup()
         for f in ps.fixes:
             ev.emit('turn.fix', turn=f.get('turn'), start=f['at'], was=f['was'], now=f['now'],
-                    ok=f['ok'], why=f.get('why', ''))
+                    ok=f['ok'], why=f.get('why', ''), witness=f.get('witness', ''))
+        done['n'] += 1
+        ev.emit('editor.done', page=ps.pid, done=done['n'], of=len(states),
+                proposed=len(ps.fixes), accepted=sum(1 for f in ps.fixes if f['ok']))
         st.decisions.append({'place': f'page:{ps.pid}', 'start': round(ps.a, 1), 'end': round(ps.b, 1),
                              'proposed': len(ps.fixes), 'accepted': sum(1 for f in ps.fixes if f['ok']),
                              'listened_s': round(ps.listened, 1)})
 
+    done = {'n': 0}
     await asyncio.gather(*(one(ps) for ps in states))
     st.raw_side = {f"{t['start']:.1f}": {'raw': t['raw'], 'final': t['final']}
                    for t in turns if t['final'] != t['raw']}
