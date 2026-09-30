@@ -68,3 +68,40 @@ def test_pinned_words_take_the_voice_on_their_left():
     assert [x['speaker_id'] for x in out] == ['Speaker_1', 'Speaker_2']
     out, _, log = rs.resplit([t], [w], spans, label_of, pinned={(0, 2)})
     assert len(out) == 1 and log == {}
+
+
+def test_snap_moves_a_mid_sentence_boundary_to_the_sentence_end():
+    # «… продиагностируем. Ещё | вопрос.» — диаризация отдала «Ещё» прежнему голосу
+    toks = ['давай', 'продиагностируем.', 'Ещё', 'вопрос.']
+    assert rs.snap(['A', 'A', 'A', 'B'], toks) == ['A', 'A', 'B', 'B']
+    # «…конференции, но | вопросы действительно... Есть! Спасибо» — граница уезжает вправо
+    toks = ['лучший', 'доклад', 'на', 'конференции,', 'но', 'вопросы', 'действительно...', 'Есть!',
+            'Спасибо,', 'давайте']
+    assert rs.snap(list('AAAAABBBBB'), toks) == list('AAAAAAABBB')
+
+
+def test_a_word_without_proven_voice_takes_its_neighbours_not_the_old_turn_label():
+    # старая реплика подписана докладчиком (ошибка), по словам это зритель; «Вот, и» — в слабом кластере
+    t, w = _turn('Speaker_1', 'Ковалёв', 0.0, 9.0,
+                 [('конференции.', 1.0, 1.8), ('Вот,', 2.0, 2.3), ('и', 2.4, 2.5), ('такой', 2.6, 3.0)])
+    spans = [{'start': 0.0, 'end': 1.9, 'speaker': 'B'}, {'start': 1.9, 'end': 2.55, 'speaker': 'C'},
+             {'start': 2.55, 'end': 9.0, 'speaker': 'B'}]
+    out, _, _ = rs.resplit([t], [w], spans, label_of)          # 'C' — неизвестный/слабый голос
+    assert [x['speaker_id'] for x in out] == ['Speaker_2'] and out[0]['text'].startswith('конференции.')
+
+
+def test_snap_crosses_old_turn_boundaries():
+    t1, w1 = _turn('Speaker_1', 'Ковалёв', 0.0, 3.0,
+                   [('давай', 0.1, 0.3), ('это', 0.4, 0.5), ('продиагностируем.', 0.6, 1.5), ('Ещё', 2.0, 2.4)])
+    t2, w2 = _turn('Speaker_1', 'Ковалёв', 3.0, 6.0, [('вопрос.', 3.1, 3.6), ('Спасибо', 4.0, 4.5)])
+    spans = [{'start': 0.0, 'end': 2.5, 'speaker': 'A'}, {'start': 2.9, 'end': 6.0, 'speaker': 'B'}]
+    out, _, _ = rs.resplit([t1, t2], [w1, w2], spans, label_of)
+    assert [(x['speaker_id'], x['text']) for x in out] == \
+        [('Speaker_1', 'давай это продиагностируем.'), ('Speaker_2', 'Ещё вопрос. Спасибо')]
+
+
+def test_snap_keeps_a_backchannel_and_grows_it_by_one_word_at_most():
+    toks = ['мы', 'сделали,', 'ага,', 'так', 'и', 'идём']          # конца предложения рядом нет
+    assert rs.snap(['A', 'A', 'B', 'A', 'A', 'A'], toks) == ['A', 'A', 'B', 'A', 'A', 'A']
+    toks = ['мы', 'сделали.', 'Ну', 'вот', 'ага', 'так']            # двух слов «Ну вот» не отнимает
+    assert rs.snap(['A', 'A', 'A', 'A', 'B', 'A'], toks) == ['A', 'A', 'A', 'A', 'B', 'A']

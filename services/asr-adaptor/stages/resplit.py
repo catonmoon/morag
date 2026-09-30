@@ -28,8 +28,52 @@ import difflib
 import re
 
 OVERLAP_SHORT_S = 3.0  # отрезок не длиннее — «перебивающий»: слово в наложении отдаётся ему
+# Голос, у которого во всей записи эфира меньше, смену говорящего внутри реплики НЕ доказывает
+# (вызывающий отдаёт для него None в `label_of`). Замерено 30.09 на «События, а не БД»: кластер в
+# 13 с эфира смешал зрителя и ведущего и отнял у них по слову («Вот, и», «отличное»).
+WEAK_AIR_S = 20.0
+SNAP_WORDS = 3         # насколько далеко граница голоса тянется к концу предложения
+_SENT_END = re.compile(r'[.!?…]["»)\]]*$')
 
 _TOKEN = re.compile(r'[\w-]+', re.UNICODE)
+
+
+def snap(ids: list, toks: list[str]) -> list:
+    """Притянуть границы смены голоса к концу предложения.
+
+    Граница голоса у диаризации дрожит на слово-два, и реплика резалась посреди фразы: «…
+    продиагностируем. Ещё | вопрос.» (владелец, 30.09). Граница, которая стоит не после конца
+    предложения, переезжает к ближайшему концу предложения в пределах SNAP_WORDS слов.
+    ⚠️ Короткий кусок (≤ 2 слов — «ага», «да») граница может только РАСШИРИТЬ и лишь на одно
+    слово: иначе поддакивание либо исчезало бы, либо отбирало у соседа полфразы.
+    """
+    ids = list(ids)
+    k = 1
+    while k < len(ids):
+        if ids[k] == ids[k - 1] or _SENT_END.search(toks[k - 1]):
+            k += 1
+            continue
+        r = k
+        while r < len(ids) and ids[r] == ids[k]:
+            r += 1
+        lft = k - 1
+        while lft > 0 and ids[lft - 1] == ids[k - 1]:
+            lft -= 1
+        short_right, short_left = r - k <= 2, k - lft <= 2
+        lo = max(lft + 1, k - (1 if short_right else SNAP_WORDS))
+        hi = min(r - 1, k + (1 if short_left else SNAP_WORDS))
+        cands = [p for p in range(lo, hi + 1) if p != k and _SENT_END.search(toks[p - 1])
+                 and not (p > k and short_right) and not (p < k and short_left)]
+        if cands:
+            p = min(cands, key=lambda p: (abs(p - k), p))
+            if p < k:
+                ids[p:k] = [ids[k]] * (k - p)
+            else:
+                ids[k:p] = [ids[k - 1]] * (p - k)
+            k = max(p, k) + 1
+        else:
+            k += 1
+    return ids
 
 
 def _norm(w: str) -> str:
@@ -100,24 +144,72 @@ def resplit(out_turns: list[dict], word_turns: list[dict], spans,
         return out_turns, word_turns, {}
     pieces: list[tuple[dict, dict, bool]] = []  # (реплика, words-реплика, «рождена разрезом»)
     moments, skipped = [], 0
+    # 1. Голос каждого слова. Слово без доказанного голоса (вне отрезков, слабый голос) берёт голос
+    # СОСЕДНИХ слов своей реплики — сперва слева, потом справа, — и только если голоса нет ни у
+    # одного, голос реплики. ⚠️ Не голос реплики сразу: при переносе на выверенный текст подпись
+    # старой реплики и есть ошибка («Вот, и» зрителя уезжало к докладчику — владелец, 30.09).
+    usable, per_ids, names = [], [], {}
     for n_turn, (t, wt) in enumerate(zip(out_turns, word_turns)):
         words = wt.get('words') or []
-        text_words = (t.get('text') or '').split()
-        if not words or len(words) != len(text_words):
-            if words:
-                skipped += 1
-            pieces.append((t, wt, False))
+        ok = bool(words) and len(words) == len((t.get('text') or '').split())
+        skipped += bool(words) and not ok
+        usable.append(ok)
+        if not ok:
+            per_ids.append([])
             continue
         own = t.get('speaker_id') or t.get('speaker')
-        labels = []
+        names.setdefault(own, t.get('speaker') or own)
+        labs = []
         for w in words:
             cl = word_cluster(float(w[1]), float(w[2]), spans)
-            labels.append(label_of(cl) if cl is not None else None)
-        ids = [(lab[0] if lab else own) for lab in labels]
+            labs.append(label_of(cl) if cl is not None else None)
+        for lab in labs:
+            if lab:
+                names.setdefault(lab[0], lab[1])
+        ids = [lab[0] if lab else None for lab in labs]
+        for k in range(1, len(ids)):
+            ids[k] = ids[k] or ids[k - 1]
+        for k in range(len(ids) - 2, -1, -1):
+            ids[k] = ids[k] or ids[k + 1]
+        ids = [i or own for i in ids]
         for k in range(len(ids)):
             if (n_turn, k) in pinned:
                 ids[k] = ids[k - 1] if k else own
-                labels[k] = labels[k - 1] if k else None
+        per_ids.append(ids)
+    # 2. Границы голосов — к концу предложения, по СПЛОШНОЙ последовательности слов: граница
+    # старой реплики ничего не значит («… продиагностируем. Ещё» | «вопрос.» — разные реплики).
+    # Реплика с расхождением слов и текста — барьер: притягивание через неё не идёт.
+    block: list[int] = []
+    for n_turn in list(range(len(out_turns))) + [None]:
+        if n_turn is not None and usable[n_turn]:
+            block.append(n_turn)
+            continue
+        if block:
+            flat = [i for b in block for i in per_ids[b]]
+            toks = [w for b in block for w in out_turns[b]['text'].split()]
+            flat = snap(flat, toks)
+            # ⚠️ Слова без своего голоса — снова за левым соседом ПОСЛЕ притягивания: иначе граница,
+            # притянутая к концу предложения, отрезала удаляемое правкой слово от остальной правки
+            # («дьос ну» уцелело в «Демо» — правка не может сделать реплику пустой).
+            where = [(b, k) for b in block for k in range(len(per_ids[b]))]
+            for g, key in enumerate(where):
+                if key in pinned and g:
+                    flat[g] = flat[g - 1]
+            pos = 0
+            for b in block:
+                n = len(per_ids[b])
+                per_ids[b], pos = flat[pos:pos + n], pos + n
+        block = []
+    # 3. Разрез реплик по голосам слов.
+    for n_turn, (t, wt) in enumerate(zip(out_turns, word_turns)):
+        if not usable[n_turn]:
+            pieces.append((t, wt, False))
+            continue
+        words = wt.get('words') or []
+        text_words = (t.get('text') or '').split()
+        own = t.get('speaker_id') or t.get('speaker')
+        ids = per_ids[n_turn]
+        labels = [(i, names.get(i, i)) for i in ids]
         if all(i == own for i in ids):
             pieces.append((t, wt, False))
             continue

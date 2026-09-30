@@ -672,7 +672,12 @@ async def resplit(st: State, d: Deps, ev: Emitter) -> None:
     ev.stage('resplit')
     _t = time.monotonic()
 
+    weak = d.resplit_stage.WEAK_AIR_S
+
     def label_of(cluster):
+        # голос с малым эфиром в записи смену говорящего внутри реплики не доказывает
+        if float((st.air or {}).get(cluster) or 0.0) < weak:
+            return None
         sid = st.mapping.get(cluster)
         return (sid, st.name_map.get(sid, sid)) if sid else None
 
