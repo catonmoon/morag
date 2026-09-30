@@ -35,6 +35,8 @@ def result(st: State) -> dict:
             'env': st.env,
             'glossary': st.gloss, 'doc_summary': st.dsum,
             **({'relisten': st.relisten_log} if st.relisten_log else {}),
+            **({'seams': st.seam_log} if st.seam_log else {}),
+            **({'voices': st.voice_log} if st.voice_log else {}),
             **({'arbitration': st.arbitrate_log} if st.arbitrate_log else {}),
             **({'fixes': st.round_log} if st.round_log else {}),
             'conveyor': {'nodes': list(st.done),

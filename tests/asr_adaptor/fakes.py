@@ -68,6 +68,7 @@ def install_rich(monkeypatch, wav: Path) -> RichBackend:
     monkeypatch.setattr(pipeline.audio_clients, 'diarize',
                         lambda p: [{'start': 0.0, 'end': AUDIO_S, 'speaker': 'SPEAKER_00'}])
     monkeypatch.setattr(pipeline.audio_clients, 'campp', lambda p, spans: ({}, {}))
+    monkeypatch.setattr(pipeline.audio_clients, 'campp_spans', lambda p, spans: [None] * len(spans))
     monkeypatch.setattr(pipeline.registry, 'assign', lambda *a, **kw: {'SPEAKER_00': 'Speaker_0'})
     monkeypatch.setattr(pipeline.registry, 'names', lambda path: {})
 

@@ -63,6 +63,22 @@ class Config:
     # `probability`). Выключено — вызов бэкенда и артефакт байт в байт прежние. Нужно разбору
     # внутри прогона: без времён слов он не видит ни растянутых слов, ни дыр (ADR-0030, план п. 3).
     word_times: bool = field(default_factory=lambda: _flag('ASR_WORD_TIMES', '0'))
+    # Шов с соседями (stages/seams.py): окна С ЗАПАСОМ (повтор пустого, переслушивание, добор
+    # дыр) отдают куску только слова, чья середина внутри него, и страховка снимает повтор конца
+    # соседа. Выключено — поведение прежнее байт в байт.
+    seam: bool = field(default_factory=lambda: _flag('ASR_SEAM', '0'))
+    # Голоса по словам (stages/resplit.py): после выравнивания реплика режется там, где по
+    # диаризации сменился говорящий, — короткая реплика второго голоса не тонет в чужой.
+    # Выключено — реплики прежние байт в байт.
+    resplit: bool = field(default_factory=lambda: _flag('ASR_RESPLIT', '0'))
+    # Реестр: два кластера ОДНОЙ записи становятся одним голосом, только если похожи и друг на
+    # друга (stages/registry.py). Выключено — прежнее «каждый кластер к ближайшему в реестре».
+    record_guard: bool = field(default_factory=lambda: _flag('ASR_REGISTRY_RECORD_GUARD', '0'))
+    # Центроид голоса без чужой речи (backends/campp: наложения и ±0.3 с у чужих отрезков).
+    clean_centroids: bool = field(default_factory=lambda: _flag('ASR_CLEAN_CENTROIDS', '0'))
+    # Склеенный диалог (stages/recover.py): диаризация дала ОДИН голос, а людей по знанию о
+    # записи больше — голоса ищутся заново по фразам. 0 — узла нет.
+    recover_speakers: bool = field(default_factory=lambda: _flag('ASR_RECOVER_SPEAKERS', '0'))
     campp_url: str = field(default_factory=lambda: _env('ASR_CAMPP_URL', 'http://127.0.0.1:8126/embed-centroids'))
     campp_key: str = field(default_factory=lambda: _env('ASR_CAMPP_KEY'))
 

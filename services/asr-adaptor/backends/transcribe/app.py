@@ -143,6 +143,11 @@ async def transcribe(
     authorization: Optional[str] = Header(None),
 ):
     _check_auth(authorization)
+    # ⚠️ Неизвестное имя — отказ вслух, а не молчаливая модель по умолчанию: опечатка в имени
+    # второго уха иначе давала ОДНУ модель в обоих ушах, и арбитраж «голосовал» сам с собой.
+    # Пустое имя и OpenAI-совместимое `whisper-1` — модель по умолчанию, как раньше.
+    if model and model != 'whisper-1' and model not in MODELS:
+        raise HTTPException(400, f'модели {model!r} нет; есть: {", ".join(sorted(MODELS))}')
     repo = MODELS.get(model, MODELS[DEFAULT_MODEL])
 
     suffix = Path(file.filename or 'audio').suffix or '.wav'

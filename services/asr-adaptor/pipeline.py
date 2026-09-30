@@ -20,6 +20,9 @@ from config import CFG
 from stages import align, coverage, registry  # noqa: F401 — берут узлы (conveyor.deps.NAMES)
 from stages import relisten as relisten_stage  # noqa: F401 — берут узлы (conveyor.deps.NAMES)
 from stages import arbitrate as arbitrate_stage  # noqa: F401 — берут узлы (conveyor.deps.NAMES)
+from stages import seams  # noqa: F401 — берут узлы (conveyor.deps.NAMES)
+from stages import resplit as resplit_stage  # noqa: F401 — берут узлы (conveyor.deps.NAMES)
+from stages import recover as recover_stage  # noqa: F401 — берут узлы (conveyor.deps.NAMES)
 from stages.chunking import MIN_S as chunking_min_s  # noqa: F401 — берут узлы (conveyor.deps.NAMES)
 from stages.chunking import chunk as chunk_fn  # noqa: F401 — берут узлы (conveyor.deps.NAMES)
 from stages.chunking import gap_chunks  # noqa: F401 — берут узлы (conveyor.deps.NAMES)
@@ -333,6 +336,15 @@ async def _final_round(turns, dsum: str, gloss, llm, concurrency: int, step,
     return n_round, len(failed_idx)
 
 
+def _inside(r: dict, off: float, c: dict) -> dict:
+    """Ответ модели на окно с запасом → только то, что звучит внутри куска (см. stages/seams.py).
+
+    Сегменты возвращаются уже в АБСОЛЮТНОМ времени — вызывающий кладёт их со сдвигом 0.
+    """
+    segs = seams.keep_inside(r.get('segments'), off, float(c['start']), float(c['end']))
+    return {'text': seams.text_of(segs), 'segments': segs}
+
+
 async def _decode(wav: str, sl: str, c: dict, prompt: str, audio_sec: float) -> None:
     """Кусок → текст + сегменты в АБСОЛЮТНОМ времени; пусто → один повтор с вариацией.
 
@@ -341,18 +353,30 @@ async def _decode(wav: str, sl: str, c: dict, prompt: str, audio_sec: float) -> 
     обрезку речи ровно на границе куска. Паддинг маленький (0.3 с): он может прихватить край
     соседнего слова, и это дешевле, чем потерять кусок целиком.
     """
-    await asyncio.to_thread(_slice, wav, c['start'], c['end'], sl)
     # ⚠️ Флаг передаётся ТОЛЬКО когда включён: вызов клиента без него — прежний, и заглушки в
     # тестах с фиксированной сигнатурой не ломаются.
     ask = {'words': True} if CFG.word_times else {}
+    # Шов (stages/seams.py): кусок добора дыр режется ровно посреди непокрытого звука, то есть
+    # порой по слову, — слушаем его с запасом и оставляем слова, чья середина внутри куска.
+    wide = CFG.seam and c.get('recovered')
+    s0, s1 = ((max(0.0, c['start'] - PAD_S), min(audio_sec, c['end'] + PAD_S)) if wide
+              else (c['start'], c['end']))
+    await asyncio.to_thread(_slice, wav, s0, s1, sl)
+    ask1 = {'words': True} if wide else ask
     async with _res('whisper', CFG.whisper_slots):
-        r = await asyncio.to_thread(lambda: audio_clients.asr(sl, prompt, **ask))
-    off = c['start']
+        r = await asyncio.to_thread(lambda: audio_clients.asr(sl, prompt, **ask1))
+    off = s0
+    if wide:
+        r = _inside(r, off, c)
+        off = 0.0
     if not r['text'] and CFG.retry_empty:
         a, b = max(0.0, c['start'] - PAD_S), min(audio_sec, c['end'] + PAD_S)
         await asyncio.to_thread(_slice, wav, a, b, sl)
+        ask2 = {'words': True} if CFG.seam else ask
         async with _res('whisper', CFG.whisper_slots):
-            again = await asyncio.to_thread(lambda: audio_clients.asr(sl, '', **ask))
+            again = await asyncio.to_thread(lambda: audio_clients.asr(sl, '', **ask2))
+        if CFG.seam:
+            again, a = _inside(again, a, c), 0.0
         if again['text']:
             r, off, c['retried'] = again, a, True
     Path(sl).unlink(missing_ok=True)
@@ -393,12 +417,19 @@ async def _relisten_chunk(wav: str, sl: str, c: dict, audio_sec: float) -> dict:
     pad = relisten_stage.PAD_S
     a, b = max(0.0, c['start'] - pad), min(audio_sec, c['end'] + pad)
     await asyncio.to_thread(_slice, wav, a, b, sl)
+    # Шов: запас в полторы секунды звучит речью соседа — с `ASR_SEAM` берём только своё.
+    ask = {'words': True} if CFG.seam else {}
     async with _res('whisper', CFG.whisper_slots):
-        r = await asyncio.to_thread(audio_clients.asr, sl, '')
+        r = await asyncio.to_thread(lambda: audio_clients.asr(sl, '', **ask))
+    if CFG.seam:
+        r = _inside(r, a, c)
     if relisten_stage.looped(r['text']):
         async with _res('whisper', CFG.whisper_slots):
-            mild = await asyncio.to_thread(audio_clients.asr, sl, '', relisten_stage.MILD)
+            mild = await asyncio.to_thread(
+                lambda: audio_clients.asr(sl, '', relisten_stage.MILD, **ask))
+        if CFG.seam:
+            mild = _inside(mild, a, c)
         if not relisten_stage.looped(mild['text']):
             r = mild
     Path(sl).unlink(missing_ok=True)
-    return {'text': r['text'], 'segments': r['segments'], 'offset': a}
+    return {'text': r['text'], 'segments': r['segments'], 'offset': 0.0 if CFG.seam else a}

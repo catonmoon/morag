@@ -13,7 +13,8 @@ from __future__ import annotations
 # исчезло из `pipeline.py`, всплывёт тестом, а не AttributeError посреди часового прогона.
 NAMES = (
     # конфиг, лог, клиенты, стадии-модули
-    'CFG', 'log', 'audio_clients', 'registry', 'coverage', 'align', 'arbitrate_stage', 'relisten_stage',
+    'CFG', 'log', 'audio_clients', 'registry', 'coverage', 'align', 'arbitrate_stage', 'relisten_stage', 'seams',
+    'resplit_stage', 'recover_stage',
     # ресурсы и порядок параллельных выпусков
     '_res', '_take_ticket', '_wait_turn', '_release_turn',
     # звук

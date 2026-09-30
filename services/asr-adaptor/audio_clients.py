@@ -83,12 +83,27 @@ def asr(wav_path: str, prompt: str = '', temperature: str = '', words: bool = Fa
 def campp(wav_path: str, spans: list[dict]) -> tuple[dict, dict]:
     """CAM++ центроиды substantial-кластеров → (centroids{cluster:[float]}, air{cluster:sec})."""
     headers = {'Authorization': f'Bearer {CFG.campp_key}'} if CFG.campp_key else {}
+    data = {'spans': json.dumps(spans)}
+    if CFG.clean_centroids:  # без флага запрос прежний байт в байт
+        data['clean'] = '1'
     with open(wav_path, 'rb') as f:
-        r = requests.post(CFG.campp_url, files={'file': f}, data={'spans': json.dumps(spans)},
+        r = requests.post(CFG.campp_url, files={'file': f}, data=data,
                           headers=headers, timeout=600)
     r.raise_for_status()
     d = r.json()
     return d.get('centroids', {}), d.get('air', {})
+
+
+def campp_spans(wav_path: str, spans: list[dict]) -> list:
+    """Вектор CAM++ на каждый отрезок (`None` — короткий или неудачный). Биометрия: не сохранять."""
+    headers = {'Authorization': f'Bearer {CFG.campp_key}'} if CFG.campp_key else {}
+    url = CFG.campp_url.rsplit('/', 1)[0] + '/embed-spans'
+    with open(wav_path, 'rb') as f:
+        r = requests.post(url, files={'file': f}, headers=headers, timeout=600,
+                          data={'spans': json.dumps([{'start': s['start'], 'end': s['end']}
+                                                     for s in spans])})
+    r.raise_for_status()
+    return r.json().get('vectors') or []
 
 
 def health() -> dict:

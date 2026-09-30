@@ -527,11 +527,17 @@ async def speakers(st: State, d: Deps, ev: Emitter) -> None:
     await d._wait_turn(st.ticket)  # реестр — строго в порядке поступления выпусков
     async with d._res('campp', cfg.campp_slots):
         st.cents, st.air = await asyncio.to_thread(d.audio_clients.campp, st.wav, st.spans)
-    decided: list[dict] | None = [] if ev.enabled else None
+    decided: list[dict] | None = [] if (ev.enabled or cfg.record_guard) else None
+    # ⚠️ Ключ передаётся ТОЛЬКО когда включён: заглушки реестра в тестах — прежней сигнатуры.
+    guard = {'record_guard': True} if cfg.record_guard else {}
     st.mapping = await asyncio.to_thread(
-        d.registry.assign, st.cents, st.air, st.episode or 'adhoc', cfg.registry_path,
-        cfg.match_threshold, cfg.max_centroids, decided)
+        lambda: d.registry.assign(st.cents, st.air, st.episode or 'adhoc', cfg.registry_path,
+                                  cfg.match_threshold, cfg.max_centroids, decided, **guard))
     d._release_turn(st.ticket)
+    # Решения реестра по кластерам (без центроидов — биометрия в артефакт не едет): без них не
+    # понять, почему два ведущих вышли одним голосом или разошлись.
+    if cfg.record_guard and decided:
+        st.voice_log['registry'] = decided
     if decided:
         xy = d._project(st.cents)
         for x in decided:
@@ -605,6 +611,89 @@ async def coverage(st: State, d: Deps, ev: Emitter) -> None:
              cov['recovered_chunks'], cov['retried_chunks'], cov['lost_sec'])
 
 
+# --- seams --------------------------------------------------------------------------------------
+
+async def seams(st: State, d: Deps, ev: Emitter) -> None:
+    """Страховка шва: кусок, декодированный с запасом, не повторяет конец соседа (stages/seams.py)."""
+    ev.stage('seams')
+    _t = time.monotonic()
+    st.seam_log = d.seams.dedupe_chunks(st.chunks)
+    st.tm['seams_s'] = round(time.monotonic() - _t, 2)
+    st.tm['n_seam_dedup'] = len(st.seam_log)
+    for x in st.seam_log:
+        log.info('шов %.1f с: снято %d слов повтора соседа', x['start'], x['dropped'])
+    ev.stage_done('seams', st.tm['seams_s'], n=len(st.seam_log))
+
+
+# --- recover ------------------------------------------------------------------------------------
+
+async def recover(st: State, d: Deps, ev: Emitter) -> None:
+    """Склеенный диалог (stages/recover.py): один голос у диаризации, а людей по знанию больше."""
+    cfg, rc = d.cfg, d.recover_stage
+    lone = rc.lone_voice(st.spans)
+    expected = max(len(set((st.hints or {}).get('names') or ())), cfg.min_speakers)
+    if not lone or expected < 2:
+        return
+    ev.stage('recover')
+    _t = time.monotonic()
+    phr = rc.phrases(st.chunks)
+    try:
+        async with d._res('campp', cfg.campp_slots):
+            vecs = await asyncio.to_thread(d.audio_clients.campp_spans, st.wav, phr)
+    except Exception as error:      # noqa: BLE001 — узел не имеет права ронять запись
+        log.warning('восстановление голосов не вышло: %s: %s', type(error).__name__, error)
+        st.voice_log['recover'] = {'error': type(error).__name__}
+        return
+    labels, info = rc.split_two(vecs, [p['end'] - p['start'] for p in phr])
+    info['expected'] = expected
+    if labels is not None:
+        st.spans = rc.relabel(st.chunks, st.spans, phr, labels, lone)
+        info['applied'] = True
+        log.warning('диаризация дала один голос, по фразам их два (разделение %.2f) — разведены',
+                    info['separation'])
+    else:
+        log.info('восстановление голосов: не доказано (%s)', info.get('why'))
+    st.voice_log['recover'] = info
+    st.tm['recover_s'] = round(time.monotonic() - _t, 1)
+    ev.stage_done('recover', st.tm['recover_s'], applied=bool(info.get('applied')))
+
+
+# --- resplit ------------------------------------------------------------------------------------
+
+async def resplit(st: State, d: Deps, ev: Emitter) -> None:
+    """Голоса по словам (stages/resplit.py): реплика режется там, где сменился говорящий.
+
+    Идёт ПОСЛЕ выравнивания — только там у слова точное время; markdown и текст пересобираются
+    в той же форме, что у `assemble`. Без слов выравнивания узел ничего не делает.
+    """
+    doc = st.words_doc or {}
+    if not doc.get('turns'):
+        return
+    ev.stage('resplit')
+    _t = time.monotonic()
+
+    def label_of(cluster):
+        sid = st.mapping.get(cluster)
+        return (sid, st.name_map.get(sid, sid)) if sid else None
+
+    st.out_turns, doc['turns'], rlog = d.resplit_stage.resplit(
+        st.out_turns, doc['turns'], st.spans, label_of)
+    if rlog:
+        st.voice_log['resplit'] = rlog
+        doc['words_total'] = sum(len(t['words']) for t in doc['turns'])
+        head = st.markdown.split('\n---\n', 1)[0] + '\n---\n'
+        lines = [head]
+        for t in st.out_turns:
+            lines.append(f"[{t['speaker']}] <!-- t:{t['start']:.1f} --> {t['text']}")
+            lines.append('')
+        st.markdown = '\n'.join(lines)
+        st.text = ' '.join(t['text'] for t in st.out_turns)
+        log.info('голоса по словам: перенесено %d мест, реплик %d → %d', rlog.get('n_moved', 0),
+                 rlog.get('n_turns_before', 0), rlog.get('n_turns_after', 0))
+    st.tm['resplit_s'] = round(time.monotonic() - _t, 2)
+    ev.stage_done('resplit', st.tm['resplit_s'], n=(rlog or {}).get('n_moved', 0))
+
+
 # Порядок узлов и условие каждого (по конфигу). Узел без условия идёт всегда.
 NODES: list[tuple[str, object, object]] = [
     ('prepare', prepare, None),
@@ -614,7 +703,9 @@ NODES: list[tuple[str, object, object]] = [
     ('chunking', chunking, None),
     ('pass2', pass2, None),
     ('relisten', relisten, lambda cfg, st: bool(cfg.relisten)),
+    ('seams', seams, lambda cfg, st: bool(cfg.seam)),
     ('arbitrate', arbitrate, lambda cfg, st: bool(cfg.second_model)),
+    ('recover', recover, lambda cfg, st: bool(cfg.recover_speakers)),
     ('turns', turns, None),
     ('final_round', final_round, None),
     ('speakers', speakers, None),
@@ -622,5 +713,6 @@ NODES: list[tuple[str, object, object]] = [
     ('editor', editor, lambda cfg, st: editor_on(cfg, st)),
     ('assemble', assemble, None),
     ('align', align, lambda cfg, st: bool(cfg.enable_align)),
+    ('resplit', resplit, lambda cfg, st: bool(cfg.resplit)),
     ('coverage', coverage, None),
 ]

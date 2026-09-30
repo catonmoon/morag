@@ -33,6 +33,10 @@ CASES = {
     'reader_demand': {'second_model': 'other', 'arbitrate_gate': 'reader',
                       'clean_ear': 'demand', 'clean_ear_window': 'window30'},
     'protect_final_ear': {'protect_known': True, 'final_ear': True},
+    # Голоса и шов (идеи VoiceStudio): на одноголосой заглушке всё обязано пройти без поломок.
+    'voices_seams': {'seam': True, 'resplit': True, 'record_guard': True,
+                     'clean_centroids': True, 'recover_speakers': True, 'relisten': True,
+                     'min_speakers': 2},
 }
 def _norm_result(r: dict) -> dict:
     r = json.loads(json.dumps(r, ensure_ascii=False, default=str))
@@ -102,6 +106,10 @@ async def test_conveyor_equals_the_frozen_linear_pipeline(case, rich, silence, m
         assert any(f['why'].startswith('known_term') for f in r.get('fixes', ())), 'ухо финал-раунда не звали'
     if case == 'word_times':
         assert all(s.get('words') for t in r['turns'] for s in t['segments'] if s['text'])
+    if case == 'voices_seams':
+        nodes = r['conveyor']['nodes']
+        assert 'seams' in nodes and 'recover' in nodes, nodes
+        assert r['voices']['recover'].get('why'), 'восстановление голосов не отчиталось'
 
 
 async def test_conveyor_reports_its_nodes_in_the_artifact(rich, silence):

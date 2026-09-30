@@ -43,7 +43,36 @@ def _embed(samples: np.ndarray, sr: int) -> np.ndarray:
     return v / (np.linalg.norm(v) + 1e-9)
 
 
-def _centroids(wav: str, spans: list[dict]):
+GUARD_S = 0.3  # отступ от чужого отрезка: граница диаризации неточна, у края звучит сосед
+
+
+def _minus(a: float, e: float, others: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """Отрезок [a, e] без чужих отрезков, расширенных на GUARD_S с каждой стороны."""
+    parts = [(a, e)]
+    for o0, o1 in others:
+        o0, o1 = o0 - GUARD_S, o1 + GUARD_S
+        nxt = []
+        for p0, p1 in parts:
+            if o1 <= p0 or o0 >= p1:
+                nxt.append((p0, p1))
+                continue
+            if o0 > p0:
+                nxt.append((p0, o0))
+            if o1 < p1:
+                nxt.append((o1, p1))
+        parts = nxt
+    return parts
+
+
+def _centroids(wav: str, spans: list[dict], clean: bool = False):
+    """Центроид голоса по его отрезкам диаризации.
+
+    `clean` — из отрезка вычитается чужая речь (наложение) и GUARD_S у границы с чужим отрезком:
+    центроид, набранный из смеси двух голосов, узнаёт «среднего» человека и склеивает разных
+    (идея — выбор «чистых» отрезков для образца голоса у VoiceStudio). Если после вычитания у
+    голоса не осталось отрезка от MIN_DUR, берутся прежние: без центроида голос не узнать вовсе.
+    `air` — всегда по сырым отрезкам: это эфир, а не качество образца.
+    """
     audio, sr = sf.read(wav, dtype='float32', always_2d=False)
     if audio.ndim > 1:
         audio = audio[:, 0]
@@ -52,7 +81,13 @@ def _centroids(wav: str, spans: list[dict]):
         byspk[s['speaker']].append((float(s['start']), float(s['end'])))
     cents, air = {}, {}
     for spk, segs in byspk.items():
-        longs = sorted([(a, e) for a, e in segs if e - a >= MIN_DUR],
+        pool = segs
+        if clean:
+            others = [x for k, v in byspk.items() if k != spk for x in v]
+            cleaned = [p for a, e in segs for p in _minus(a, e, others)]
+            if any(e - a >= MIN_DUR for a, e in cleaned):
+                pool = cleaned
+        longs = sorted([(a, e) for a, e in pool if e - a >= MIN_DUR],
                        key=lambda x: -(x[1] - x[0]))[:MAX_SEGS]
         if not longs:
             continue  # чистый шум — без центроида (как build_transcript)
@@ -79,6 +114,7 @@ def health():
 
 @app.post('/embed-centroids')
 async def embed_centroids(file: UploadFile = File(...), spans: str = Form(...),
+                          clean: str = Form(''),
                           authorization: Optional[str] = Header(None)):
     if API_KEY and authorization != f'Bearer {API_KEY}':
         raise HTTPException(401, 'unauthorized')
@@ -86,7 +122,40 @@ async def embed_centroids(file: UploadFile = File(...), spans: str = Form(...),
     tmp = tempfile.mktemp(suffix='.wav')
     Path(tmp).write_bytes(await file.read())
     try:
-        cents, air = _centroids(tmp, sp)
+        cents, air = _centroids(tmp, sp, clean=clean.strip().lower() in ('1', 'true', 'yes', 'on'))
     finally:
         Path(tmp).unlink(missing_ok=True)
     return {'centroids': cents, 'air': air}
+
+
+@app.post('/embed-spans')
+async def embed_spans(file: UploadFile = File(...), spans: str = Form(...),
+                      authorization: Optional[str] = Header(None)):
+    """Вектор на КАЖДЫЙ отрезок (`[{start, end}]` → `[[float] | null]`, в том же порядке).
+
+    Нужен восстановлению склеенного диалога: там голоса ищутся по фразам, а не по кластерам.
+    Отрезок короче 0.5 с или неудачный — `null`. ⚠️ Векторы — биометрия: адаптер держит их в
+    памяти прогона и в артефакт не кладёт.
+    """
+    if API_KEY and authorization != f'Bearer {API_KEY}':
+        raise HTTPException(401, 'unauthorized')
+    sp = json.loads(spans)
+    tmp = tempfile.mktemp(suffix='.wav')
+    Path(tmp).write_bytes(await file.read())
+    try:
+        audio, sr = sf.read(tmp, dtype='float32', always_2d=False)
+        if audio.ndim > 1:
+            audio = audio[:, 0]
+        out = []
+        for s in sp:
+            a, e = float(s['start']), float(s['end'])
+            if e - a < 0.5:
+                out.append(None)
+                continue
+            try:
+                out.append(_embed(audio[int(a * sr):int(e * sr)][:int(SEG_CAP * sr)], sr).tolist())
+            except Exception:
+                out.append(None)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+    return {'vectors': out}

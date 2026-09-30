@@ -44,6 +44,8 @@ class State:
     counter: Any = field(default=None, metadata={'checkpoint': False})
     # --- relisten / arbitrate -------------------------------------------------------------------
     relisten_log: list = field(default_factory=list)
+    seam_log: list = field(default_factory=list)     # шов: где снят повтор соседа
+    voice_log: dict = field(default_factory=dict)    # голоса: восстановление диалога и перерезка по словам
     arbitrate_log: list = field(default_factory=list)
     # --- turns / final-round --------------------------------------------------------------------
     turns: list = field(default_factory=list)

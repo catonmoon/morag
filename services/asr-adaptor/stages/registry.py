@@ -73,7 +73,8 @@ def _prov(episode: str, cluster: str, air: float) -> dict:
 
 
 def assign(cents: dict, air: dict, episode: str, registry_path: str,
-           threshold: float = 0.55, max_centroids: int = 8, out=None) -> dict:
+           threshold: float = 0.55, max_centroids: int = 8, out=None,
+           record_guard: bool = False) -> dict:
     """cents {cluster: centroid[]} + air {cluster: sec} (substantial-кластеры от CAM++-эндпоинта)
     → {cluster: 'Speaker_N'}. Мутирует+персистит реестр под flock. Кластеры по air-time desc (детерминизм).
 
@@ -100,14 +101,32 @@ def assign(cents: dict, air: dict, episode: str, registry_path: str,
         reg.setdefault('next_id', 0)
         mapping = {}
         folded: list[tuple[str, float, float, str]] = []
+        # Голоса, уже занятые кластерами ЭТОЙ записи: номер → их центроиды (для `record_guard`).
+        here: dict[str, list[np.ndarray]] = {}
+
+        def like_here(cent, sid) -> float:
+            return max(float(np.dot(cent, c)) for c in here[sid])
+
         for cl in sorted(air, key=lambda c: -air[c]):
             cent = np.asarray(cents[cl], dtype=np.float32)
             pid, cos = best_match(cent, sp)
+            # ⚠️ Диаризатор РАЗВЁЛ эти кластеры — значит, слышит разных людей. Если ближайший голос
+            # реестра уже отдан другому кластеру этой записи, а на тот кластер наш НЕ похож, свести
+            # их в один номер значит склеить двух людей (замерено: диалог двух ведущих вышел
+            # монологом одного). Тогда ищем среди прочих голосов, а не нашлось — заводим новый,
+            # даже короткий: короткая реплика другого человека — всё равно другой человек.
+            separated = False
+            if record_guard and pid is not None and pid in here and like_here(cent, pid) < threshold:
+                pid, cos = best_match(cent, {k: v for k, v in sp.items()
+                                             if k not in here or like_here(cent, k) >= threshold})
+                separated = True
+
             def decided(action, label):
                 if out is not None:
                     out.append({'cluster': cl, 'air': round(float(air[cl]), 1), 'label': label,
                                 'best': (f'Speaker_{pid}' if pid is not None else ''),
-                                'cos': round(float(cos), 3), 'action': action})
+                                'cos': round(float(cos), 3), 'action': action,
+                                **({'separated': True} if separated else {})})
 
             if pid is not None and cos >= threshold:
                 mapping[cl] = f'Speaker_{pid}'
@@ -116,7 +135,7 @@ def assign(cents: dict, air: dict, episode: str, registry_path: str,
                 if len(rec['centroids']) < max_centroids:  # обогащаем голос новым центроидом (cap)
                     rec['centroids'].append(cent.tolist())
                 rec['provenance'].append(_prov(episode, cl, air[cl]))
-            elif pid is None or air[cl] >= MIN_GUEST_MIN * 60:
+            elif pid is None or air[cl] >= MIN_GUEST_MIN * 60 or separated:
                 nid = str(reg['next_id'])
                 reg['next_id'] += 1
                 sp[nid] = {'centroids': [cent.tolist()], 'provenance': [_prov(episode, cl, air[cl])]}
@@ -136,6 +155,7 @@ def assign(cents: dict, air: dict, episode: str, registry_path: str,
                         'отдельно. Если в записи короткие реплики (вопросы из зала, планёрка) — '
                         'опустите ASR_MIN_GUEST_MIN, напр. до 0.25',
                         cl, air[cl], pid, cos, threshold, MIN_GUEST_MIN, MIN_GUEST_MIN * 60)
+            here.setdefault(mapping[cl].split('_', 1)[1], []).append(cent)
         # атомарная запись + .bak
         if path.exists():
             try:

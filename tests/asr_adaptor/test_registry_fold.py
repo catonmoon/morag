@@ -120,3 +120,44 @@ def test_collecting_decisions_does_not_change_the_mapping(tmp_path, monkeypatch)
     plain = registry.assign(cents, air, 'ep1', str(tmp_path / 'a.json'))
     noisy = registry.assign(cents, air, 'ep1', str(tmp_path / 'b.json'), out=[])
     assert plain == noisy
+
+
+def _registry_with_blend(path, a, b):
+    """Реестр с одним голосом, центроид которого — «середина» двух разных людей."""
+    import json
+    x = np.asarray(a) + np.asarray(b)
+    x = (x / np.linalg.norm(x)).tolist()
+    path.write_text(json.dumps({'speakers': {'12': {'centroids': [x], 'provenance': []}},
+                                'next_id': 13}))
+
+
+def test_two_different_clusters_of_one_record_do_not_become_one_voice(tmp_path, monkeypatch):
+    """Диалог двух ведущих: оба кластера похожи на голос реестра (cos 0.71), друг на друга — нет."""
+    registry = _reload(monkeypatch, ASR_MIN_GUEST_MIN='0.25')
+    reg = tmp_path / 'registry.json'
+    a, b = _voice(1), _voice(2)
+    cents, air = {'SPEAKER_00': a, 'SPEAKER_01': b}, {'SPEAKER_00': 900.0, 'SPEAKER_01': 600.0}
+
+    _registry_with_blend(reg, a, b)
+    old = registry.assign(cents, air, 'ep', str(reg), threshold=0.7)
+    assert set(old.values()) == {'Speaker_12'}        # прежнее поведение: один голос на двоих
+
+    _registry_with_blend(reg, a, b)
+    out = []
+    new = registry.assign(cents, air, 'ep', str(reg), threshold=0.7, out=out, record_guard=True)
+    assert new['SPEAKER_00'] == 'Speaker_12' and new['SPEAKER_01'] == 'Speaker_13'
+    assert out[1]['separated'] and out[1]['action'] == 'new'
+
+
+def test_record_guard_keeps_a_split_of_one_person_together(tmp_path, monkeypatch):
+    """Диаризатор разрезал ОДНОГО человека на два кластера — они похожи и друг на друга."""
+    registry = _reload(monkeypatch, ASR_MIN_GUEST_MIN='0.25')
+    reg = tmp_path / 'registry.json'
+    a = _voice(1)
+    a2 = np.asarray(a) + 0.2 * np.asarray(_voice(3))
+    a2 = (a2 / np.linalg.norm(a2)).tolist()
+    _registry_with_blend(reg, a, a)
+    new = registry.assign({'SPEAKER_00': a, 'SPEAKER_01': a2},
+                          {'SPEAKER_00': 900.0, 'SPEAKER_01': 60.0},
+                          'ep', str(reg), threshold=0.7, record_guard=True)
+    assert set(new.values()) == {'Speaker_12'}
