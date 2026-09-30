@@ -87,17 +87,20 @@ def _raw_cuts(text_words: list[str], raw: str, cuts: list[int]) -> list[str]:
 
 
 def resplit(out_turns: list[dict], word_turns: list[dict], spans,
-            label_of) -> tuple[list[dict], list[dict], dict]:
+            label_of, pinned=frozenset()) -> tuple[list[dict], list[dict], dict]:
     """(реплики артефакта, реплики words-документа) → то же, разрезанное по голосам слов.
 
     `label_of(cluster)` → `(speaker_id, speaker)` — номер голоса и подпись (имя, если есть).
+    `pinned` — пары (реплика, слово) БЕЗ своего голоса: берут голос слова слева. Нужно, когда
+    голоса переносят на выверенный текст: слово, которое правка человека удаляет (задвоение на
+    шве), иначе могло стать отдельной репликой, а пустой реплику правка сделать не может.
     Возвращает новые списки и журнал: сколько реплик разрезано, какие места (для отчёта человеку).
     """
     if not spans or len(out_turns) != len(word_turns):
         return out_turns, word_turns, {}
     pieces: list[tuple[dict, dict, bool]] = []  # (реплика, words-реплика, «рождена разрезом»)
     moments, skipped = [], 0
-    for t, wt in zip(out_turns, word_turns):
+    for n_turn, (t, wt) in enumerate(zip(out_turns, word_turns)):
         words = wt.get('words') or []
         text_words = (t.get('text') or '').split()
         if not words or len(words) != len(text_words):
@@ -111,6 +114,10 @@ def resplit(out_turns: list[dict], word_turns: list[dict], spans,
             cl = word_cluster(float(w[1]), float(w[2]), spans)
             labels.append(label_of(cl) if cl is not None else None)
         ids = [(lab[0] if lab else own) for lab in labels]
+        for k in range(len(ids)):
+            if (n_turn, k) in pinned:
+                ids[k] = ids[k - 1] if k else own
+                labels[k] = labels[k - 1] if k else None
         if all(i == own for i in ids):
             pieces.append((t, wt, False))
             continue

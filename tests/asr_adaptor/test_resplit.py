@@ -57,3 +57,14 @@ def test_raw_is_cut_where_the_text_is_cut():
     spans = [{'start': 0.0, 'end': 2.0, 'speaker': 'A'}, {'start': 3.0, 'end': 4.0, 'speaker': 'B'}]
     out, _, _ = rs.resplit([t], [w], spans, label_of)
     assert [x['raw'] for x in out] == ['первое славо', 'ответ']
+
+
+def test_pinned_words_take_the_voice_on_their_left():
+    # «опление» — задвоение на шве, которое правка человека удаляет: своего голоса у него нет
+    t, w = _turn('Speaker_1', 'Ковалёв', 0.0, 6.0,
+                 [('отличное', 1.0, 1.5), ('выступление.', 1.6, 2.4), ('опление', 4.1, 4.5)])
+    spans = [{'start': 0.0, 'end': 3.0, 'speaker': 'A'}, {'start': 4.0, 'end': 5.0, 'speaker': 'B'}]
+    out, _, _ = rs.resplit([t], [w], spans, label_of)
+    assert [x['speaker_id'] for x in out] == ['Speaker_1', 'Speaker_2']
+    out, _, log = rs.resplit([t], [w], spans, label_of, pinned={(0, 2)})
+    assert len(out) == 1 and log == {}

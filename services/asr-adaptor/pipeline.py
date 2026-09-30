@@ -356,19 +356,14 @@ async def _decode(wav: str, sl: str, c: dict, prompt: str, audio_sec: float) -> 
     # ⚠️ Флаг передаётся ТОЛЬКО когда включён: вызов клиента без него — прежний, и заглушки в
     # тестах с фиксированной сигнатурой не ломаются.
     ask = {'words': True} if CFG.word_times else {}
-    # Шов (stages/seams.py): кусок добора дыр режется ровно посреди непокрытого звука, то есть
-    # порой по слову, — слушаем его с запасом и оставляем слова, чья середина внутри куска.
-    wide = CFG.seam and c.get('recovered')
-    s0, s1 = ((max(0.0, c['start'] - PAD_S), min(audio_sec, c['end'] + PAD_S)) if wide
-              else (c['start'], c['end']))
-    await asyncio.to_thread(_slice, wav, s0, s1, sl)
-    ask1 = {'words': True} if wide else ask
+    # ⚠️⚠️ Куски добора дыр (`recovered`) шов НЕ трогает — замерено 30.09 на пяти эталонах: запас
+    # ±0.3 с и отсечка по середине слова на них теряли живую речь (пропусков у дыр пасса-1 1 → 34 на
+    # одной записи, WER 3.28 → 3.95 % по пяти). Граница такого куска — край дыры, где пасс-1 речи
+    # не слышал, соседских слов там нет; а времена слов декодера на коротком куске неточны.
+    await asyncio.to_thread(_slice, wav, c['start'], c['end'], sl)
     async with _res('whisper', CFG.whisper_slots):
-        r = await asyncio.to_thread(lambda: audio_clients.asr(sl, prompt, **ask1))
-    off = s0
-    if wide:
-        r = _inside(r, off, c)
-        off = 0.0
+        r = await asyncio.to_thread(lambda: audio_clients.asr(sl, prompt, **ask))
+    off = c['start']
     if not r['text'] and CFG.retry_empty:
         a, b = max(0.0, c['start'] - PAD_S), min(audio_sec, c['end'] + PAD_S)
         await asyncio.to_thread(_slice, wav, a, b, sl)
