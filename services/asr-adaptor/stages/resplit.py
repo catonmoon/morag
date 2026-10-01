@@ -261,6 +261,9 @@ def _by_voice(ids, runs, queries, span, dur, embed, log):
 BIG_AIR_S = 120.0      # чужие голоса ищем только внутри голоса с таким эфиром в записи
 FOREIGN_COS = 0.5      # предложение дальше этого от центроида голоса — чужое
 FOREIGN_SAME = 0.6     # чужие отрезки ближе этого друг к другу — один и тот же человек
+FOREIGN_CORE = 0.6     # второй проход центроида — по предложениям не дальше этого от первого
+RETURN_MARGIN = 0.05   # к другому большому голосу — если ближе к нему, чем к своему, на столько
+SHORT_VOICE_S = 0.8    # короткое рядом с чужим отрезком от этой длины решает голос, а не положение
 SENT_MIN_S = 2.0       # предложение короче голосом не судим (идёт за соседним длинным)
 SENT_MIN_RATE = 1.0    # слов в секунду: реже — почти тишина, вектор врёт («Мне всё.» на 5.8 с)
 
@@ -293,64 +296,110 @@ def foreign_voices(word_turns: list[dict], embed, new_label) -> tuple[list, list
                 by_voice.setdefault(v, []).append({'turn': n, 'i0': cur[0], 'i1': cur[-1] + 1,
                                                    't0': a, 't1': b, 'nw': len(cur)})
                 cur = []
-    out, log, groups = [], [], []
-    for v, sents in by_voice.items():
+    # 1. Векторы длинных предложений ВСЕХ голосов записи (короткие и почти тишина не судятся).
+    allsents = [s | {'voice': v} for v, ss in by_voice.items() for s in ss]
+    judged = [s for s in allsents if s['t1'] - s['t0'] >= SENT_MIN_S
+              and s['nw'] / (s['t1'] - s['t0']) >= SENT_MIN_RATE]
+    if not judged:
+        return [], []
+    for s, vec in zip(judged, embed([(s['t0'], s['t1']) for s in judged])):
+        s['vec'] = vec
+    # 2. Центроиды БОЛЬШИХ голосов — в два прохода (первый «размазан» чужими: вопрос Ольги на 60 с
+    # не дотягивал до порога, пока центроид не очистили — замерено 01.10).
+    core: dict[str, list] = {}
+    for v in by_voice:
         if air.get(v, 0.0) < BIG_AIR_S:
             continue
-        judged = [s for s in sents if s['t1'] - s['t0'] >= SENT_MIN_S
-                  and s['nw'] / (s['t1'] - s['t0']) >= SENT_MIN_RATE]
-        if len(judged) < 5:
+        vs = [s['vec'] for s in judged if s['voice'] == v and s.get('vec') is not None]
+        if len(vs) < 5:
             continue
-        vecs = embed([(s['t0'], s['t1']) for s in judged])
-        for s, vec in zip(judged, vecs):
-            s['vec'] = vec
-        ok = [s for s in judged if s.get('vec') is not None]
-        cen = _mean([s['vec'] for s in ok])
-        if cen is None:
+        cen = _mean(vs)
+        tight = [x for x in vs if _cos(x, cen) >= FOREIGN_CORE]
+        core[v] = _mean(tight) if len(tight) >= 5 else cen
+    if not core:
+        return [], []
+    # 3. Куда предложение: свой большой голос — остаётся; звучит как ДРУГОЙ большой голос (от
+    # FOREIGN_CORE и ближе своего) — к нему (речь докладчика в мелком кластере зрителя: ответ Даши
+    # под меткой Ольги); в большом голосе и ни на кого не похоже — чужой голос.
+    for s in judged:
+        if s.get('vec') is None:
             continue
-        for s in ok:
-            s['cos'] = _cos(s['vec'], cen)
-            s['out'] = s['cos'] < FOREIGN_COS
-        # короткие и несудимые — за следующим судимым в той же реплике (нет — за предыдущим)
-        for n in {s['turn'] for s in sents}:
-            row = [s for s in sents if s['turn'] == n]
-            nxt = None
-            for s in reversed(row):
-                if 'out' in s:
-                    nxt = s['out']
-                elif nxt is not None:
-                    s['out_inh'] = nxt
-            prv = None
-            for s in row:
-                if 'out' in s:
-                    prv = s['out']
-                elif 'out_inh' not in s and prv is not None:
-                    s['out_inh'] = prv
-        # отрезки: подряд идущие чужие предложения одной реплики
-        regions = []
-        for s in sents:
-            bad = s.get('out', s.get('out_inh', False))
-            if not bad:
+        own = _cos(s['vec'], core[s['voice']]) if s['voice'] in core else None
+        others = {v: _cos(s['vec'], c) for v, c in core.items() if v != s['voice']}
+        best = max(others, key=others.get) if others else None
+        s['cos'] = own
+        if best is not None and others[best] >= FOREIGN_CORE and \
+                others[best] >= (own if own is not None else -1.0) + RETURN_MARGIN:
+            # ⚠️ Сравнение, а не порог «своего»: центроид мелкого голоса бывает смесью (у Ольги в
+            # кластере сидели и ответы Даши), и ответ Даши похож на смесь не меньше 0.5.
+            s['dest'] = best
+            s['cos'] = others[best]
+        elif own is None or own >= FOREIGN_COS:
+            s['dest'] = None
+        else:
+            s['dest'] = '?'          # чужой голос
+    # 4а. Короткое предложение РЯДОМ с чужим отрезком решает голос: по положению не различить хвост
+    # вопроса («Вот именно, которые в K8s.») и начало ответа («Какой сложный вопрос!») — замерено
+    # 01.10, правило «за соседом» в любую сторону ломало одно из двух. Ближе к соседнему чужому
+    # предложению, чем к своему голосу, — уходит с ним.
+    cand = []
+    for n in {s['turn'] for s in allsents}:
+        row = sorted((s for s in allsents if s['turn'] == n), key=lambda s: s['i0'])
+        for k, s in enumerate(row):
+            if 'dest' in s or s['t1'] - s['t0'] < SHORT_VOICE_S or s['voice'] not in core:
                 continue
-            if regions and regions[-1]['turn'] == s['turn'] and regions[-1]['i1'] == s['i0']:
-                regions[-1]['i1'] = s['i1']
-                regions[-1]['t1'] = s['t1']
-                regions[-1]['sents'].append(s)
-            else:
-                regions.append({'turn': s['turn'], 'i0': s['i0'], 'i1': s['i1'], 't0': s['t0'],
-                                't1': s['t1'], 'sents': [s]})
-        for r in regions:
-            vec = _mean([s.get('vec') for s in r['sents'] if s.get('out')])
+            nb = [x for x in (row[k - 1] if k else None, row[k + 1] if k + 1 < len(row) else None)
+                  if x is not None and x.get('dest') is not None and x.get('vec') is not None]
+            if nb:
+                cand.append((s, nb[0]))
+    if cand:
+        for (s, nb), vec in zip(cand, embed([(s['t0'], s['t1']) for s, _ in cand])):
             if vec is None:
                 continue
+            own, other = _cos(vec, core[s['voice']]), _cos(vec, nb['vec'])
+            s['vec'], s['dest'], s['cos'] = vec, (nb['dest'] if other > own else None), max(own, other)
+    # 4. Короткие — за следующим судимым своей реплики (нет его — остаются): «Всем привет, …» идёт
+    # со своим вопросом, «Да, хороший вопрос.» после него — с ответом.
+    for n in {s['turn'] for s in allsents}:
+        row = sorted((s for s in allsents if s['turn'] == n), key=lambda s: s['i0'])
+        nxt = None
+        for s in reversed(row):
+            if 'dest' in s:
+                nxt = s['dest']
+            else:
+                s['dest_inh'] = nxt
+        # ⚠️ Назад не наследуем: короткое в конце реплики («Какой сложный вопрос!» после вопроса
+        # зрителя) — уже ответ, а не хвост вопроса (владелец, 01.10).
+    # 5. Отрезки: подряд идущие предложения одной реплики с одним назначением.
+    regions = []
+    for s in sorted(allsents, key=lambda s: (s['turn'], s['i0'])):
+        dest = s.get('dest', s.get('dest_inh'))
+        if dest is None:
+            continue
+        r = regions[-1] if regions else None
+        if r and r['turn'] == s['turn'] and r['i1'] == s['i0'] and r['dest'] == dest:
+            r['i1'], r['t1'] = s['i1'], s['t1']
+            r['sents'].append(s)
+        else:
+            regions.append({'turn': s['turn'], 'i0': s['i0'], 'i1': s['i1'], 't0': s['t0'],
+                            't1': s['t1'], 'dest': dest, 'voice': s['voice'], 'sents': [s]})
+    out, log, groups = [], [], []
+    for r in regions:
+        judged_here = [s for s in r['sents'] if s.get('vec') is not None and 'dest' in s]
+        if not judged_here:
+            continue
+        label = r['dest']
+        if label == '?':
+            vec = _mean([s['vec'] for s in judged_here])
             g = next((g for g in groups if _cos(vec, g['vec']) >= FOREIGN_SAME), None)
             if g is None:
-                g = {'vec': vec, 'label': new_label(len(groups)), 'n': 0}
+                g = {'vec': vec, 'label': new_label(len(groups))}
                 groups.append(g)
-            g['n'] += 1
-            out.append((r['turn'], r['i0'], r['i1'], g['label']))
-            log.append({'at': round(r['t0'], 1), 'to': round(r['t1'], 1), 'from': v, 'label': g['label'],
-                        'cos': round(min(s['cos'] for s in r['sents'] if 'cos' in s), 3)})
+            label = g['label']
+        out.append((r['turn'], r['i0'], r['i1'], label))
+        log.append({'at': round(r['t0'], 1), 'to': round(r['t1'], 1), 'from': r['voice'], 'label': label,
+                    'kind': 'чужой' if r['dest'] == '?' else 'вернул большому',
+                    'cos': round(min(s['cos'] for s in judged_here if s.get('cos') is not None), 3)})
     return out, log
 
 
