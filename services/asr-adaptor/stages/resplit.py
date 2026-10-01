@@ -258,6 +258,102 @@ def _by_voice(ids, runs, queries, span, dur, embed, log):
     return ids
 
 
+BIG_AIR_S = 120.0      # чужие голоса ищем только внутри голоса с таким эфиром в записи
+FOREIGN_COS = 0.5      # предложение дальше этого от центроида голоса — чужое
+FOREIGN_SAME = 0.6     # чужие отрезки ближе этого друг к другу — один и тот же человек
+SENT_MIN_S = 2.0       # предложение короче голосом не судим (идёт за соседним длинным)
+SENT_MIN_RATE = 1.0    # слов в секунду: реже — почти тишина, вектор врёт («Мне всё.» на 5.8 с)
+
+
+def foreign_voices(word_turns: list[dict], embed, new_label) -> tuple[list, list]:
+    """Чужие голоса ВНУТРИ большого голоса записи: вопросы из зала, склеенные с докладчиком.
+
+    Диаризатор кладёт короткие вопросы из зала в кластер докладчика (замерено 01.10, «События, а
+    не БД»: три зрителя в голосе докладчика). Каждое длинное предложение голоса — вектор CAM++;
+    центроид — по всем ним; предложения дальше FOREIGN_COS — чужие (там: зрители 0.19–0.41, сам
+    докладчик ≥ 0.60, медиана 0.91 — зазор чистый). Короткие предложения идут за следующим длинным
+    той же реплики (приветствие «Всем привет, …» — со своим вопросом, «Да, хороший вопрос.» после
+    него — с ответом). Чужие отрезки группируются по похожести (FOREIGN_SAME) — разные зрители
+    разные люди. Возвращает [(реплика, слово_с, слово_по, метка)] и журнал. `new_label(n)` — метка
+    n-го найденного голоса (номер выдаёт реестр потом).
+    """
+    by_voice: dict[str, list] = {}
+    air: dict[str, float] = {}
+    for n, t in enumerate(word_turns):
+        ws = t.get('words') or []
+        if not ws:
+            continue
+        v = t.get('speaker_id') or t.get('speaker')
+        air[v] = air.get(v, 0.0) + float(ws[-1][2]) - float(ws[0][1])
+        cur = []
+        for k, w in enumerate(ws):
+            cur.append(k)
+            if _SENT_END.search(str(w[0])) or k == len(ws) - 1:
+                a, b = float(ws[cur[0]][1]), float(ws[cur[-1]][2])
+                by_voice.setdefault(v, []).append({'turn': n, 'i0': cur[0], 'i1': cur[-1] + 1,
+                                                   't0': a, 't1': b, 'nw': len(cur)})
+                cur = []
+    out, log, groups = [], [], []
+    for v, sents in by_voice.items():
+        if air.get(v, 0.0) < BIG_AIR_S:
+            continue
+        judged = [s for s in sents if s['t1'] - s['t0'] >= SENT_MIN_S
+                  and s['nw'] / (s['t1'] - s['t0']) >= SENT_MIN_RATE]
+        if len(judged) < 5:
+            continue
+        vecs = embed([(s['t0'], s['t1']) for s in judged])
+        for s, vec in zip(judged, vecs):
+            s['vec'] = vec
+        ok = [s for s in judged if s.get('vec') is not None]
+        cen = _mean([s['vec'] for s in ok])
+        if cen is None:
+            continue
+        for s in ok:
+            s['cos'] = _cos(s['vec'], cen)
+            s['out'] = s['cos'] < FOREIGN_COS
+        # короткие и несудимые — за следующим судимым в той же реплике (нет — за предыдущим)
+        for n in {s['turn'] for s in sents}:
+            row = [s for s in sents if s['turn'] == n]
+            nxt = None
+            for s in reversed(row):
+                if 'out' in s:
+                    nxt = s['out']
+                elif nxt is not None:
+                    s['out_inh'] = nxt
+            prv = None
+            for s in row:
+                if 'out' in s:
+                    prv = s['out']
+                elif 'out_inh' not in s and prv is not None:
+                    s['out_inh'] = prv
+        # отрезки: подряд идущие чужие предложения одной реплики
+        regions = []
+        for s in sents:
+            bad = s.get('out', s.get('out_inh', False))
+            if not bad:
+                continue
+            if regions and regions[-1]['turn'] == s['turn'] and regions[-1]['i1'] == s['i0']:
+                regions[-1]['i1'] = s['i1']
+                regions[-1]['t1'] = s['t1']
+                regions[-1]['sents'].append(s)
+            else:
+                regions.append({'turn': s['turn'], 'i0': s['i0'], 'i1': s['i1'], 't0': s['t0'],
+                                't1': s['t1'], 'sents': [s]})
+        for r in regions:
+            vec = _mean([s.get('vec') for s in r['sents'] if s.get('out')])
+            if vec is None:
+                continue
+            g = next((g for g in groups if _cos(vec, g['vec']) >= FOREIGN_SAME), None)
+            if g is None:
+                g = {'vec': vec, 'label': new_label(len(groups)), 'n': 0}
+                groups.append(g)
+            g['n'] += 1
+            out.append((r['turn'], r['i0'], r['i1'], g['label']))
+            log.append({'at': round(r['t0'], 1), 'to': round(r['t1'], 1), 'from': v, 'label': g['label'],
+                        'cos': round(min(s['cos'] for s in r['sents'] if 'cos' in s), 3)})
+    return out, log
+
+
 def resplit(out_turns: list[dict], word_turns: list[dict], spans,
             label_of, pinned=frozenset(), embed=None,
             backchannel=frozenset()) -> tuple[list[dict], list[dict], dict]:
