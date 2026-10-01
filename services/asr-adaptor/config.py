@@ -71,6 +71,9 @@ class Config:
     # диаризации сменился говорящий, — короткая реплика второго голоса не тонет в чужой.
     # Выключено — реплики прежние байт в байт.
     resplit: bool = field(default_factory=lambda: _flag('ASR_RESPLIT', '0'))
+    # Поддакивания (через запятую): только такое слово в наложении отдаётся короткому отрезку
+    # перебившего; любое другое остаётся хозяину. Язык корпуса — забота профиля, движок слов не знает.
+    resplit_backchannel: str = field(default_factory=lambda: _env('ASR_RESPLIT_BACKCHANNEL'))
     # Реестр: два кластера ОДНОЙ записи становятся одним голосом, только если похожи и друг на
     # друга (stages/registry.py). Выключено — прежнее «каждый кластер к ближайшему в реестре».
     record_guard: bool = field(default_factory=lambda: _flag('ASR_REGISTRY_RECORD_GUARD', '0'))

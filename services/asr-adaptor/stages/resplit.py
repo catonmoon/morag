@@ -12,10 +12,16 @@
   подкаст ничего не замечают.
 - **Одиночное слово чужого голоса НЕ сглаживается.** Сглаживание «одно слово внутри чужой серии —
   шум» стирает ровно то, ради чего всё затеяно, — «ага» поверх чужой речи.
-- **Наложение:** слово внутри отрезков двух голосов отдаётся КОРОТКОМУ отрезку (перебивающему),
-  если тот не длиннее `OVERLAP_SHORT_S`; иначе — голосу с наибольшим перекрытием. Долгий отрезок
-  хозяина покрывает поддакивание целиком, и «наибольшее перекрытие» всегда отдавало бы его хозяину.
-- Слово без покрытия (пауза в отрезках) — голос реплики: чужой голос нужно ДОКАЗАТЬ отрезком.
+- **Наложение:** слово внутри отрезков двух голосов — голосу с наибольшим перекрытием (хозяину).
+  Короткому (перебивающему) отрезку оно отдаётся, только если САМО слово — поддакивание из списка
+  (`backchannel`, задаёт профиль). ⚠️ Прежнее «всегда короткому» было неверно (владелец, 01.10):
+  кто-то меньше секунды сказал «да» поверх лектора, whisper записал слово ЛЕКТОРА («мне,»), и
+  правило отдало его перебившему. ASR пишет того, кто громче и дольше.
+- Слово без покрытия (пауза в отрезках) — голос соседних слов: чужой голос нужно ДОКАЗАТЬ отрезком.
+- **Второй свидетель — голос** (`witness`): кусок, который перерезка отдаёт другому голосу,
+  сверяется вектором CAM++ с голосами соседей. Звучит как сосед — остаётся соседу. Кусок короче
+  `WITNESS_MIN_S` голосом не проверить — он у соседа, если это не поддакивание. Без этого мелкие
+  кластеры pyannote (20–60 с) забирали целые фразы лектора — «у каждого рода правки свой свидетель».
 - Кусок, отрезанный от реплики, приклеивается к соседней реплике того же голоса: иначе хвост
   «ага» и следующая реплика того же человека стояли бы двумя строками.
 
@@ -33,6 +39,8 @@ OVERLAP_SHORT_S = 3.0  # отрезок не длиннее — «перебив
 # 13 с эфира смешал зрителя и ведущего и отнял у них по слову («Вот, и», «отличное»).
 WEAK_AIR_S = 20.0
 SNAP_WORDS = 3         # насколько далеко граница голоса тянется к концу предложения
+WITNESS_MIN_S = 1.0    # кусок короче голосом не проверить: остаётся соседу (кроме поддакивания)
+CENTROID_MIN_S = 2.0   # куски голоса от этой длины идут в его центроид для свидетеля
 _SENT_END = re.compile(r'[.!?…]["»)\]]*$')
 
 _TOKEN = re.compile(r'[\w-]+', re.UNICODE)
@@ -81,8 +89,11 @@ def _norm(w: str) -> str:
     return ''.join(m)
 
 
-def word_cluster(a: float, b: float, spans) -> str | None:
-    """Кластер диаризации для слова [a, b] — по правилам модуля; None — слово вне отрезков."""
+def word_cluster(a: float, b: float, spans, backchannel: bool = False) -> str | None:
+    """Кластер диаризации для слова [a, b] — по правилам модуля; None — слово вне отрезков.
+
+    `backchannel` — само слово поддакивание: в наложении оно отдаётся короткому отрезку.
+    """
     mid = (a + b) / 2.0
     cover = [s for s in spans if float(s['start']) <= mid <= float(s['end'])]
     if not cover:
@@ -95,13 +106,16 @@ def word_cluster(a: float, b: float, spans) -> str | None:
     if len({s['speaker'] for s in cover}) == 1:
         return cover[0]['speaker']
     shortest = min(cover, key=lambda s: float(s['end']) - float(s['start']))
-    if float(shortest['end']) - float(shortest['start']) <= OVERLAP_SHORT_S:
+    if backchannel and float(shortest['end']) - float(shortest['start']) <= OVERLAP_SHORT_S:
         return shortest['speaker']
-    ov = {}
+    # наибольшее перекрытие; ничья (слово целиком внутри обоих) — долгому отрезку, хозяину
+    best: dict[str, tuple[float, float]] = {}
     for s in cover:
-        o = min(b, float(s['end'])) - max(a, float(s['start']))
-        ov[s['speaker']] = ov.get(s['speaker'], 0.0) + max(o, 0.0)
-    return max(ov, key=ov.get)
+        o = max(min(b, float(s['end'])) - max(a, float(s['start'])), 0.0)
+        ln = float(s['end']) - float(s['start'])
+        prev = best.get(s['speaker'], (0.0, 0.0))
+        best[s['speaker']] = (prev[0] + o, max(prev[1], ln))
+    return max(best, key=lambda k: best[k])
 
 
 def _raw_cuts(text_words: list[str], raw: str, cuts: list[int]) -> list[str]:
@@ -130,8 +144,123 @@ def _raw_cuts(text_words: list[str], raw: str, cuts: list[int]) -> list[str]:
     return [' '.join(raw_words[edges[k]:edges[k + 1]]) for k in range(len(edges) - 1)]
 
 
+SAME_AS = 0.5          # cos с голосом соседа, от которого кусок «звучит как сосед» (своего центроида нет)
+MAX_CENTROID_RUNS = 20
+
+
+def _cos(a, b) -> float:
+    na = sum(x * x for x in a) ** 0.5 or 1e-9
+    nb = sum(x * x for x in b) ** 0.5 or 1e-9
+    return sum(x * y for x, y in zip(a, b)) / (na * nb)
+
+
+def _mean(vs):
+    vs = [v for v in vs if v is not None]
+    if not vs:
+        return None
+    return [sum(c) / len(vs) for c in zip(*vs)]
+
+
+def witnessed(ids: list, toks: list[str], times: list, embed, backchannel=frozenset(),
+              log: list | None = None) -> list:
+    """Проверить каждую смену голоса внутри последовательности вторым свидетелем — голосом.
+
+    Кусок (серия слов одного голоса) с соседями другого голоса: короче WITNESS_MIN_S — отдаётся
+    более длинному соседу (кроме поддакивания); длиннее — сверяется вектором с голосами соседей
+    (центроид — по длинным кускам того же голоса В ЭТОЙ ЖЕ последовательности, БЕЗ проверяемого
+    куска: у мелкого кластера иначе «свой» голос — это сам кусок, и он всегда выигрывал бы).
+    Звучит как сосед не хуже, чем как «свой» голос, — отдаётся соседу. `embed([(t0, t1)])` →
+    векторы (или None); без него — только правило коротких кусков.
+    """
+    ids = list(ids)
+
+    def runs_of(ids):
+        out = []
+        for k, i in enumerate(ids):
+            if out and out[-1][2] == i:
+                out[-1][1] = k + 1
+            else:
+                out.append([k, k + 1, i])
+        return out
+
+    def span(r):
+        return float(times[r[0]][0]), float(times[r[1] - 1][1])
+
+    def dur(r):
+        a, b = span(r)
+        return b - a
+
+    def neighbours(runs, j):
+        return {runs[j - 1][2] if j else None, runs[j + 1][2] if j + 1 < len(runs) else None} - {runs[j][2], None}
+
+    # ⚠️ Порядок: СНАЧАЛА голос по длинным кускам, потом — пересчёт кусков, и только потом правило
+    # коротких. Решения по одной исходной раскладке противоречили друг другу: короткий кусок лектора
+    # между двумя кусками мелкого кластера уходил к нему, а свидетель тут же возвращал соседей лектору.
+    runs = runs_of(ids)
+    queries = [(j, neighbours(runs, j)) for j, r in enumerate(runs)
+               if neighbours(runs, j) and dur(r) >= WITNESS_MIN_S]
+    if queries and embed is not None:
+        ids = _by_voice(ids, runs, queries, span, dur, embed, log)
+    runs = runs_of(ids)
+    for j, r in enumerate(runs):
+        if not neighbours(runs, j) or dur(r) >= WITNESS_MIN_S:
+            continue
+        # Короткий кусок голосом не проверить. Отдаём его соседу, только если он ЗАЖАТ между кусками
+        # одного и того же голоса («некая фишка.» внутри речи лектора): на стыке настоящего диалога
+        # (A, потом B) короткая реплика остаётся за диаризацией.
+        if backchannel and all(_norm(t) in backchannel for t in toks[r[0]:r[1]]):
+            continue
+        left = runs[j - 1][2] if j else None
+        right = runs[j + 1][2] if j + 1 < len(runs) else None
+        if left is None or left != right:
+            continue
+        if log is not None:
+            log.append({'at': round(span(r)[0], 1), 'was': r[2], 'now': left, 'why': 'короткий'})
+        ids[r[0]:r[1]] = [left] * (r[1] - r[0])
+    return ids
+
+
+def _by_voice(ids, runs, queries, span, dur, embed, log):
+    """Свидетель-голос для длинных кусков (см. `witnessed`)."""
+    ids = list(ids)
+    # векторы: проверяемые куски + длинные куски голосов, участвующих в проверках
+    voices = {runs[j][2] for j, _ in queries} | {v for _, c in queries for v in c}
+    long_runs = {}
+    for j, r in enumerate(runs):
+        if r[2] in voices and dur(r) >= CENTROID_MIN_S:
+            long_runs.setdefault(r[2], []).append(j)
+    for v in long_runs:
+        long_runs[v] = sorted(long_runs[v], key=lambda j: -dur(runs[j]))[:MAX_CENTROID_RUNS]
+    need = sorted({j for j, _ in queries} | {j for js in long_runs.values() for j in js})
+    vecs = dict(zip(need, embed([span(runs[j]) for j in need])))
+
+    def centroid(v, without):
+        return _mean([vecs.get(j) for j in long_runs.get(v, []) if j != without])
+
+    for j, cand in queries:
+        r, q = runs[j], vecs.get(j)
+        if q is None:
+            continue
+        own_c = centroid(r[2], j)
+        own = _cos(q, own_c) if own_c is not None else None
+        sc = {v: _cos(q, c) for v in cand if (c := centroid(v, j)) is not None}
+        if not sc:
+            continue
+        best = max(sc, key=sc.get)
+        move = (own is None and sc[best] >= SAME_AS) or (own is not None and sc[best] >= own)
+        if log is not None:
+            log.append({'at': round(span(r)[0], 1), 'was': r[2], 'now': best if move else r[2],
+                        'why': 'голос' if move else 'голос: оставлен', 'neighbour': best,
+                        'cos_own': None if own is None else round(own, 3),
+                        'cos_neighbour': round(sc[best], 3), 'sec': round(dur(r), 1)})
+        if move:
+            ids[r[0]:r[1]] = [best] * (r[1] - r[0])
+    return ids
+
+
 def resplit(out_turns: list[dict], word_turns: list[dict], spans,
-            label_of, pinned=frozenset()) -> tuple[list[dict], list[dict], dict]:
+            label_of, pinned=frozenset(), embed=None,
+            backchannel=frozenset()) -> tuple[list[dict], list[dict], dict]:
     """(реплики артефакта, реплики words-документа) → то же, разрезанное по голосам слов.
 
     `label_of(cluster)` → `(speaker_id, speaker)` — номер голоса и подпись (имя, если есть).
@@ -144,6 +273,8 @@ def resplit(out_turns: list[dict], word_turns: list[dict], spans,
         return out_turns, word_turns, {}
     pieces: list[tuple[dict, dict, bool]] = []  # (реплика, words-реплика, «рождена разрезом»)
     moments, skipped = [], 0
+    witness_log: list[dict] = []
+    backchannel = frozenset(_norm(w) for w in backchannel)
     # 1. Голос каждого слова. Слово без доказанного голоса (вне отрезков, слабый голос) берёт голос
     # СОСЕДНИХ слов своей реплики — сперва слева, потом справа, — и только если голоса нет ни у
     # одного, голос реплики. ⚠️ Не голос реплики сразу: при переносе на выверенный текст подпись
@@ -161,7 +292,8 @@ def resplit(out_turns: list[dict], word_turns: list[dict], spans,
         names.setdefault(own, t.get('speaker') or own)
         labs = []
         for w in words:
-            cl = word_cluster(float(w[1]), float(w[2]), spans)
+            cl = word_cluster(float(w[1]), float(w[2]), spans,
+                              backchannel=bool(backchannel) and _norm(str(w[0])) in backchannel)
             labs.append(label_of(cl) if cl is not None else None)
         for lab in labs:
             if lab:
@@ -192,6 +324,8 @@ def resplit(out_turns: list[dict], word_turns: list[dict], spans,
             # притянутая к концу предложения, отрезала удаляемое правкой слово от остальной правки
             # («дьос ну» уцелело в «Демо» — правка не может сделать реплику пустой).
             where = [(b, k) for b in block for k in range(len(per_ids[b]))]
+            times = [(w[1], w[2]) for b in block for w in word_turns[b]['words']]
+            flat = witnessed(flat, toks, times, embed, backchannel, witness_log)
             for g, key in enumerate(where):
                 if key in pinned and g:
                     flat[g] = flat[g - 1]
@@ -260,8 +394,9 @@ def resplit(out_turns: list[dict], word_turns: list[dict], spans,
         else:
             merged.append(p)
     log = {}
-    if moments or skipped:
+    if moments or skipped or witness_log:
         log = {'n_moved': len(moments), 'n_turns_before': len(out_turns),
                'n_turns_after': len(merged), 'moments': moments[:500],
-               **({'skipped_mismatch': skipped} if skipped else {})}
+               **({'skipped_mismatch': skipped} if skipped else {}),
+               **({'witness': witness_log[:500]} if witness_log else {})}
     return [m[0] for m in merged], [m[1] for m in merged], log

@@ -681,8 +681,18 @@ async def resplit(st: State, d: Deps, ev: Emitter) -> None:
         sid = st.mapping.get(cluster)
         return (sid, st.name_map.get(sid, sid)) if sid else None
 
-    st.out_turns, doc['turns'], rlog = d.resplit_stage.resplit(
-        st.out_turns, doc['turns'], st.spans, label_of)
+    def embed(pairs):
+        # второй свидетель — голос (CAM++): сбой не роняет запись, свидетель просто молчит
+        try:
+            return d.audio_clients.campp_spans(st.wav, [{'start': a, 'end': b} for a, b in pairs])
+        except Exception as error:      # noqa: BLE001
+            log.warning('голоса по словам: свидетель-голос не ответил: %s: %s', type(error).__name__, error)
+            return [None] * len(pairs)
+
+    bc = frozenset(w.strip() for w in (d.cfg.resplit_backchannel or '').split(',') if w.strip())
+    st.out_turns, doc['turns'], rlog = await asyncio.to_thread(
+        lambda: d.resplit_stage.resplit(st.out_turns, doc['turns'], st.spans, label_of,
+                                        embed=embed, backchannel=bc))
     if rlog:
         st.voice_log['resplit'] = rlog
         doc['words_total'] = sum(len(t['words']) for t in doc['turns'])

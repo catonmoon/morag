@@ -27,18 +27,47 @@ def test_backchannel_over_host_speech_goes_to_the_short_span():
     t, w = _turn('Speaker_1', 'Ковалёв', 0.0, 10.0,
                  [('мы', 1.0, 1.3), ('сделали', 1.4, 2.0), ('ага', 4.1, 4.5), ('так', 6.0, 6.3)])
     spans = [{'start': 0.0, 'end': 10.0, 'speaker': 'A'}, {'start': 4.0, 'end': 4.6, 'speaker': 'B'}]
-    out, wout, log = rs.resplit([t], [w], spans, label_of)
+    out, wout, log = rs.resplit([t], [w], spans, label_of, backchannel={'ага'})
     assert [x['speaker_id'] for x in out] == ['Speaker_1', 'Speaker_2', 'Speaker_1']
     assert [x['text'] for x in out] == ['мы сделали', 'ага', 'так']
     assert [len(x['words']) for x in wout] == [2, 1, 1]
     assert log['n_moved'] == 1 and log['moments'][0]['at'] == 4.1
 
 
+def test_host_word_under_a_short_interjection_stays_with_the_host():
+    # кто-то сказал «да» поверх лектора, а whisper записал слово ЛЕКТОРА — оно не уходит перебившему
+    t, w = _turn('Speaker_1', 'Ковалёв', 0.0, 10.0,
+                 [('объясните,', 1.0, 1.6), ('пожалуйста,', 1.7, 2.3), ('мне,', 4.1, 4.5), ('кто', 6.0, 6.3)])
+    spans = [{'start': 0.0, 'end': 10.0, 'speaker': 'A'}, {'start': 4.0, 'end': 4.6, 'speaker': 'B'}]
+    out, _, log = rs.resplit([t], [w], spans, label_of, backchannel={'ага', 'да'})
+    assert len(out) == 1 and log == {}
+
+
+def test_witness_returns_a_run_that_sounds_like_its_neighbour():
+    # мелкий кластер B забрал целую фразу лектора: по голосу она — лектор
+    a_voice, b_voice = [1.0, 0.0], [0.0, 1.0]
+    words = [('раз', 0.0, 1.5), ('два.', 1.6, 3.0), ('Так,', 3.2, 3.6), ('вот', 3.7, 4.0),
+             ('видно.', 4.1, 5.0), ('три', 5.2, 6.5), ('четыре.', 6.6, 8.0)]
+    t, w = _turn('Speaker_1', 'Ковалёв', 0.0, 8.0, words)
+    spans = [{'start': 0.0, 'end': 3.1, 'speaker': 'A'}, {'start': 3.1, 'end': 5.1, 'speaker': 'B'},
+             {'start': 5.1, 'end': 8.0, 'speaker': 'A'}]
+
+    def lecturer(sp):
+        return [a_voice for _ in sp]                       # всё звучит как лектор
+    out, _, log = rs.resplit([t], [w], spans, label_of, embed=lecturer)
+    assert len(out) == 1 and log['witness'][0]['why'] == 'голос'
+
+    def honest(sp):
+        return [b_voice if 3.1 <= a <= 5.1 else a_voice for a, b in sp]   # там и правда другой голос
+    out, _, _ = rs.resplit([t], [w], spans, label_of, embed=honest)
+    assert [x['speaker_id'] for x in out] == ['Speaker_1', 'Speaker_2', 'Speaker_1']
+
+
 def test_tail_of_other_voice_joins_the_next_turn_of_that_voice():
     t1, w1 = _turn('Speaker_1', 'Ковалёв', 0.0, 5.0, [('вопрос', 0.5, 1.0), ('да', 4.2, 4.6)])
     t2, w2 = _turn('Speaker_2', 'Speaker_2', 5.0, 8.0, [('конечно', 5.2, 6.0)])
     spans = [{'start': 0.0, 'end': 4.0, 'speaker': 'A'}, {'start': 4.0, 'end': 8.0, 'speaker': 'B'}]
-    out, wout, _ = rs.resplit([t1, t2], [w1, w2], spans, label_of)
+    out, wout, _ = rs.resplit([t1, t2], [w1, w2], spans, label_of, backchannel={'да'})
     assert [x['text'] for x in out] == ['вопрос', 'да конечно']
     assert out[1]['start'] == 4.2 and [x[0] for x in wout[1]['words']] == ['да', 'конечно']
 
@@ -62,7 +91,7 @@ def test_raw_is_cut_where_the_text_is_cut():
 def test_pinned_words_take_the_voice_on_their_left():
     # «опление» — задвоение на шве, которое правка человека удаляет: своего голоса у него нет
     t, w = _turn('Speaker_1', 'Ковалёв', 0.0, 6.0,
-                 [('отличное', 1.0, 1.5), ('выступление.', 1.6, 2.4), ('опление', 4.1, 4.5)])
+                 [('отличное', 1.0, 1.5), ('выступление.', 1.6, 2.4), ('опление', 4.1, 5.2)])
     spans = [{'start': 0.0, 'end': 3.0, 'speaker': 'A'}, {'start': 4.0, 'end': 5.0, 'speaker': 'B'}]
     out, _, _ = rs.resplit([t], [w], spans, label_of)
     assert [x['speaker_id'] for x in out] == ['Speaker_1', 'Speaker_2']
