@@ -57,6 +57,8 @@ def _discover() -> dict:
         for d in sorted(MODELS_DIR.iterdir()):
             if d.is_dir() and (d / 'weights.safetensors').is_file():
                 found[d.name] = str(d)
+            elif d.is_dir() and (d / 'engine.json').is_file():
+                found[d.name] = str(d)     # другой движок (см. _OTHER_ENGINES), веса в той же папке
     # Дефолты остаются объявленными, даже если веса ещё не скачаны: так у клиента честная
     # ошибка «модели нет на диске», а не «такой модели не бывает».
     for name in ('whisper-podlodka-turbo', 'whisper-large-v3-turbo'):
@@ -65,6 +67,49 @@ def _discover() -> dict:
 
 
 MODELS = _discover()
+
+# --- другие движки: модель другой ШКОЛЫ в роли второго уха (ADR-0030) ---------------------------
+# Папка модели с `engine.json` вместо `weights.safetensors`: {"engine": "gigaam", "name": "v3_e2e_rnnt"}.
+# Зачем: оба уха на whisper ошибаются заодно — декодер whisper продолжает текст как языковая модель
+# и на неразборчивом месте досочиняет гладкое слово. GigaAM (Conformer, RNN-T/CTC, Сбер) выбирает
+# слова по звуку покадрово; замер 2026-10-14 на 368 кусках «Мостика»: как второе ухо в правилах
+# арбитража — то же качество, что whisper-large-v3-russian, при 25 с звука за ~1 с на CPU против ~10 с.
+# torch и gigaam грузятся ЛЕНИВО, только когда такую модель спросили: установка только с whisper
+# не меняется. Ставятся в этот же venv (`pip install gigaam torch`, см. install.sh).
+_GIGA_MAX_S = 24.0          # без длинного режима GigaAM берёт до 25 с (длинный требует pyannote)
+_LOADED: dict = {}
+
+
+def _engine(path: str) -> dict | None:
+    f = Path(path) / 'engine.json'
+    if not f.is_file():
+        return None
+    import json
+    return json.loads(f.read_text())
+
+
+def _gigaam_transcribe(model_dir: str, cfg: dict, wav_path: str) -> str:
+    """Текст куска моделью GigaAM. Кусок длиннее 24 с режется на равные части (концы — по сетке
+    времени; это второе ухо, а не основной проход: слово на шве в худшем случае попадёт в спор)."""
+    import gigaam
+    import soundfile as sf
+    from gigaam.preprocess import SAMPLE_RATE, load_audio
+    key = (model_dir, cfg['name'])
+    if key not in _LOADED:
+        _LOADED[key] = gigaam.load_model(cfg['name'], download_root=model_dir, device=cfg.get('device') or 'cpu')
+    model = _LOADED[key]
+    audio = load_audio(wav_path).numpy()
+    parts = max(1, math.ceil(len(audio) / (_GIGA_MAX_S * SAMPLE_RATE)))
+    step = math.ceil(len(audio) / parts)
+    texts = []
+    for k in range(parts):
+        piece = audio[k * step:(k + 1) * step]
+        if len(piece) < SAMPLE_RATE // 10:
+            continue
+        with tempfile.NamedTemporaryFile(suffix='.wav') as t:
+            sf.write(t.name, piece, SAMPLE_RATE)
+            texts.append(str(model.transcribe(t.name)).strip())
+    return ' '.join(x for x in texts if x)
 DEFAULT_MODEL = 'whisper-podlodka-turbo'
 API_KEY = os.environ.get('TRANSCRIBE_API_KEY')  # опц. Bearer-защита
 
@@ -115,7 +160,8 @@ def health():
 @app.get('/v1/models')
 def models():
     return {'object': 'list',
-            'data': [{'id': m, 'object': 'model', 'owned_by': 'mlx-whisper'} for m in MODELS]}
+            'data': [{'id': m, 'object': 'model', 'owned_by': (_engine(p) or {}).get('engine') or 'mlx-whisper'}
+                     for m, p in MODELS.items()]}
 
 
 @app.post('/v1/audio/transcriptions')
@@ -153,6 +199,23 @@ async def transcribe(
     suffix = Path(file.filename or 'audio').suffix or '.wav'
     tmp = tempfile.mktemp(suffix=suffix)
     Path(tmp).write_bytes(await file.read())
+    engine = _engine(repo)
+    if engine is not None:
+        try:
+            if engine.get('engine') != 'gigaam':
+                raise HTTPException(400, f'движок {engine.get("engine")!r} модели {model!r} не поддержан')
+            text = await asyncio.get_running_loop().run_in_executor(
+                _INFER, lambda: _gigaam_transcribe(repo, engine, tmp))
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+        # Сегментов у второго уха конвейер не читает (только `text`); отдаём один на весь кусок,
+        # чтобы verbose_json оставался того же вида.
+        if response_format == 'text':
+            return text
+        if response_format == 'json':
+            return {'text': text}
+        return {'task': 'transcribe', 'language': language, 'duration': 0.0, 'text': text,
+                'segments': [{'id': 0, 'start': 0.0, 'end': 0.0, 'text': text}] if text else []}
     try:
         kw = dict(path_or_hf_repo=repo, language=language)
         steps = _temperatures(temperature)

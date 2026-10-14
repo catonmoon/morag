@@ -5,6 +5,7 @@
 #   ./fetch-models.sh whisper         # только распознавание
 #   ./fetch-models.sh campp           # только эмбеддер голосов
 #   ./fetch-models.sh pyannote        # только диаризация (нужен HF_TOKEN)
+#   ./fetch-models.sh gigaam          # второе ухо другой школы (GigaAM-v3, не входит в «всё»)
 #   FORCE=1 ./fetch-models.sh         # перекачать даже то, что уже есть
 #
 # Идемпотентно: файл нужного размера повторно не качается.
@@ -13,6 +14,7 @@
 #   whisper  → chukanov/whisper-podlodka-turbo-mlx   (публичный, MLX-конверсия bond005)
 #   CAM++    → релизы sherpa-onnx на GitHub          (публичный)
 #   pyannote → pyannote/*                            (ЧАСТЬЮ gated, нужен HF_TOKEN)
+#   GigaAM   → CDN Сбера через пакет gigaam          (публичный; ставит gigaam+torch в venv whisper)
 #
 # Реестра голосов здесь нет и быть не может: это не модель, а состояние корпуса. Новый корпус
 # начинает с пустого реестра — он заведётся сам при первом прогоне.
@@ -20,10 +22,13 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="${ASR_STACK_ENV:-$HOME/.asr-stack.env}"
-# ⚠️ Вместе с путями отсюда подхватится и HTTPS_PROXY, если он там задан: профиль пишется под
-# LLM-стадии, а качать через него модели обычно медленнее. Не устраивает — запускайте как
-# `env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY ./fetch-models.sh`.
+# ⚠️ Вместе с путями отсюда подхватывается и HTTPS_PROXY: профиль пишется под LLM-стадии
+# (OpenRouter не пускает RU-IP), а модели через него качаются медленно и рвутся. `env -u … ./fetch-models.sh`
+# НЕ помогает — файл подгружается уже внутри скрипта и возвращает прокси (14.10: GigaAM обрывалась на
+# 41 из 450 МБ, без прокси — 50 с целиком). Поэтому после подгрузки прокси снимаем; кому модели
+# нужны именно через прокси — `FETCH_USE_PROXY=1`.
 [[ -f "$ENV_FILE" ]] && { set -a; source "$ENV_FILE"; set +a; }
+[[ -n "${FETCH_USE_PROXY:-}" ]] || unset HTTPS_PROXY HTTP_PROXY ALL_PROXY https_proxy http_proxy all_proxy
 
 STACK_HOME="${ASR_STACK_HOME:-$HOME/asr-stack}"
 MODELS="$STACK_HOME/models"
@@ -97,6 +102,31 @@ fetch_whisper() {
     fetch_file "https://huggingface.co/$repo/resolve/main/$f" "$dir/$f" "  $f" || return 1
   done
   ok "whisper готов: $dir"
+}
+
+# --- GigaAM-v3: второе ухо другой школы (ADR-0030), движок бэкенда transcribe --------------
+# Папка с `engine.json` — бэкенд увидит её именем модели сам (`ASR_SECOND_MODEL=gigaam-v3-e2e-rnnt`).
+# Веса качает пакет gigaam (контрольная сумма проверяется им же) в ту же папку. torch и gigaam
+# ставятся в venv бэкенда: грузятся там только когда спросили модель этого движка.
+fetch_gigaam() {
+  local name="${GIGAAM_MODEL:-v3_e2e_rnnt}"
+  local dir="$MODELS/gigaam-${name//_/-}"
+  local py="${TRANSCRIBE_VENV:-$STACK_HOME/venvs/whisper}/bin/python"
+  [[ -x "$py" ]] || { warn "нет venv бэкенда ($py) — сначала ./install.sh"; return 1; }
+  say "gigaam: $name (~450 МиБ) → $dir"
+  # PyPI держит старую 0.1.0 (без v3 и без TranscriptionResult) — ставим проверенный коммит.
+  "$py" -m pip install --quiet "git+https://github.com/salute-developers/GigaAM@7447938d791c4f3e643386ee22c33777004293a5" torch torchaudio soundfile || return 1
+  mkdir -p "$dir"
+  printf '{"engine": "gigaam", "name": "%s"}\n' "$name" > "$dir/engine.json"
+  # ⚠️ Свой загрузчик пакета (urllib) обрывает 450-мегабайтный файл на середине — дважды из двух
+  # 14.10 (41 МБ, потом «checksum failed»). Качаем сами, с докачкой и сверкой размера; контрольную
+  # сумму потом проверит сам пакет при загрузке.
+  local cdn="https://cdn.chatwm.opensmodel.sberdevices.ru/GigaAM"
+  fetch_file "$cdn/$name.ckpt" "$dir/$name.ckpt" "  $name.ckpt" || return 1
+  fetch_file "$cdn/${name}_tokenizer.model" "$dir/${name}_tokenizer.model" "  токенизатор" || true
+  "$py" -c "import gigaam, sys; gigaam.load_model(sys.argv[1], download_root=sys.argv[2], device='cpu')" \
+        "$name" "$dir" || return 1
+  ok "gigaam готов: $dir"
 }
 
 # --- CAM++: ONNX-сборка 3D-Speaker от проекта sherpa-onnx --------------------
@@ -180,7 +210,8 @@ case "$WHAT" in
   whisper)  fetch_whisper || rc=1 ;;
   campp)    fetch_campp || rc=1 ;;
   pyannote) fetch_pyannote || rc=1 ;;
-  *)        sed -n '2,18p' "$0"; exit 2 ;;
+  gigaam)   fetch_gigaam || rc=1 ;;
+  *)        sed -n '2,20p' "$0"; exit 2 ;;
 esac
 
 echo
