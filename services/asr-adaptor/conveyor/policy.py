@@ -32,6 +32,15 @@ class Policy(Protocol):
 
 # --- правила ------------------------------------------------------------------------------------
 
+def _inflection_only(decisions) -> bool:
+    """Все споры места — одно слово в разной форме или то же звучание (ё/е, латиница/кириллица)."""
+    from stages.arbitrate import inflection, key, sound
+    disputes = [d for d in decisions or () if d.get('by') == 'спорно']
+    return bool(disputes) and all(
+        inflection(key(d['was']), key(d['now'])) or sound(key(d['was'])) == sound(key(d['now']))
+        for d in disputes)
+
+
 class RulePolicy:
     """Правила конвейера как явные шаги. Читает конфиг стадии, ничего не помнит между местами."""
 
@@ -69,6 +78,8 @@ class RulePolicy:
                 and not place.ok('listen', ear='clean')):
             # Третий голос по требованию: только если после второго уха остались споры, не
             # решённые ни правилом, ни свидетелем. Окном, не словом (ADR-0030).
+            if getattr(cfg, 'clean_ear_skip_inflection', False) and _inflection_only(place.decisions):
+                return Finish('apply', 'правила; споры только о форме слова — третий голос не звали')
             return Action('listen', {'ear': 'clean', 'window': cfg.clean_ear_window})
         return Finish('apply', 'правила')
 
