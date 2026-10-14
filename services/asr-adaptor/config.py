@@ -171,6 +171,10 @@ class Config:
     proofread_pad_s: float = field(default_factory=lambda: float(_env('ASR_PROOFREAD_PAD_S', '4')))
     proofread_max_per_min: float = field(default_factory=lambda: float(_env('ASR_PROOFREAD_MAX_PER_MIN', '4')))
     proofread_suspect: str = field(default_factory=lambda: _env('ASR_PROOFREAD_SUSPECT', ''))
+    # Чистое ухо — та же модель, что основной проход, и ошибается заодно с ним: одно оно свидетелем
+    # не считается (контроль молчания 14.10: только clean — 2 верных / 2 порчи, только второе ухо —
+    # 27 / 0, оба — 4 / 0). Включить — для стека без второго уха, осознанно.
+    proofread_clean_alone: bool = field(default_factory=lambda: _flag('ASR_PROOFREAD_CLEAN_ALONE', '0'))
     # С какого косинуса матча реестра имя голоса НЕ перебивается интро. Интро-LLM путает упоминание
     # с представлением (ep2-5: «два часа назад Денис Дергачев рассказывал» → чужое имя ведущему при
     # cos 0.83). 0 — выкл, прежнее «истина = интро». Разумно 0.7: разные люди у CAM++ 0.21-0.50.

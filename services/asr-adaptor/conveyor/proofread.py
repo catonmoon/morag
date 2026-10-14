@@ -327,8 +327,10 @@ async def run_proofread(st, d, ev) -> None:
         now = str(fix['now']).strip().strip('«»"“”')
         row.update(was=was, now=now)
         by = [e for e, txt in ears.items() if heard_supports(A, txt, was, now)[0]]
-        if len(by) < cfg.proofread_min_ears and not latin_known(now, known_latin):
-            row['why'] = 'proofread:no_witness'
+        # Одно чистое ухо — не свидетель: это та же модель, что основной проход (см. config).
+        weak = by == ['clean'] and len(ears_wanted) > 1 and not getattr(cfg, 'proofread_clean_alone', False)
+        if (len(by) < cfg.proofread_min_ears or weak) and not latin_known(now, known_latin):
+            row['why'] = 'proofread:no_witness' if not weak else 'proofread:clean_alone'
             fixes_log.append(row)
             return
         verdicts: list[dict] = []

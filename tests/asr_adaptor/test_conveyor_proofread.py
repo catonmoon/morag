@@ -54,7 +54,7 @@ def _deps(tmp_path: Path, ears: dict, llm, **cfg):
 
     base = dict(corpus_desc='тестовой записи', always_terms=[], round_concurrency=2, whisper_slots=1,
                 second_model='other-ear', proofread=True, proofread_ears='clean,second', proofread_min_ears=1,
-                proofread_pad_s=4.0, proofread_max_per_min=100.0, proofread_suspect='')
+                proofread_pad_s=4.0, proofread_max_per_min=100.0, proofread_suspect='', proofread_clean_alone=False)
     base.update(cfg)
     return SimpleNamespace(cfg=SimpleNamespace(**base), arbitrate_stage=A, apply_fixes=apply_fixes,
                            audio_clients=SimpleNamespace(asr=asr), _slice=slice_,
@@ -91,9 +91,23 @@ async def test_fix_without_witness_is_refused(tmp_path):
     assert [r['why'] for r in st.round_log] == ['proofread:no_witness']
 
 
+async def test_clean_ear_alone_is_not_a_witness(tmp_path):
+    """Контроль молчания 14.10: только whisper без подсказки — 2 верных / 2 порчи, второе ухо — 27 / 0."""
+    llm = FakeLLM({'«материнские оплаты»': {'was': 'оплаты', 'now': 'платы'}})
+    d = _deps(tmp_path, {'clean': 'материнские платы', 'second': 'ничего похожего'}, llm)
+    st = _state(tmp_path)
+    await run_proofread(st, d, Emitter(None, time.monotonic()))
+    assert 'оплаты' in st.turns[0]['final']
+    assert st.round_log[0]['why'] == 'proofread:clean_alone'
+    d = _deps(tmp_path, {'clean': 'материнские платы', 'second': 'ничего похожего'}, llm, proofread_clean_alone=True)
+    st = _state(tmp_path)
+    await run_proofread(st, d, Emitter(None, time.monotonic()))
+    assert 'материнские платы' in st.turns[0]['final']
+
+
 async def test_two_ears_required_when_configured(tmp_path):
     llm = FakeLLM({'«материнские оплаты»': {'was': 'оплаты', 'now': 'платы'}})
-    d = _deps(tmp_path, {'clean': 'материнские платы', 'second': 'ничего похожего'}, llm, proofread_min_ears=2)
+    d = _deps(tmp_path, {'clean': 'ничего похожего', 'second': 'материнские платы'}, llm, proofread_min_ears=2)
     st = _state(tmp_path)
     await run_proofread(st, d, Emitter(None, time.monotonic()))
     assert 'оплаты' in st.turns[0]['final']
