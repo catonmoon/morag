@@ -35,6 +35,7 @@ _TR = {'a': 'а', 'b': 'б', 'c': 'к', 'd': 'д', 'e': 'е', 'f': 'ф', 'g': '�
        'j': 'дж', 'k': 'к', 'l': 'л', 'm': 'м', 'n': 'н', 'o': 'о', 'p': 'п', 'q': 'к', 'r': 'р',
        's': 'с', 't': 'т', 'u': 'у', 'v': 'в', 'w': 'в', 'x': 'кс', 'y': 'и', 'z': 'з'}
 _SPLIT = re.compile(r'^(\W*)(.*?)(\W*)$', re.U)
+_LATIN = re.compile(r'[A-Za-z]')
 
 
 def key(token: str) -> str:
@@ -146,7 +147,7 @@ def _map(a_keys: list[str], b_tokens: list[str], b_keys: list[str]) -> dict[int,
 
 def arbitrate(raw: str, second: str, clean: str | None, canon: set[str], *, lang: str = 'ru',
               ratio: float = RATIO, common: float = COMMON,
-              vote_words_only: bool = False) -> tuple[str, list[dict]]:
+              vote_words_only: bool = False, latin_guard: bool = False) -> tuple[str, list[dict]]:
     """Разобрать расхождения куска со вторым ухом. Возвращает (новый текст, решения).
 
     Решение: `{i, was, now, by}`; `by` ∈ частота · канон · голосование, а отклонённое большинство
@@ -194,6 +195,14 @@ def arbitrate(raw: str, second: str, clean: str | None, canon: set[str], *, lang
                     continue
                 by = 'голосование'
             heard3 = {'clean': clean_at[i]} if i in clean_at else {}   # вариант третьего голоса — в журнал
+            if by and latin_guard and _LATIN.search(kw) and not _LATIN.search(kn):
+                # ⚠️ Ухо, которое пишет термины кириллицей (GigaAM, Parakeet), не вправе заменить
+                # латинское слово куска: латиницу кусок взял из подсказки, а «вел» вместо NovelAI или
+                # Cloud вместо cloaked — не починка. Замер на местах Димы (2026-10-14): поломки этого
+                # рода давало именно второе ухо другой школы.
+                decisions.append({'i': i, 'was': was, 'now': now, 'by': 'вето', 'taken': False,
+                                  'why': 'латиница', **heard3})
+                continue
             if by is None:
                 # Спор, который не решили ни правило, ни свидетель. В журнал — «спорно»: агент не
                 # имеет права выбирать по вкусу, но и молчать о споре не должен; по этой пометке
@@ -206,9 +215,10 @@ def arbitrate(raw: str, second: str, clean: str | None, canon: set[str], *, lang
 
 
 def apply(chunk: dict, second: str, clean: str | None, canon: set[str], *, lang: str = 'ru',
-          ratio: float = RATIO) -> list[dict]:
+          ratio: float = RATIO, latin_guard: bool = False) -> list[dict]:
     """Разобрать кусок и положить принятое в него: `raw`, тексты сегментов, слова декодера."""
-    new_raw, decisions = arbitrate(chunk.get('raw') or '', second, clean, canon, lang=lang, ratio=ratio)
+    new_raw, decisions = arbitrate(chunk.get('raw') or '', second, clean, canon, lang=lang, ratio=ratio,
+                                   latin_guard=latin_guard)
     taken = [d for d in decisions if d.get('taken')]
     if not taken:
         return decisions

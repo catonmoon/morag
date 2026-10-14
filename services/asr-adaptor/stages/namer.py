@@ -35,7 +35,9 @@ _SYS = (
 _GUESTS_SYS = (
     f'Тебе дано НАЧАЛО {_CORPUS_SLOT}. Ведущие представляются сами и представляют ГОСТЕЙ («сегодня с нами…», '
     '«у нас в гостях…», «затащить в гости…»). Перечисли ТОЛЬКО гостей — людей, которых представили, '
-    'но которые не являются ведущими. Полное Имя Фамилия в именительном падеже («Валеру Бабушкина» → '
+    'но которые не являются ведущими. Человек, которого только ОБСУЖДАЮТ (герой новости, автор статьи '
+    'или поста, чьё-то мнение), — НЕ гость: гость присутствует и участвует в разговоре. '
+    'Полное Имя Фамилия в именительном падеже («Валеру Бабушкина» → '
     '«Валерий Бабушкин»), правь очевидный ASR-гарбл фамилии. Никого не представили — пустой список. '
     'Верни СТРОГО JSON {"guests": ["Имя Фамилия", …]} без иного текста.'
 )
@@ -57,7 +59,9 @@ _SCHEMA = {
 
 
 def _norm(s: str) -> str:
-    return re.sub(r'[^0-9a-zа-яё]', '', (s or '').lower())
+    # ё → е: ASR и люди пишут «Натекин», реестр — «Натёкин»; без свёртки имя «не звучит» в интро
+    # и реестр не подтверждается (ep1-5: ведущий стал «Леша Натекин» через false_voice_match).
+    return re.sub(r'[^0-9a-zа-я]', '', (s or '').lower().replace('ё', 'е'))
 
 
 def _name_in_intro(name: str, intro_norm: str) -> bool:
@@ -72,9 +76,13 @@ def _name_in_intro(name: str, intro_norm: str) -> bool:
 
 async def name_speakers(turns: list[dict], registry_names: dict, llm,
                         intro_turns: int = 12, max_tokens: int = 400,
-                        corpus_desc: str = DEFAULT_CORPUS) -> tuple[dict, list]:
+                        corpus_desc: str = DEFAULT_CORPUS,
+                        voice_cos: dict | None = None, trust_cos: float = 0.0) -> tuple[dict, list]:
     """turns (со `speaker`=Speaker_N) + registry_names {Speaker_N: имя} → ({Speaker_N: итоговое_имя},
-    конфликты). Итоговое имя = интро (истина) → реестр (fallback) → Speaker_N (не назван)."""
+    конфликты). Итоговое имя = интро (истина) → реестр (fallback) → Speaker_N (не назван).
+
+    `voice_cos` {Speaker_N: косинус матча реестра} + `trust_cos` > 0 — уверенный голос интро не
+    перебивает (см. ветку `strong_voice_match`). `trust_cos=0` — прежнее поведение."""
     present = sorted({t['speaker'] for t in turns}, key=lambda s: int(s.split('_')[1]))
     intro = '\n'.join(f"[{t['speaker']}] {t.get('final', t.get('text', ''))}"
                       for t in turns[:intro_turns])
@@ -121,16 +129,28 @@ async def name_speakers(turns: list[dict], registry_names: dict, llm,
         if key and len(cand) > len(by_surname.get(key, '')):
             by_surname[key] = cand
     guests = list(by_surname.values())
+    hosts = {sid for sid in present
+             if registry_names.get(sid) and _name_in_intro(registry_names[sid], intro_norm)}
+    # Метке выдано имя ДРУГОГО подтверждённого ведущего — это своп атрибуции, а не имя. Такую запись
+    # снимаем ДО исключения: иначе она занимает метку, и гость остаётся без голоса. Поймано на
+    # ep2-20: гость Бабушкин сматчен с Натёкиным на пороге (0.566), интро-LLM назвала его
+    # «Дмитрием Колодезевым» → метка «занята» → 3989 слов гостя ушли под имя Натёкина.
+    host_by_name = {_norm(registry_names[h]): h for h in hosts}
+    swapped = []
+    for sid, nm in list(intro_map.items()):
+        owner = host_by_name.get(_norm(nm))
+        if owner and owner != sid:
+            del intro_map[sid]
+            swapped.append({'speaker': sid, 'intro': nm, 'registry': registry_names.get(sid),
+                            'resolution': 'ignored_intro', 'reason': 'label_swap'})
     if len(guests) == 1:
-        hosts = {sid for sid in present
-                 if registry_names.get(sid) and _name_in_intro(registry_names[sid], intro_norm)}
         free = [sid for sid in present if sid not in hosts and sid not in intro_map]
         if len(free) == 1 and _name_in_intro(guests[0], intro_norm):
             intro_map.setdefault(free[0], guests[0])
     # имена известных присутствующих спикеров — для детекта свопа меток
     reg_present_norm = {_norm(registry_names[s]): s for s in present if registry_names.get(s)}
 
-    out, conflicts = {}, []
+    out, conflicts = {}, swapped
     for sid in present:
         intro_name = intro_map.get(sid)
         reg_name = registry_names.get(sid)
@@ -147,6 +167,16 @@ async def name_speakers(turns: list[dict], registry_names: dict, llm,
             out[sid] = reg_name
             conflicts.append({'speaker': sid, 'intro': intro_name, 'registry': reg_name,
                               'resolution': 'kept_registry', 'reason': 'label_swap'})
+        elif conflict and trust_cos and (voice_cos or {}).get(sid, 0.0) >= trust_cos:
+            # Голос узнан уверенно — интро-LLM, скорее, приняла УПОМИНАНИЕ за представление.
+            # Поймано на ep2-5: Колодезев (cos 0.83) говорит «два часа назад Денис Дергачев
+            # рассказывал…», своего имени в первых репликах не звучит — и 1860 его слов уехали под
+            # чужое имя. Ложный матч, ради которого заведена следующая ветка (ep18), был на пороге
+            # 0.55; замеры CAM++: разные люди 0.21-0.50, один человек ~0.8.
+            out[sid] = reg_name
+            conflicts.append({'speaker': sid, 'intro': intro_name, 'registry': reg_name,
+                              'resolution': 'kept_registry', 'reason': 'strong_voice_match',
+                              'cos': round(float(voice_cos[sid]), 3)})
         elif conflict:
             # реестр НЕ подтверждён интро, интро называет иного человека → ложный voice-матч, истина = интро
             out[sid] = intro_name

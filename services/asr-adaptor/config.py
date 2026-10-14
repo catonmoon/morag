@@ -10,6 +10,7 @@ OFF обязателен, иначе loop на structured). Ключ — env `OR
 """
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 
@@ -157,6 +158,10 @@ class Config:
     # человека — не та вещь, которую движок вправе угадывать молча, поэтому по умолчанию имён не
     # ищем вовсе; кому наминг подходит — включает `ASR_ENABLE_NAMING=1` осознанно.
     enable_naming: bool = field(default_factory=lambda: _flag('ASR_ENABLE_NAMING', '0'))
+    # С какого косинуса матча реестра имя голоса НЕ перебивается интро. Интро-LLM путает упоминание
+    # с представлением (ep2-5: «два часа назад Денис Дергачев рассказывал» → чужое имя ведущему при
+    # cos 0.83). 0 — выкл, прежнее «истина = интро». Разумно 0.7: разные люди у CAM++ 0.21-0.50.
+    naming_trust_cos: float = field(default_factory=lambda: float(_env('ASR_NAMING_TRUST_COS', '0')))
 
     # --- покрытие звука расшифровкой (потери речи, см. stages/coverage.py) ---
     # hole_min_s — с какой длины считать непокрытый промежуток дырой (и добирать его чанками);
@@ -193,6 +198,10 @@ class Config:
     # «везде» при ≈ 30 % экономии прохода; одна короткая LLM-проверка на кусок.
     arbitrate_gate: str = field(default_factory=lambda: _env('ASR_ARBITRATE_GATE', '').strip().lower())
     arbitrate_ratio: float = field(default_factory=lambda: float(_env('ASR_ARBITRATE_RATIO', '100')))
+    # Страж латиницы: правило арбитража не заменяет слово куска с латиницей словом без неё. Нужен
+    # второму уху ДРУГОЙ школы, пишущему термины кириллицей (GigaAM, Parakeet): иначе «NovelAI»→«вел»,
+    # «cloaked»→«Cloud». Замер 2026-10-14 на 410 местах «Мостика»: −1…−2 поломки при тех же починках.
+    arbitrate_latin_guard: bool = field(default_factory=lambda: _flag('ASR_ARBITRATE_LATIN_GUARD', '0'))
 
     # Параллельность финал-раунда: реплики независимы, а стадия занимала 8-12 мин из 15-18 на
     # выпуск. Потолок скромный — упирается не в нас, а в лимиты провайдера.
@@ -272,6 +281,15 @@ class Config:
     llm_repetition_penalty: float = field(
         default_factory=lambda: float(_env('ASR_LLM_REPETITION_PENALTY') or 0) or None)
 
+    # Выбор провайдера OpenRouter для LLM-стадий — JSON объекта `provider` (`{"ignore": [...]}`,
+    # `{"order": [...], "allow_fallbacks": true}`). Одна модель у разных провайдеров ведёт себя
+    # по-разному. Замер 2026-10-14, deepseek-v4-flash, глоссарий черновика 1-6, по очереди:
+    # любые провайдеры — 1225 с, 32 обрезанных ответа (петля одного термина до потолка токенов),
+    # 4 потерянных батча; без StreamLake/AtlasCloud/OpenInference — 49 с, 0, 0. AtlasCloud к тому
+    # же игнорирует выключенный reasoning. Ни штраф за частоту, ни температура петлю не снимали.
+    # Свойство эндпоинта, а не корпуса: место ему в машинном env. Пусто — не шлём.
+    llm_provider: dict = field(default_factory=lambda: json.loads(_env('ASR_LLM_PROVIDER') or '{}'))
+
     def build_llm(self) -> 'RetryingLLM':
         """morag LLMClient + прикладной RetryPolicy. SDK-ретраи (max_retries) закрывают транспорт,
         политика поверх — битый JSON деген-петель и спайки; max_concurrent — общий потолок
@@ -280,7 +298,8 @@ class Config:
                            enable_thinking=_enable_thinking(), timeout=180, max_retries=4,
                            max_concurrent=self.llm_max_concurrent,
                            model_wait_seconds=self.llm_model_wait_s,
-                           model_wait_retries=self.llm_model_wait_retries)
+                           model_wait_retries=self.llm_model_wait_retries,
+                           **({'extra_body': {'provider': self.llm_provider}} if self.llm_provider else {}))
         policy = RetryPolicy(max_retries=max(0, self.llm_attempts - 1),
                              delay=self.llm_retry_delay, backoff=1.0)
         return RetryingLLM(client, policy, self.llm_repetition_penalty)

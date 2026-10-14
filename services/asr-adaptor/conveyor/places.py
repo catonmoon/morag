@@ -72,7 +72,8 @@ def arbitrate_tools(place: Place, d, slices: Slices, *, journal: list, meter: di
             raise ToolError('нечего разбирать: сначала послушай вторым ухом', hint='listen(ear="second")')
         clean = (place.heard.get('clean') or {}).get('text')
         text, decisions = A.arbitrate(c.get('raw') or '', second['text'], clean, place.canon,
-                                      ratio=cfg.arbitrate_ratio)
+                                      ratio=cfg.arbitrate_ratio,
+                                      **({'latin_guard': True} if cfg.arbitrate_latin_guard else {}))
         place.decisions = decisions
         return {'text': text, 'decisions': decisions,
                 'disputes': sum(1 for x in decisions if x.get('by') == 'спорно'),
@@ -83,7 +84,8 @@ def arbitrate_tools(place: Place, d, slices: Slices, *, journal: list, meter: di
         if second is None:
             raise ToolError('нечего применять: второе ухо не слушали', hint='listen(ear="second")')
         clean = (place.heard.get('clean') or {}).get('text')
-        decisions = A.apply(c, second['text'], clean, place.canon, ratio=cfg.arbitrate_ratio)
+        decisions = A.apply(c, second['text'], clean, place.canon, ratio=cfg.arbitrate_ratio,
+                            **({'latin_guard': True} if cfg.arbitrate_latin_guard else {}))
         return {'decisions': decisions, 'taken': sum(1 for x in decisions if x.get('taken'))}
 
     async def finish(decision: str, why: str = '') -> dict:

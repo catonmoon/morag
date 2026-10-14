@@ -527,7 +527,7 @@ async def speakers(st: State, d: Deps, ev: Emitter) -> None:
     await d._wait_turn(st.ticket)  # реестр — строго в порядке поступления выпусков
     async with d._res('campp', cfg.campp_slots):
         st.cents, st.air = await asyncio.to_thread(d.audio_clients.campp, st.wav, st.spans)
-    decided: list[dict] | None = [] if (ev.enabled or cfg.record_guard) else None
+    decided: list[dict] | None = [] if (ev.enabled or cfg.record_guard or cfg.naming_trust_cos) else None
     # ⚠️ Ключ передаётся ТОЛЬКО когда включён: заглушки реестра в тестах — прежней сигнатуры.
     guard = {'record_guard': True} if cfg.record_guard else {}
     st.mapping = await asyncio.to_thread(
@@ -538,6 +538,10 @@ async def speakers(st: State, d: Deps, ev: Emitter) -> None:
     # понять, почему два ведущих вышли одним голосом или разошлись.
     if cfg.record_guard and decided:
         st.voice_log['registry'] = decided
+    # Уверенность матча по метке — наминг по ней решает, перебивать ли голос именем из интро.
+    for x in decided or ():
+        if x['action'] == 'matched':
+            st.voice_cos[x['label']] = max(x['cos'], st.voice_cos.get(x['label'], 0.0))
     if decided:
         xy = d._project(st.cents)
         for x in decided:
@@ -559,7 +563,9 @@ async def naming(st: State, d: Deps, ev: Emitter) -> None:
     ev.stage('naming')
     _t = time.monotonic()
     st.name_map, st.name_conflicts = await d.name_speakers(
-        st.turns, d.registry.names(cfg.registry_path), d.llm, corpus_desc=cfg.corpus_desc)
+        st.turns, d.registry.names(cfg.registry_path), d.llm, corpus_desc=cfg.corpus_desc,
+        # ⚠️ Только когда включено: заглушки наминга в тестах — прежней сигнатуры.
+        **({'voice_cos': st.voice_cos, 'trust_cos': cfg.naming_trust_cos} if cfg.naming_trust_cos else {}))
     st.tm['naming_s'] = round(time.monotonic() - _t, 1)
     ev.stage_done('naming', st.tm['naming_s'], n=len(st.name_map))
 
