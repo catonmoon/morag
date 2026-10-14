@@ -250,7 +250,8 @@ def _invents_name(was: str, now: str, spoken: set) -> bool:
 
 
 def apply_fixes(text: str, fixes, canonicals=(), always=(), log_to=None,
-                protect=()) -> tuple[str, int, int]:
+                protect=(), max_was_words: int = MAX_WAS_WORDS,
+                max_now_words: int = MAX_NOW_WORDS) -> tuple[str, int, int]:
     """Применить замены к тексту ДЕТЕРМИНИРОВАННО. Возвращает (текст, применено, отброшено).
 
     `log_to` — необязательный список, в который складывается ВЕРДИКТ по каждой замене
@@ -300,7 +301,9 @@ def apply_fixes(text: str, fixes, canonicals=(), always=(), log_to=None,
             verdict(was, now, False, 'empty')
             skipped += 1
             continue
-        if len(was.split()) > MAX_WAS_WORDS or len(now.split()) > MAX_NOW_WORDS or len(now) > 60:
+        # Лимиты — параметры: финал-раунд держит 3/6 (ADR-0020), корректор со свидетелем-ухом другой
+        # школы — до 6/8 (14.10: 40 правок по 4-6 слов, по слуху владельца 0 порч, 23 верных).
+        if len(was.split()) > max_was_words or len(now.split()) > max_now_words or len(now) > 60 + 10 * max(0, max_now_words - MAX_NOW_WORDS):
             log.warning('final-round: замена отброшена (слишком длинная): %r → %r', was, now)
             verdict(was, now, False, 'too_long')
             skipped += 1

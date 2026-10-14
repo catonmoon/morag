@@ -334,8 +334,10 @@ async def run_proofread(st, d, ev) -> None:
             fixes_log.append(row)
             return
         verdicts: list[dict] = []
+        max_was = int(getattr(cfg, 'proofread_max_was_words', 3) or 3)
         new_text, applied, _skipped = d.apply_fixes(turn['final'], [{'was': was, 'now': now}], known_list,
-                                                   cfg.always_terms, log_to=verdicts, protect=st.known)
+                                                   cfg.always_terms, log_to=verdicts, protect=st.known,
+                                                   **({'max_was_words': max_was, 'max_now_words': max_was + 2} if max_was != 3 else {}))
         if not applied:
             row['why'] = 'proofread:' + ((verdicts[0].get('why') if verdicts else '') or 'rejected')
             fixes_log.append(row)

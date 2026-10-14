@@ -54,7 +54,8 @@ def _deps(tmp_path: Path, ears: dict, llm, **cfg):
 
     base = dict(corpus_desc='тестовой записи', always_terms=[], round_concurrency=2, whisper_slots=1,
                 second_model='other-ear', proofread=True, proofread_ears='clean,second', proofread_min_ears=1,
-                proofread_pad_s=4.0, proofread_max_per_min=100.0, proofread_suspect='', proofread_clean_alone=False)
+                proofread_pad_s=4.0, proofread_max_per_min=100.0, proofread_suspect='', proofread_clean_alone=False,
+                proofread_max_was_words=3)
     base.update(cfg)
     return SimpleNamespace(cfg=SimpleNamespace(**base), arbitrate_stage=A, apply_fixes=apply_fixes,
                            audio_clients=SimpleNamespace(asr=asr), _slice=slice_,
@@ -123,6 +124,19 @@ async def test_suspect_word_stays_when_ears_hear_it_too(tmp_path):
     assert st.turns[1]['final'] == 'Ну блин, это сильно, да.'
     flagged = [r for r in st.round_log if r['quote'].startswith('блин')]
     assert flagged and flagged[0]['why'] == 'proofread:not_error'
+
+
+async def test_long_replacement_needs_the_raised_limit(tmp_path):
+    """40 правок по 4-6 слов — 0 порч по слуху владельца (14.10); в движке лимит 3, профиль поднимает до 6."""
+    fix = {'was': 'редко материнские оплаты такого', 'now': 'редко материнские платы такого'}
+    for limit, expect in ((3, 'оплаты'), (6, 'материнские платы')):
+        llm = FakeLLM({'«материнские оплаты»': fix})
+        d = _deps(tmp_path, {'clean': 'ничего', 'second': 'редко материнские платы такого класса'}, llm,
+                  proofread_max_was_words=limit)
+        st = _state(tmp_path)
+        await run_proofread(st, d, Emitter(None, time.monotonic()))
+        assert expect in st.turns[0]['final']
+    assert any(r['why'] == 'proofread:too_long' for r in st.round_log) is False   # при 6 — принято
 
 
 def test_locate_and_time_fall_back_to_token_share():
