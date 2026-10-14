@@ -412,6 +412,11 @@ async def editor(st: State, d: Deps, ev: Emitter) -> None:
     await run_editor(st, d, ev)
 
 
+async def proofread(st: State, d: Deps, ev: Emitter) -> None:
+    from conveyor.proofread import run_proofread
+    await run_proofread(st, d, ev)
+
+
 async def final_round(st: State, d: Deps, ev: Emitter) -> None:
     if editor_on(d.cfg, st):
         # Правку текста делает редактор ПОСЛЕ голосов (он видит, кто говорит); здесь — только
@@ -729,6 +734,7 @@ NODES: list[tuple[str, object, object]] = [
     ('recover', recover, lambda cfg, st: bool(cfg.recover_speakers)),
     ('turns', turns, None),
     ('final_round', final_round, None),
+    ('proofread', proofread, lambda cfg, st: bool(cfg.proofread)),
     ('speakers', speakers, None),
     ('naming', naming, lambda cfg, st: bool(cfg.enable_naming)),
     ('editor', editor, lambda cfg, st: editor_on(cfg, st)),

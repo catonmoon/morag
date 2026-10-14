@@ -158,6 +158,19 @@ class Config:
     # человека — не та вещь, которую движок вправе угадывать молча, поэтому по умолчанию имён не
     # ищем вовсе; кому наминг подходит — включает `ASR_ENABLE_NAMING=1` осознанно.
     enable_naming: bool = field(default_factory=lambda: _flag('ASR_ENABLE_NAMING', '0'))
+
+    # --- корректор после распознавания (conveyor/proofread.py, ADR-0032): детектор по тексту + решатель
+    # со звуком. По умолчанию ВЫКЛ. Уши решателя: clean (основная модель без подсказки), second (ASR_SECOND_MODEL).
+    # min_ears — сколько ушей должны слышать замену (по слуху владельца Мостика: 1 ухо — 26/29 верных,
+    # 2 уха — 13/13); латиница из известных написаний проходит без уха. pad — окно ±с вокруг места.
+    # max_per_min — бюджет пометок на минуту звука (детектор даёт ~2/мин, половина шум).
+    # suspect — корни подозрительных слов через запятую (брань в деловой записи): доменная настройка профиля.
+    proofread: bool = field(default_factory=lambda: _flag('ASR_PROOFREAD', '0'))
+    proofread_ears: str = field(default_factory=lambda: _env('ASR_PROOFREAD_EARS', 'clean,second'))
+    proofread_min_ears: int = field(default_factory=lambda: int(_env('ASR_PROOFREAD_MIN_EARS', '1')))
+    proofread_pad_s: float = field(default_factory=lambda: float(_env('ASR_PROOFREAD_PAD_S', '4')))
+    proofread_max_per_min: float = field(default_factory=lambda: float(_env('ASR_PROOFREAD_MAX_PER_MIN', '4')))
+    proofread_suspect: str = field(default_factory=lambda: _env('ASR_PROOFREAD_SUSPECT', ''))
     # С какого косинуса матча реестра имя голоса НЕ перебивается интро. Интро-LLM путает упоминание
     # с представлением (ep2-5: «два часа назад Денис Дергачев рассказывал» → чужое имя ведущему при
     # cos 0.83). 0 — выкл, прежнее «истина = интро». Разумно 0.7: разные люди у CAM++ 0.21-0.50.
