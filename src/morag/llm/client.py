@@ -174,6 +174,7 @@ class LLMClient:
         enable_thinking: bool | None = None,
         seed: int | None = 42,
         context_window: int = 32768,
+        extra_body: dict | None = None,
     ) -> None:
         self._client = AsyncOpenAI(
             base_url=base_url, api_key=api_key,
@@ -187,6 +188,12 @@ class LLMClient:
         self._default_enable_thinking = enable_thinking
         self._default_seed = seed
         self._context_window = context_window
+        # Постоянная добавка к телу КАЖДОГО запроса — то, что знает эндпоинт, а не вызов. Ради неё
+        # заведено: OpenRouter раздаёт одну модель разным провайдерам, и они ведут себя по-разному
+        # (замер 2026-10-14 на deepseek-v4-flash: StreamLake зацикливал structured output в 13 из
+        # 32 ответов, Baidu — 0 из 37; AtlasCloud игнорировал выключенный reasoning). Выбор
+        # провайдера (`{"provider": {"ignore": [...]}}`) — настройка эндпоинта, её и кладут сюда.
+        self._extra_body = dict(extra_body or {})
 
     @property
     def context_window(self) -> int:
@@ -305,7 +312,7 @@ class LLMClient:
         )
         if params.seed is not None:
             kwargs['seed'] = params.seed
-        extra_body = _build_extra_body(params)
+        extra_body = {**self._extra_body, **(_build_extra_body(params) or {})} or None
         if extra_body:
             kwargs['extra_body'] = extra_body
         if max_tokens is not None:
@@ -340,7 +347,7 @@ class LLMClient:
         )
         if params.seed is not None:
             kwargs['seed'] = params.seed
-        extra_body = _build_extra_body(params)
+        extra_body = {**self._extra_body, **(_build_extra_body(params) or {})} or None
         if extra_body:
             kwargs['extra_body'] = extra_body
         if max_tokens is not None:
@@ -397,7 +404,7 @@ class LLMClient:
         )
         if params.seed is not None:
             kwargs['seed'] = params.seed
-        extra_body = _build_extra_body(params)
+        extra_body = {**self._extra_body, **(_build_extra_body(params) or {})} or None
         if extra_body:
             kwargs['extra_body'] = extra_body
         if max_tokens is not None:
@@ -472,7 +479,7 @@ class LLMClient:
         )
         if params.seed is not None:
             kwargs['seed'] = params.seed
-        extra_body = _build_extra_body(params)
+        extra_body = {**self._extra_body, **(_build_extra_body(params) or {})} or None
         if extra_body:
             kwargs['extra_body'] = extra_body
         if max_tokens is not None:
@@ -507,7 +514,7 @@ class LLMClient:
         )
         if params.seed is not None:
             kwargs['seed'] = params.seed
-        extra_body = _build_extra_body(params)
+        extra_body = {**self._extra_body, **(_build_extra_body(params) or {})} or None
         if extra_body:
             kwargs['extra_body'] = extra_body
         if max_tokens is not None:

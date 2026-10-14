@@ -559,3 +559,30 @@ class TestDefaultSeed:
         await client.complete_vision('describe', 'b64', 'image/png')
         call_kwargs = mock_openai.chat.completions.create.call_args.kwargs
         assert call_kwargs.get('seed') == 42
+
+
+class TestStaticExtraBody:
+    """Постоянная добавка к телу запроса — настройка эндпоинта (выбор провайдера OpenRouter)."""
+
+    PROVIDER = {'provider': {'ignore': ['StreamLake']}}
+
+    async def test_goes_into_every_kind_of_call(self, mock_openai):
+        client = LLMClient(base_url='http://test', model='m', extra_body=self.PROVIDER)
+        mock_openai.chat.completions.create.return_value = make_completion('{"a": 1}')
+        await client.complete([{'role': 'user', 'content': 'hi'}])
+        await client.complete_json([{'role': 'user', 'content': 'hi'}], schema={'type': 'object'})
+        for call in mock_openai.chat.completions.create.call_args_list:
+            assert call.kwargs['extra_body']['provider'] == {'ignore': ['StreamLake']}
+
+    async def test_merges_with_thinking_flags(self, mock_openai):
+        client = LLMClient(base_url='http://test', model='m', enable_thinking=False, extra_body=self.PROVIDER)
+        mock_openai.chat.completions.create.return_value = make_completion('ok')
+        await client.complete([{'role': 'user', 'content': 'hi'}])
+        extra = mock_openai.chat.completions.create.call_args.kwargs['extra_body']
+        assert extra['provider'] == {'ignore': ['StreamLake']}
+        assert extra['reasoning'] == {'effort': 'none'}
+
+    async def test_absent_by_default(self, client, mock_openai):
+        mock_openai.chat.completions.create.return_value = make_completion('ok')
+        await client.complete([{'role': 'user', 'content': 'hi'}])
+        assert 'extra_body' not in mock_openai.chat.completions.create.call_args.kwargs
