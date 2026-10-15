@@ -191,6 +191,12 @@ class Config:
     # у слушателя, иначе у ушей лишь со вторым ухом. Мостик, слух владельца на 728 местах: уши 95%, слушатель со
     # стражем 94%, маршрут 111 верных / 4 порчи (97%) при 312 правках. Пусто — один решатель, как раньше.
     proofread_route: str = field(default_factory=lambda: _env('ASR_PROOFREAD_ROUTE', ''))
+    # Ухо `omni` корректора (ASR_PROOFREAD_EARS=…,omni): аудио-LLM как распознаватель — дословная расшифровка окна
+    # через OpenAI-совместимый чат со звуком (локальный oMLX и т.п.). Мостик, 15.10: Qwen3-Omni-30B 8bit третьим ухом
+    # под решателем — 160 правок, 96% против 150, 95% у двух ушей. Адрес и ключ — свои (по умолчанию как у LLM стадий).
+    proofread_omni_model: str = field(default_factory=lambda: _env('ASR_PROOFREAD_OMNI_MODEL', ''))
+    proofread_omni_base_url: str = field(default_factory=lambda: _env('ASR_PROOFREAD_OMNI_BASE_URL', ''))
+    proofread_omni_key: str = field(default_factory=lambda: _env('ASR_PROOFREAD_OMNI_KEY', ''))
     # С какого косинуса матча реестра имя голоса НЕ перебивается интро. Интро-LLM путает упоминание
     # с представлением (ep2-5: «два часа назад Денис Дергачев рассказывал» → чужое имя ведущему при
     # cos 0.83). 0 — выкл, прежнее «истина = интро». Разумно 0.7: разные люди у CAM++ 0.21-0.50.
@@ -327,15 +333,18 @@ class Config:
     # Свойство эндпоинта, а не корпуса: место ему в машинном env. Пусто — не шлём.
     llm_provider: dict = field(default_factory=lambda: json.loads(_env('ASR_LLM_PROVIDER') or '{}'))
 
-    def build_llm(self, model: str | None = None) -> 'RetryingLLM':
+    def build_llm(self, model: str | None = None, base_url: str | None = None,
+                  api_key: str | None = None) -> 'RetryingLLM':
         """morag LLMClient + прикладной RetryPolicy. SDK-ретраи (max_retries) закрывают транспорт,
         политика поверх — битый JSON деген-петель и спайки; max_concurrent — общий потолок
         одновременных вызовов через реестр семафоров ядра (важен при ASR_MAX_JOBS > 1).
 
         `model` — другая модель на том же ключе (слушатель корректора): без рассуждений и без
-        маршрутизации провайдеров основной модели (у неё свои провайдеры)."""
-        other = bool(model) and model != self.llm_model
-        client = LLMClient(base_url=self.llm_base_url, model=model or self.llm_model, api_key=self.llm_key,
+        маршрутизации провайдеров основной модели (у неё свои провайдеры). `base_url`/`api_key` — другой сервер
+        (локальное ухо omni)."""
+        other = bool(model) and model != self.llm_model or bool(base_url)
+        client = LLMClient(base_url=base_url or self.llm_base_url, model=model or self.llm_model,
+                           api_key=api_key or self.llm_key,
                            enable_thinking=False if other else _enable_thinking(), timeout=180, max_retries=4,
                            max_concurrent=self.llm_max_concurrent,
                            model_wait_seconds=self.llm_model_wait_s,

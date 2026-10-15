@@ -252,11 +252,18 @@ def edit_kind(was: str, now: str, gloss_words: set[str]) -> str:
 _LISTENERS: dict[str, object] = {}
 
 
-def listener_llm(cfg, model: str):
-    """Клиент слушателя — один на модель на процесс."""
-    if model not in _LISTENERS:
-        _LISTENERS[model] = cfg.build_llm(model)
-    return _LISTENERS[model]
+def listener_llm(cfg, model: str, base_url: str = '', api_key: str = ''):
+    """Клиент слушателя или уха omni — один на (модель, сервер) на процесс."""
+    key = (model, base_url)
+    if key not in _LISTENERS:
+        _LISTENERS[key] = cfg.build_llm(model, base_url or None, api_key or None) if base_url else cfg.build_llm(model)
+    return _LISTENERS[key]
+
+
+TRANSCRIBE_SYS = ('Ты — распознаватель речи. Выпиши ДОСЛОВНО, что звучит в приложенном аудио: слово в слово, как '
+                  'сказано, с оговорками и повторами, без пересказа и без исправлений. Термины латиницей пиши латиницей. '
+                  'Ответ — строго JSON: {"heard": "…"}')
+HEARD_SCHEMA = {'type': 'object', 'properties': {'heard': {'type': 'string'}}, 'required': ['heard']}
 
 
 def audio_part(path: str) -> dict:
@@ -286,6 +293,8 @@ async def run_proofread(st, d, ev) -> None:
     ears_wanted = [e.strip() for e in (cfg.proofread_ears or 'clean').split(',') if e.strip()]
     if 'second' in ears_wanted and not cfg.second_model:
         ears_wanted = [e for e in ears_wanted if e != 'second']
+    if 'omni' in ears_wanted and not getattr(cfg, 'proofread_omni_model', ''):
+        ears_wanted = [e for e in ears_wanted if e != 'omni']
 
     # --- детектор ---
     bs = batches(turns)
@@ -340,6 +349,18 @@ async def run_proofread(st, d, ev) -> None:
         path = await slices.get(max(0.0, a), min(float(st.audio_sec or b), b) if st.audio_sec else b)
         out = {}
         for ear in ears_wanted:
+            if ear == 'omni':
+                # Ухо — аудио-LLM: дословная расшифровка окна, без текста расшифровки и догадки (слух не подстраивается).
+                llm = listener_llm(cfg, cfg.proofread_omni_model, getattr(cfg, 'proofread_omni_base_url', '') or '',
+                                   getattr(cfg, 'proofread_omni_key', '') or '')
+                got = await llm.complete_json(
+                    [{'role': 'system', 'content': TRANSCRIBE_SYS},
+                     {'role': 'user', 'content': [{'type': 'text', 'text': 'Расшифруй аудио дословно.'}, audio_part(path)]}],
+                    schema=HEARD_SCHEMA, schema_name='heard', max_tokens=500)
+                if isinstance(got, list):
+                    got = next((x for x in got if isinstance(x, dict)), {})
+                out[ear] = str((got or {}).get('heard') or '').strip() if isinstance(got, dict) else ''
+                continue
             extra = {'model': cfg.second_model} if ear == 'second' else {}
             async with d._res('whisper', cfg.whisper_slots):
                 r = await asyncio.to_thread(lambda: d.audio_clients.asr(path, '', **extra))

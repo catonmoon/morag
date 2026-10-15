@@ -269,3 +269,32 @@ async def test_route_spelling_goes_to_listener(tmp_path):
     st, *_ = await _route(tmp_path, {'was': 'оплаты', 'now': 'Оплатов'}, {'clean': 'материнские Оплатов', 'second': 'ничего'},
                           'совсем другое', {'was': 'оплаты', 'now': 'Платов'}, proofread_clean_alone=True)
     assert 'оплаты' in st.turns[0]['final']          # уши только чистым ухом — для написания не свидетель
+
+
+async def test_omni_ear_transcribes_the_window(tmp_path):
+    """Ухо omni (15.10): аудио-LLM только расшифровывает окно — её текст свидетель наравне с whisper и GigaAM."""
+    from conveyor import proofread as P
+    P._LISTENERS.clear()
+    omni = FakeListener('материнские платы такого класса', None)
+
+    async def heard_only(messages, schema=None, schema_name='', max_tokens=None, **kw):
+        omni.seen.append(messages[-1]['content'])
+        assert schema_name == 'heard' and messages[-1]['content'][1]['type'] == 'input_audio'
+        return {'heard': omni.heard}
+    omni.complete_json = heard_only
+    llm = FakeLLM({'«материнские оплаты»': {'was': 'оплаты', 'now': 'платы'}})
+    d = _deps(tmp_path, {'clean': 'ничего', 'second': 'ничего'}, llm, proofread_ears='clean,second,omni',
+              proofread_omni_model='omni-local', proofread_omni_base_url='http://local/v1', proofread_omni_key='k')
+    d.cfg.build_llm = lambda model=None, base_url=None, api_key=None: omni
+    st = _state(tmp_path)
+    await run_proofread(st, d, Emitter(None, time.monotonic()))
+    assert 'материнские платы' in st.turns[0]['final']
+    assert st.round_log[0]['why'] == 'proofread:omni' and omni.seen
+
+
+async def test_omni_ear_is_dropped_without_a_model(tmp_path):
+    llm = FakeLLM({'«материнские оплаты»': {'was': 'оплаты', 'now': 'платы'}})
+    d = _deps(tmp_path, {'clean': 'ничего', 'second': 'материнские платы'}, llm, proofread_ears='clean,second,omni')
+    st = _state(tmp_path)
+    await run_proofread(st, d, Emitter(None, time.monotonic()))
+    assert st.round_log[0]['why'] == 'proofread:second'
