@@ -229,3 +229,43 @@ async def test_listener_answer_wrapped_in_a_list(tmp_path):
     st = _state(tmp_path)
     await run_proofread(st, d, Emitter(None, time.monotonic()))
     assert 'материнские платы' in st.turns[0]['final']
+
+
+
+async def _route(tmp_path, ears_fix, ears, listener_heard, listener_fix, **cfg):
+    from conveyor import proofread as P
+    P._LISTENERS.clear()
+    text_llm = FakeLLM({'«материнские оплаты»': ears_fix} if ears_fix else {})
+    listener = FakeListener(listener_heard, listener_fix)
+    d = _deps(tmp_path, ears, text_llm, proofread_listener='test/omni', proofread_route='kind', **cfg)
+    d.cfg.build_llm = lambda model=None: listener
+    st = _state(tmp_path)
+    await run_proofread(st, d, Emitter(None, time.monotonic()))
+    return st, text_llm, listener
+
+
+async def test_route_meaning_goes_to_ears(tmp_path):
+    """Смысл (обычные слова): при расхождении берётся правка ушей — GigaAM слышит покадрово (61 / 1 по слуху)."""
+    st, text_llm, listener = await _route(
+        tmp_path, {'was': 'оплаты', 'now': 'платы'}, {'clean': 'ничего', 'second': 'материнские платы такого'},
+        'материнские палаты такого', {'was': 'оплаты', 'now': 'палаты'})
+    assert 'материнские платы' in st.turns[0]['final']
+    assert text_llm.calls == ['proofread_flags', 'proofread_fix'] and listener.seen   # оба решателя спрошены
+    assert st.round_log[0]['route']['listener']['now'] == 'палаты'
+
+
+async def test_route_meaning_falls_back_to_listener(tmp_path):
+    st, *_ = await _route(tmp_path, None, {'clean': 'ничего', 'second': 'ничего'},
+                          'материнские платы такого', {'was': 'оплаты', 'now': 'платы'})
+    assert 'материнские платы' in st.turns[0]['final']
+    assert st.round_log[0]['why'] == 'proofread:listener'
+
+
+async def test_route_spelling_goes_to_listener(tmp_path):
+    """Написание (имя, термин): правка слушателя важнее ушей; уши без второго уха — не берутся."""
+    st, *_ = await _route(tmp_path, {'was': 'оплаты', 'now': 'Оплатов'}, {'clean': 'материнские Оплатов', 'second': 'ничего'},
+                          'материнские Платов такого', {'was': 'оплаты', 'now': 'Платов'}, proofread_clean_alone=True)
+    assert 'материнские Платов' in st.turns[0]['final']
+    st, *_ = await _route(tmp_path, {'was': 'оплаты', 'now': 'Оплатов'}, {'clean': 'материнские Оплатов', 'second': 'ничего'},
+                          'совсем другое', {'was': 'оплаты', 'now': 'Платов'}, proofread_clean_alone=True)
+    assert 'оплаты' in st.turns[0]['final']          # уши только чистым ухом — для написания не свидетель
