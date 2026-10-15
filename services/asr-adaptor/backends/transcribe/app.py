@@ -15,8 +15,10 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import sys
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 # mlx_whisper.load_audio зовёт `ffmpeg` из PATH — в headless-запуске его может не быть
@@ -26,6 +28,7 @@ from pathlib import Path  # noqa: E402
 from typing import Optional  # noqa: E402
 
 import mlx_whisper  # noqa: E402
+from mlx_whisper.load_models import load_model as _load_model  # noqa: E402
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile  # noqa: E402
 
 # ⚠️⚠️ Стек. 27.09 бэкенд упал SIGSEGV внутри MLX — `compile_dfs`, рекурсия по графу вычислений,
@@ -43,6 +46,32 @@ threading.stack_size(0)
 if os.environ.get('TRANSCRIBE_DISABLE_COMPILE', '').strip().lower() in ('1', 'true', 'yes', 'on'):
     import mlx.core as _mx  # noqa: E402
     _mx.disable_compile()
+
+# ⚠️⚠️ Кэш моделей. `mlx_whisper.ModelHolder` держит ОДНУ модель и перечитывает веса при смене
+# имени, а арбитраж чередует основную модель и второе ухо кусок за куском — каждый переход стоил
+# загрузки весов с диска. Держим до `TRANSCRIBE_MODEL_CACHE` моделей (умолчание 2: основная и
+# второе ухо; веса turbo ~1.6 ГБ, large ~3 ГБ единой памяти), вытесняем давнюю. 1 — прежнее
+# поведение. Доступ — только из потока инференса (он один), поэтому без блокировок.
+_CACHE_N = max(1, int(os.environ.get('TRANSCRIBE_MODEL_CACHE', '2') or 2))
+_CACHE: dict = {}                                  # путь → модель, порядок = давность использования
+STATS = {'requests': 0, 'loads': 0, 'load_s': 0.0, 'infer_s': 0.0, 'audio_s': 0.0}
+
+
+def _get_model(cls, model_path, dtype):
+    m = _CACHE.pop(model_path, None)
+    if m is None:
+        t0 = time.monotonic()
+        m = _load_model(model_path, dtype=dtype)
+        STATS['loads'] += 1
+        STATS['load_s'] = round(STATS['load_s'] + time.monotonic() - t0, 2)
+        while len(_CACHE) >= _CACHE_N:
+            _CACHE.pop(next(iter(_CACHE)))
+    _CACHE[model_path] = m
+    return m
+
+
+# `mlx_whisper.transcribe` — функция, заслоняющая одноимённый модуль; модуль — из sys.modules.
+sys.modules['mlx_whisper.transcribe'].ModelHolder.get_model = classmethod(_get_model)
 
 # Каталог с MLX-весами: env `TRANSCRIBE_MODELS_DIR`, иначе каталог моделей стека.
 MODELS_DIR = Path(os.environ.get('TRANSCRIBE_MODELS_DIR')
@@ -157,6 +186,13 @@ def health():
     return {'status': 'ok'}
 
 
+@app.get('/stats')
+def stats():
+    """Счётчики процесса: запросы, загрузки весов, секунды загрузки и инференса, секунды звука.
+    Стенд скорости читает их до и после прогона — перегрузка весов видна числом."""
+    return {**STATS, 'cached': [Path(p).name for p in _CACHE], 'cache_size': _CACHE_N}
+
+
 @app.get('/v1/models')
 def models():
     return {'object': 'list',
@@ -225,7 +261,15 @@ async def transcribe(
             kw['initial_prompt'] = prompt
         if word_timestamps.strip().lower() in ('1', 'true', 'yes', 'on'):
             kw['word_timestamps'] = True
-        r = await asyncio.get_running_loop().run_in_executor(_INFER, lambda: mlx_whisper.transcribe(tmp, **kw))
+        def _run():
+            t0 = time.monotonic()
+            out = mlx_whisper.transcribe(tmp, **kw)
+            STATS['requests'] += 1
+            STATS['infer_s'] = round(STATS['infer_s'] + time.monotonic() - t0, 2)
+            segs = out.get('segments') or []
+            STATS['audio_s'] = round(STATS['audio_s'] + (segs[-1].get('end', 0.0) if segs else 0.0), 1)
+            return out
+        r = await asyncio.get_running_loop().run_in_executor(_INFER, _run)
     finally:
         Path(tmp).unlink(missing_ok=True)
 

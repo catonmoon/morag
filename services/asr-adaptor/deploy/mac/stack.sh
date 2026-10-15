@@ -46,6 +46,13 @@ ok()   { printf '\033[32m  ✓ %s\033[0m\n' "$*"; }
 bad()  { printf '\033[31m  ✗ %s\033[0m\n' "$*"; }
 
 PORT_ASR=8082 PORT_DIAR=8090 PORT_WHISPER=8123 PORT_CAMPP=8126
+# Пул whisper (`ASR_WHISPER_INSTANCES`, по умолчанию 1): процессы на 8123, 8133, 8143… — у каждого
+# своя модель в памяти (turbo ~1.6 ГБ, со вторым ухом в кэше ~4.6 ГБ). Адаптер выводит те же адреса
+# из той же переменной и отдаёт кусок самому свободному. Потолок — 8 (порты до 8193).
+WHISPER_N="${ASR_WHISPER_INSTANCES:-1}"
+(( WHISPER_N >= 1 && WHISPER_N <= 8 )) || { echo "ASR_WHISPER_INSTANCES=$WHISPER_N: нужно 1..8" >&2; exit 1; }
+whisper_port() { echo $(( PORT_WHISPER + 10 * $1 )); }
+whisper_name() { (( $1 == 0 )) && echo whisper || echo "whisper$1"; }
 
 listening() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
 
@@ -77,11 +84,14 @@ cmd_up() {
     "$VENVS/campp/bin/uvicorn" --app-dir "$ADAPTOR_DIR/backends/campp" app:app \
     --host 127.0.0.1 --port "$PORT_CAMPP" --log-level info
 
-  PATH="/opt/homebrew/bin:$PATH" \
-  TRANSCRIBE_MODELS_DIR="${TRANSCRIBE_MODELS_DIR:-$STACK_HOME/models}" \
-  start_one whisper "$PORT_WHISPER" "$LOGS/whisper.log" \
-    "$VENVS/whisper/bin/uvicorn" --app-dir "$ADAPTOR_DIR/backends/transcribe" app:app \
-    --host 127.0.0.1 --port "$PORT_WHISPER" --log-level info
+  local k
+  for (( k = 0; k < WHISPER_N; k++ )); do
+    PATH="/opt/homebrew/bin:$PATH" \
+    TRANSCRIBE_MODELS_DIR="${TRANSCRIBE_MODELS_DIR:-$STACK_HOME/models}" \
+    start_one "$(whisper_name $k)" "$(whisper_port $k)" "$LOGS/$(whisper_name $k).log" \
+      "$VENVS/whisper/bin/uvicorn" --app-dir "$ADAPTOR_DIR/backends/transcribe" app:app \
+      --host 127.0.0.1 --port "$(whisper_port $k)" --log-level info
+  done
 
   # Адаптер последним — он на старте пингует downstream.
   start_one adaptor "$PORT_ASR" "$LOGS/adaptor.log" \
@@ -90,14 +100,17 @@ cmd_up() {
 
   say "ждём готовности (диаризатор грузит модель до ~90 с)"
   wait_port "$PORT_CAMPP"   30 campp    || true
-  wait_port "$PORT_WHISPER" 60 whisper  || true
+  for (( k = 0; k < WHISPER_N; k++ )); do wait_port "$(whisper_port $k)" 60 "$(whisper_name $k)" || true; done
   wait_port "$PORT_ASR"     60 adaptor  || true
   wait_port "$PORT_DIAR"   180 diarizer || true
   cmd_health
 }
 
 cmd_down() {
-  for name in adaptor whisper campp diarizer; do
+  # Пул whisper гасится целиком, даже если ASR_WHISPER_INSTANCES с тех пор уменьшили.
+  local k
+  for name in adaptor whisper whisper{1..7} campp diarizer; do
+    [[ $name == whisper? && ! -f "$RUN/$name.pid" ]] && continue
     local pid_file="$RUN/$name.pid"
     if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
       kill "$(cat "$pid_file")" && ok "$name остановлен"
@@ -107,14 +120,16 @@ cmd_down() {
     rm -f "$pid_file"
   done
   # uvicorn мог родить воркеров — добираем по порту.
-  for p in $PORT_ASR $PORT_WHISPER $PORT_CAMPP $PORT_DIAR; do
+  for p in $PORT_ASR $(for k in {0..7}; do whisper_port $k; done) $PORT_CAMPP $PORT_DIAR; do
     local pids; pids="$(lsof -nP -iTCP:"$p" -sTCP:LISTEN -t 2>/dev/null || true)"
     [[ -n "$pids" ]] && { echo "$pids" | xargs kill 2>/dev/null || true; ok "порт $p освобождён"; }
   done
 }
 
 cmd_status() {
-  for pair in "адаптер:$PORT_ASR" "диаризатор:$PORT_DIAR" "whisper:$PORT_WHISPER" "CAM++:$PORT_CAMPP"; do
+  local pairs=("адаптер:$PORT_ASR" "диаризатор:$PORT_DIAR" "CAM++:$PORT_CAMPP") k
+  for (( k = 0; k < WHISPER_N; k++ )); do pairs+=("$(whisper_name $k):$(whisper_port $k)"); done
+  for pair in "${pairs[@]}"; do
     local name="${pair%%:*}" port="${pair##*:}"
     if listening "$port"; then
       local rss; rss="$(ps -o rss= -p "$(lsof -nP -iTCP:"$port" -sTCP:LISTEN -t | head -1)" 2>/dev/null | tr -d ' ')"

@@ -16,7 +16,7 @@ NAMES = (
     'CFG', 'log', 'audio_clients', 'registry', 'coverage', 'align', 'arbitrate_stage', 'relisten_stage', 'seams',
     'resplit_stage', 'recover_stage',
     # ресурсы и порядок параллельных выпусков
-    '_res', '_take_ticket', '_wait_turn', '_release_turn',
+    '_res', 'RES_METER', '_take_ticket', '_wait_turn', '_release_turn',
     # звук
     '_to_wav', '_slice', '_decode', '_relisten_chunk', 'PAD_S',
     # знание о записи
@@ -42,6 +42,9 @@ class Deps:
             import pipeline as pipeline_module  # noqa: PLC0415 — поздно и намеренно
         self._p = pipeline_module
         self.llm = llm
+        # Задачи, запущенные узлом заранее для узла дальше по конвейеру (`ASR_OVERLAP`): имя → Task.
+        # Живут в прогоне, в чекпойнт не едут: после возобновления узел посчитает своё сам.
+        self.prefetch: dict = {}
 
     @property
     def cfg(self):

@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from contextlib import contextmanager
 
 import requests
 
@@ -48,8 +50,26 @@ def _asr_timeout(wav_path: str) -> int:
         return _ASR_TIMEOUT_MIN
 
 
+# Пул whisper: кусок уходит процессу с наименьшим числом запросов в работе (у каждого один поток
+# инференса — второй запрос к занятому просто ждёт). Счёт — под замком: вызовы идут из потоков.
+_INFLIGHT: dict[str, int] = {}
+_POOL_LOCK = threading.Lock()
+
+
+@contextmanager
+def _whisper_url(pinned: str = ''):
+    with _POOL_LOCK:
+        url = pinned or min(CFG.asr_urls, key=lambda u: _INFLIGHT.get(u, 0))
+        _INFLIGHT[url] = _INFLIGHT.get(url, 0) + 1
+    try:
+        yield url
+    finally:
+        with _POOL_LOCK:
+            _INFLIGHT[url] -= 1
+
+
 def asr(wav_path: str, prompt: str = '', temperature: str = '', words: bool = False,
-        model: str = '') -> dict:
+        model: str = '', url: str = '') -> dict:
     """podlodka через transcribe_backend, всегда verbose_json → {'text', 'segments'}.
 
     Сегменты нужны ОБОИМ пассам: пасс-1 по ним нарезает чанки, пасс-2 — чтобы было видно, сколько
@@ -58,6 +78,7 @@ def asr(wav_path: str, prompt: str = '', temperature: str = '', words: bool = Fa
     лишь подробнее отвечает, поэтому отдельной ветки «только текст» больше нет.
     """
     # `model` — ДРУГАЯ модель прослушивания (второе ухо, ADR-0030); пусто — модель профиля.
+    # `url` — конкретный процесс пула (прогрев); пусто — самый свободный.
     data = {'model': model or CFG.asr_model, 'language': 'ru', 'response_format': 'verbose_json'}
     if prompt:
         data['prompt'] = prompt
@@ -72,8 +93,8 @@ def asr(wav_path: str, prompt: str = '', temperature: str = '', words: bool = Fa
     if words:
         data['word_timestamps'] = '1'
     headers = {'Authorization': f'Bearer {CFG.asr_key}'} if CFG.asr_key else {}
-    with open(wav_path, 'rb') as f:
-        r = requests.post(CFG.asr_url, data=data, files={'file': f}, headers=headers,
+    with _whisper_url(url) as url, open(wav_path, 'rb') as f:
+        r = requests.post(url, data=data, files={'file': f}, headers=headers,
                           timeout=_asr_timeout(wav_path))
     r.raise_for_status()
     j = r.json()
@@ -109,8 +130,9 @@ def campp_spans(wav_path: str, spans: list[dict]) -> list:
 def health() -> dict:
     """Пинг всех downstream-бэкендов (для /health сервиса)."""
     out = {}
-    for name, url in (('diarizer', CFG.diarizer_url), ('asr', CFG.asr_url), ('campp', CFG.campp_url)):
-        base = url.rsplit('/', 1)[0] if name == 'campp' else url.split('/v1')[0] if '/v1' in url else url.rsplit('/', 1)[0]
+    pool = [(f'asr{k}' if k else 'asr', u) for k, u in enumerate(CFG.asr_urls)]
+    for name, url in (('diarizer', CFG.diarizer_url), *pool, ('campp', CFG.campp_url)):
+        base = url.split('/v1')[0] if '/v1' in url else url.rsplit('/', 1)[0]
         try:
             requests.get(base.rstrip('/') + '/health', timeout=5)
             out[name] = 'ok'

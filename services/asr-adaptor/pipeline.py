@@ -11,8 +11,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import subprocess
+import time
 from pathlib import Path
 
 import audio_clients
@@ -43,11 +45,46 @@ PAD_S = 0.3  # паддинг куска при повторе пустого ч
 # выпуска B идут, пока у A работает LLM-раунд. Семафоры лениво: на импорте event loop не тот.
 _RES_SEMS: dict[str, asyncio.Semaphore] = {}
 
+# Прибор: сколько выпуск ЖДАЛ ресурс и сколько его ДЕРЖАЛ (`timing.wait_<имя>_s` / `busy_<имя>_s`).
+# Время стадии — стеночное и при ASR_MAX_JOBS>1 или параллельных кусках включает очередь; без
+# раздельного счёта не понять, упирается прогон в модель или в соседа. Словарь — `timing` текущего
+# выпуска: run_conveyor кладёт его в контекстную переменную, задачи gather наследуют контекст,
+# поэтому счёт идёт своему выпуску и при нескольких выпусках в одном процессе. `busy` у
+# параллельных кусков суммируется — это ресурсо-секунды, а не стеночное время.
+RES_METER: contextvars.ContextVar[dict | None] = contextvars.ContextVar('asr_res_meter', default=None)
 
-def _res(name: str, slots: int) -> asyncio.Semaphore:
+
+class _Gate:
+    """Семафор ресурса с учётом ожидания и занятости. Вне выпуска (тесты, sync) — просто семафор."""
+
+    __slots__ = ('name', 'sem', 't')
+
+    def __init__(self, name: str, sem: asyncio.Semaphore) -> None:
+        self.name, self.sem, self.t = name, sem, 0.0
+
+    async def __aenter__(self):
+        t0 = time.monotonic()
+        await self.sem.acquire()
+        self.t = time.monotonic()
+        _meter_add(f'wait_{self.name}_s', self.t - t0)
+        return self
+
+    async def __aexit__(self, *exc):
+        _meter_add(f'busy_{self.name}_s', time.monotonic() - self.t)
+        self.sem.release()
+        return False
+
+
+def _meter_add(key: str, sec: float) -> None:
+    m = RES_METER.get()
+    if m is not None:
+        m[key] = round(m.get(key, 0.0) + sec, 2)
+
+
+def _res(name: str, slots: int) -> _Gate:
     if name not in _RES_SEMS:
         _RES_SEMS[name] = asyncio.Semaphore(max(1, slots))
-    return _RES_SEMS[name]
+    return _Gate(name, _RES_SEMS[name])
 
 
 # Реестр голосов требует ДЕТЕРМИНИЗМА порядка (нумерация Speaker_N по порядку появления): при

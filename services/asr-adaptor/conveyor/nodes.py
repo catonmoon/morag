@@ -75,6 +75,22 @@ async def pass1(st: State, d: Deps, ev: Emitter) -> None:
                  sum(b - a for a, b in st.p1_holes), len(st.p1_holes))
 
 
+async def opening(st: State, d: Deps, ev: Emitter) -> None:
+    """`ASR_OVERLAP`: пасс-1, затем диаризация (GPU) ∥ глоссарий и сводка записи (LLM).
+
+    ⚠️⚠️ Накладываем GPU на LLM, а НЕ GPU на GPU. Первая версия пускала диаризацию вместе с
+    пассом-1 — замер 13.10 на докладе 31 мин (M4 Pro, 48 ГБ): pyannote и MLX делят один GPU, и обе
+    стадии замедлились почти вдвое (64 → 123 с и 81 → 120 с), узел вышел 190 с против 145 по
+    очереди. Глоссарию и сводке нужен только черновик пасса-1, диаризации — только звук: их
+    наложение бесплатно для GPU. `opening_s` — стеночное время узла.
+    ⚠️ Сводку считаем фоном: её ждёт только финал-раунд."""
+    _t = time.monotonic()
+    await pass1(st, d, ev)
+    d.prefetch['dsum'] = asyncio.create_task(d.doc_summary(st.full_text, d.llm))
+    await asyncio.gather(diarize(st, d, ev), glossary(st, d, ev))
+    st.tm['opening_s'] = round(time.monotonic() - _t, 1)
+
+
 # --- glossary -----------------------------------------------------------------------------------
 
 async def glossary(st: State, d: Deps, ev: Emitter) -> None:
@@ -164,8 +180,10 @@ async def pass2(st: State, d: Deps, ev: Emitter) -> None:
         for k in _known_spellings(cfg, st.hints or {}):
             spell_map.setdefault(d.arbitrate_stage.sound(d.arbitrate_stage.key(k)), k)
     screen = [x for x in (st.hints or {}).get('screen') or () if isinstance(x, dict)]
-    n_screen_chunks = 0
-    for i, c in enumerate(chunks):
+    n_screen_chunks = n_done = 0
+
+    async def one(i: int, c: dict) -> None:
+        nonlocal n_broken, n_hinted_chunks, n_screen_chunks, n_done
         src = c['text'] or d._neighbour_text(chunks, i)
         canon = d.relevant(src, st.gloss)
         hint_set = st.hint_set
@@ -210,8 +228,25 @@ async def pass2(st: State, d: Deps, ev: Emitter) -> None:
             n_broken += 1
             ev.emit('chunk.done', i=i + 1, sec=round(time.monotonic() - _ct, 2),
                     error=type(error).__name__)
-        if (i + 1) % 20 == 0:
-            ev.step(f'pass2 {i + 1}/{len(chunks)}')
+        n_done += 1
+        if n_done % 20 == 0:
+            ev.step(f'pass2 {n_done}/{len(chunks)}')
+
+    # Куски независимы: подсказка — из черновика пасса-1 и глоссария, не из соседнего пасса-2.
+    # `ASR_PASS2_CONCURRENCY` > 1 — несколько кусков в работе разом: нарезка ffmpeg и отправка
+    # следующего идут, пока декодируется текущий, а при пуле whisper (`ASR_WHISPER_SLOTS`) — и
+    # само декодирование. 1 — прежний цикл байт в байт (порядок событий тоже).
+    if cfg.pass2_concurrency <= 1:
+        for i, c in enumerate(chunks):
+            await one(i, c)
+    else:
+        gate = asyncio.Semaphore(cfg.pass2_concurrency)
+
+        async def gated(i: int, c: dict) -> None:
+            async with gate:
+                await one(i, c)
+
+        await asyncio.gather(*(gated(i, c) for i, c in enumerate(chunks)))
     st.tm['pass2_s'] = round(time.monotonic() - _t, 1)
     st.tm['n_chunks'] = len(chunks)
     st.tm['n_retried'] = sum(1 for c in chunks if c.get('retried'))
@@ -433,7 +468,8 @@ async def final_round(st: State, d: Deps, ev: Emitter) -> None:
     turns_ = st.turns
     ev.stage('final-round')
     _t = time.monotonic()
-    st.dsum = await d.doc_summary(st.full_text, d.llm)
+    early = d.prefetch.pop('dsum', None)   # посчитана заранее узлом `opening` (ASR_OVERLAP)
+    st.dsum = await (early if early is not None else d.doc_summary(st.full_text, d.llm))
     for t in turns_:
         t['raw'] = ' '.join(c['raw'] for c in t['chunks'] if c['raw']).strip()
     # Подтверждённые каноники — ЗАЩИТА: замена, ломающая уже верный термин, отбрасывается.
@@ -529,7 +565,9 @@ async def final_round(st: State, d: Deps, ev: Emitter) -> None:
 async def speakers(st: State, d: Deps, ev: Emitter) -> None:
     cfg = d.cfg
     ev.stage('speakers')
+    _t = time.monotonic()
     await d._wait_turn(st.ticket)  # реестр — строго в порядке поступления выпусков
+    st.tm['ticket_wait_s'] = round(time.monotonic() - _t, 1)
     async with d._res('campp', cfg.campp_slots):
         st.cents, st.air = await asyncio.to_thread(d.audio_clients.campp, st.wav, st.spans)
     decided: list[dict] | None = [] if (ev.enabled or cfg.record_guard or cfg.naming_trust_cos) else None
@@ -560,6 +598,7 @@ async def speakers(st: State, d: Deps, ev: Emitter) -> None:
     dominant = max(air_by_lbl, key=air_by_lbl.get) if air_by_lbl else 'Speaker_0'
     for t in st.turns:
         t['speaker'] = st.mapping.get(t['cluster'], dominant)
+    st.tm['speakers_s'] = round(time.monotonic() - _t, 1)
 
 
 async def naming(st: State, d: Deps, ev: Emitter) -> None:
@@ -723,9 +762,10 @@ async def resplit(st: State, d: Deps, ev: Emitter) -> None:
 # Порядок узлов и условие каждого (по конфигу). Узел без условия идёт всегда.
 NODES: list[tuple[str, object, object]] = [
     ('prepare', prepare, None),
-    ('diarize', diarize, None),
-    ('pass1', pass1, None),
-    ('glossary', glossary, None),
+    ('opening', opening, lambda cfg, st: bool(cfg.overlap)),
+    ('diarize', diarize, lambda cfg, st: not cfg.overlap),
+    ('pass1', pass1, lambda cfg, st: not cfg.overlap),
+    ('glossary', glossary, lambda cfg, st: not cfg.overlap),
     ('chunking', chunking, None),
     ('pass2', pass2, None),
     ('relisten', relisten, lambda cfg, st: bool(cfg.relisten)),

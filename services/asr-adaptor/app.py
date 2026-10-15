@@ -113,8 +113,14 @@ def warmup():
         w.setframerate(16000)
         w.writeframes(b'\x00' * 2 * 16000 * 2)      # две секунды тишины
     out = {}
+    # Каждый процесс пула whisper — своей моделью и вторым ухом (`ASR_SECOND_MODEL`): иначе первый
+    # кусок арбитража на каждом процессе стоит загрузки весов.
+    ears = [m for m in (CFG.asr_model, CFG.second_model) if m]
+    whisper = [(f"asr{k or ''}{'' if m == CFG.asr_model else ':' + m}",
+                lambda u=u, m=m: audio_clients.asr(tmp, model=m, url=u))
+               for k, u in enumerate(CFG.asr_urls) for m in ears]
     for name, call in (('diarizer', lambda: audio_clients.diarize(tmp, 1, 2)),
-                       ('asr', lambda: audio_clients.asr(tmp)),
+                       *whisper,
                        ('campp', lambda: audio_clients.campp(
                            tmp, [{'start': 0.0, 'end': 2.0, 'speaker': 'SPEAKER_00'}]))):
         began = time.monotonic()

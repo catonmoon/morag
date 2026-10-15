@@ -122,3 +122,23 @@ async def test_conveyor_reports_its_nodes_in_the_artifact(rich, silence):
 def test_conveyor_takes_every_helper_it_needs_from_the_pipeline_module():
     from conveyor.deps import Deps
     assert Deps(None).check() == []
+
+
+@pytest.mark.parametrize('case', list(CASES))
+async def test_overlap_gives_the_same_record_as_the_frozen_pipeline(case, rich, silence, monkeypatch):
+    """`ASR_OVERLAP` (диаризация ∥ пасс-1 → глоссарий, сводка фоном) и `ASR_PASS2_CONCURRENCY` меняют
+    ПОРЯДОК стадий и кусков в ленте, но не запись: результат, все события (мультимножество), вызовы
+    бэкенда — как в снимке."""
+    for k, v in CASES[case].items():
+        monkeypatch.setattr(pipeline.CFG, k, v)
+    monkeypatch.setattr(pipeline.CFG, 'overlap', True)
+    monkeypatch.setattr(pipeline.CFG, 'pass2_concurrency', 3)
+    r, ev, calls = await _run(run_conveyor, rich, silence)
+    got = snapshot(r, ev, calls)
+    want = json.loads((GOLDEN / f'{case}.json').read_text())
+    assert got['result'] == want['result']
+    assert got['events'] == want['events'] and sorted(got['order']) == sorted(want['order'])
+    assert got['calls'] == want['calls']
+    assert got['segments'] == want['segments']
+    assert r['conveyor']['nodes'][:2] == ['prepare', 'opening'], r['conveyor']['nodes']
+    assert 'opening_s' in r['timing']

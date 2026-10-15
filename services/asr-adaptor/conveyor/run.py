@@ -68,6 +68,7 @@ async def run_conveyor(audio_path: str, llm, *, episode: str = '', title: str = 
     ckpt = (Path(cfg.checkpoints) / f"{st.episode or 'adhoc'}-{int(time.time())}.json"
             if cfg.checkpoints else None)
     st.ticket = d._take_ticket()  # порядок реестра = порядок поступления выпусков
+    meter = d.RES_METER.set(st.tm)  # ожидание/занятость ресурсов — в timing этого выпуска
     try:
         for name, fn, when in nodes.NODES:
             if when is not None and not when(cfg, st):
@@ -94,4 +95,7 @@ async def run_conveyor(audio_path: str, llm, *, episode: str = '', title: str = 
         return out
     finally:
         d._release_turn(st.ticket)  # идемпотентно: упавший выпуск не вешает очередь реестра
+        d.RES_METER.reset(meter)
+        for task in d.prefetch.values():          # упавший прогон не оставляет висящих задач
+            task.cancel()
         shutil.rmtree(st.tmp, ignore_errors=True)

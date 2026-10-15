@@ -22,6 +22,19 @@ def _env(key: str, default: str = '') -> str:
     return os.environ.get(key, default)
 
 
+def _asr_urls() -> list[str]:
+    """Пул whisper: явный `ASR_BACKEND_URLS` (через запятую) или `ASR_WHISPER_INSTANCES=N` — те же
+    порты, что поднимает `deploy/mac/stack.sh` (8123, 8133, 8143…). Иначе — один `ASR_BACKEND_URL`."""
+    explicit = [u.strip() for u in _env('ASR_BACKEND_URLS').split(',') if u.strip()]
+    if explicit:
+        return explicit
+    base = _env('ASR_BACKEND_URL', 'http://127.0.0.1:8123/v1/audio/transcriptions')
+    n = max(1, int(_env('ASR_WHISPER_INSTANCES', '1') or 1))
+    if n == 1 or ':8123/' not in base:
+        return [base]
+    return [base.replace(':8123/', f':{8123 + 10 * k}/') for k in range(n)]
+
+
 def _flag(key: str, default: str = '1') -> bool:
     return _env(key, default) not in ('0', 'false', 'no', '')
 
@@ -58,6 +71,8 @@ class Config:
     diarizer_url: str = field(default_factory=lambda: _env('ASR_DIARIZER_URL', 'http://127.0.0.1:8090/diarize'))
     diarizer_key: str = field(default_factory=lambda: _env('ASR_DIARIZER_KEY'))
     asr_url: str = field(default_factory=lambda: _env('ASR_BACKEND_URL', 'http://127.0.0.1:8123/v1/audio/transcriptions'))
+    # Пул процессов whisper; `asr_url` — первый из них (им пользуются health и старые вызовы).
+    asr_urls: list = field(default_factory=_asr_urls)
     asr_key: str = field(default_factory=lambda: _env('ASR_BACKEND_KEY'))
     asr_model: str = field(default_factory=lambda: _env('ASR_MODEL', 'whisper-podlodka-turbo'))
     # Времена слов ОТ ДЕКОДЕРА в сегментах пасса-2 (`segments[].words`, приблизительные, с
@@ -120,6 +135,10 @@ class Config:
     # Свои события конвейера в ленте (`conveyor.node` со счётчиком после каждого узла). Выключено —
     # лента прежняя: её читает окно загрузки записи.
     node_events: bool = field(default_factory=lambda: _flag('ASR_NODE_EVENTS', '0'))
+    # Наложение стадий одной записи (узел `opening`): после пасса-1 диаризация (GPU) идёт ВМЕСТЕ с
+    # глоссарием (LLM), сводка записи для финал-раунда — фоном. GPU с GPU не накладываем: замер
+    # 13.10 — оба вдвое медленнее. Выключено — порядок узлов прежний байт в байт (золотые снимки).
+    overlap: bool = field(default_factory=lambda: _flag('ASR_OVERLAP', '0'))
     whisper_tokenizer: str = field(default_factory=lambda: _env('ASR_WHISPER_TOKENIZER', 'openai/whisper-large-v3'))
     # Форма подсказки пасса-2 (префикс перед списком написаний). Пусто — умолчание движка.
     prompt_prefix: str = field(default_factory=lambda: _env('ASR_PROMPT_PREFIX', ''))
@@ -248,6 +267,8 @@ class Config:
 
     # Параллельность финал-раунда: реплики независимы, а стадия занимала 8-12 мин из 15-18 на
     # выпуск. Потолок скромный — упирается не в нас, а в лимиты провайдера.
+    # Кусков пасса-2 в работе разом (узел `pass2`); 1 — по одному, как раньше.
+    pass2_concurrency: int = field(default_factory=lambda: int(_env('ASR_PASS2_CONCURRENCY', '1')))
     round_concurrency: int = field(default_factory=lambda: int(_env('ASR_ROUND_CONCURRENCY', '6')))
     # Финал-раунд не вправе менять ИЗВЕСТНОЕ слово записи (подсказки, имена, постоянные термины) на
     # другое по звучанию — вето `known_term` (ADR-0030). Замерено звуком по корпусу: 64 такие замены
@@ -297,7 +318,8 @@ class Config:
     #     whisper_slots=2 можно пробовать после замера. max_jobs=1 — прежнее поведение ---
     max_jobs: int = field(default_factory=lambda: int(_env('ASR_MAX_JOBS', '1')))
     diarize_slots: int = field(default_factory=lambda: int(_env('ASR_DIARIZE_SLOTS', '1')))
-    whisper_slots: int = field(default_factory=lambda: int(_env('ASR_WHISPER_SLOTS', '1')))
+    # Не задано — по числу процессов пула: слот на процесс (у каждого один поток инференса).
+    whisper_slots: int = field(default_factory=lambda: int(_env('ASR_WHISPER_SLOTS') or len(_asr_urls())))
     campp_slots: int = field(default_factory=lambda: int(_env('ASR_CAMPP_SLOTS', '1')))
     align_slots: int = field(default_factory=lambda: int(_env('ASR_ALIGN_SLOTS', '1')))
 
