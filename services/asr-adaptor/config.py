@@ -179,6 +179,13 @@ class Config:
     # ставит 6: 40 правок по 4-6 слов с ухом другой школы — 23 верных, 0 порч по слуху владельца (14.10);
     # из 112 отказов too_long на стенде 72 проходили барьеры при лимите 6. now — до max_was + 2.
     proofread_max_was_words: int = field(default_factory=lambda: int(_env('ASR_PROOFREAD_MAX_WAS_WORDS', '3')))
+    # Слушатель (ADR-0032, дополнение 15.10): аудио-LLM (OpenRouter, input_audio), которая сама слушает окно
+    # ±listener_pad_s вокруг места вместо текстов ушей; её дословное `heard` — свидетель замены. Пусто — выкл.
+    # Новую латиницу одно слово слушателя не подтверждает (страж: «слон → Qwen» и т.п.), только канон.
+    # Мостик, 728 мест: qwen/qwen3.8-omni-flash принял 289 правок против 148 у ушей; на 59 правках «только у
+    # слушателя» по слуху владельца 23 верных / 4 порчи, со стражем 20 / 1.
+    proofread_listener: str = field(default_factory=lambda: _env('ASR_PROOFREAD_LISTENER', ''))
+    proofread_listener_pad_s: float = field(default_factory=lambda: float(_env('ASR_PROOFREAD_LISTENER_PAD_S', '6')))
     # С какого косинуса матча реестра имя голоса НЕ перебивается интро. Интро-LLM путает упоминание
     # с представлением (ep2-5: «два часа назад Денис Дергачев рассказывал» → чужое имя ведущему при
     # cos 0.83). 0 — выкл, прежнее «истина = интро». Разумно 0.7: разные люди у CAM++ 0.21-0.50.
@@ -315,16 +322,20 @@ class Config:
     # Свойство эндпоинта, а не корпуса: место ему в машинном env. Пусто — не шлём.
     llm_provider: dict = field(default_factory=lambda: json.loads(_env('ASR_LLM_PROVIDER') or '{}'))
 
-    def build_llm(self) -> 'RetryingLLM':
+    def build_llm(self, model: str | None = None) -> 'RetryingLLM':
         """morag LLMClient + прикладной RetryPolicy. SDK-ретраи (max_retries) закрывают транспорт,
         политика поверх — битый JSON деген-петель и спайки; max_concurrent — общий потолок
-        одновременных вызовов через реестр семафоров ядра (важен при ASR_MAX_JOBS > 1)."""
-        client = LLMClient(base_url=self.llm_base_url, model=self.llm_model, api_key=self.llm_key,
-                           enable_thinking=_enable_thinking(), timeout=180, max_retries=4,
+        одновременных вызовов через реестр семафоров ядра (важен при ASR_MAX_JOBS > 1).
+
+        `model` — другая модель на том же ключе (слушатель корректора): без рассуждений и без
+        маршрутизации провайдеров основной модели (у неё свои провайдеры)."""
+        other = bool(model) and model != self.llm_model
+        client = LLMClient(base_url=self.llm_base_url, model=model or self.llm_model, api_key=self.llm_key,
+                           enable_thinking=False if other else _enable_thinking(), timeout=180, max_retries=4,
                            max_concurrent=self.llm_max_concurrent,
                            model_wait_seconds=self.llm_model_wait_s,
                            model_wait_retries=self.llm_model_wait_retries,
-                           **({'extra_body': {'provider': self.llm_provider}} if self.llm_provider else {}))
+                           **({'extra_body': {'provider': self.llm_provider}} if self.llm_provider and not other else {}))
         policy = RetryPolicy(max_retries=max(0, self.llm_attempts - 1),
                              delay=self.llm_retry_delay, backoff=1.0)
         return RetryingLLM(client, policy, self.llm_repetition_penalty)

@@ -31,11 +31,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import re
 import time
 from difflib import SequenceMatcher
+from pathlib import Path
 
 from conveyor.editor import heard_supports
 from conveyor.places import Slices
@@ -91,6 +93,9 @@ RESOLVE_SYS = (
     'Ответ — строго JSON: {"old_error": …, "heard": "…", "fix": {"was": "…", "now": "…"} | null, '
     '"why": "одна короткая фраза"}'
 )
+LISTEN_NOTE = ('ЗВУК: к сообщению приложено окно звука (±{pad} с вокруг места), ушей нет — слушаешь ты сам. Сначала '
+               'выпиши в "heard" ДОСЛОВНО, что звучит в окне (расшифровка, не пересказ, слово в слово), и только '
+               'потом решай. Замена в fix — то, что ты реально расслышал, или известное написание расслышанного.')
 SUSPECT_NOTE = ('ПРИМЕЧАНИЕ: выделено слово из списка подозрительных для этой записи (например, брань в деловом '
                 'разговоре). Распознавание часто «слышит» такое на неразборчивом месте. Уши слышат другое слово — '
                 'это ошибка (fix на услышанное). Уши тоже слышат его — говорящий так и сказал (old_error no, fix null).')
@@ -204,6 +209,50 @@ def latin_known(now: str, known: set[str]) -> bool:
     return bool(lat) and all(w.lower() in known for w in lat)
 
 
+def new_latin(was: str, now: str) -> list[str]:
+    """Латинские слова замены, которых не было в заменяемом: их одно слово слушателя не подтверждает."""
+    old = {w.lower() for w in re.findall(r"[A-Za-z][\w'.-]*", was)}
+    return [w for w in re.findall(r"[A-Za-z][\w'.-]*", now) if w.lower() not in old]
+
+
+def known_near(A, text: str, gloss: list[dict], names: list[str], always: list[str], limit: int = 12) -> list[str]:
+    """Известные написания, близкие по звучанию к словам окна (`A.similar` ≥ 0.6): записи глоссария
+    (сверка по услышанной форме и по канону) и имена; постоянные термины — всегда. Слушателю длинный
+    список не нужен — он слышит сам, а список уводит его к чужим терминам."""
+    words = {A.key(w) for w in re.findall(r"[^\W\d_][\w'-]*", text) if len(A.key(w)) >= 4}
+    entries = []
+    for g in gloss:
+        shown = ' / '.join(dict.fromkeys(g.get('canonicals') or ()))
+        if shown:
+            entries += [(g.get('heard') or shown, shown)] + [(c, shown) for c in g.get('canonicals') or ()]
+    entries += [(n, n) for n in names]
+    score: dict[str, float] = {}
+    for probe, shown in entries:
+        for pw in re.findall(r"[^\W\d_][\w'-]*", probe):
+            if len(A.key(pw)) < 4:
+                continue
+            best = max((A.similar(pw, w) for w in words), default=0.0)
+            if best >= 0.6 and best > score.get(shown, 0.0):
+                score[shown] = best
+    top = [k for k, _ in sorted(score.items(), key=lambda kv: -kv[1])[:limit]]
+    return list(dict.fromkeys(list(always) + top))
+
+
+_LISTENERS: dict[str, object] = {}
+
+
+def listener_llm(cfg, model: str):
+    """Клиент слушателя — один на модель на процесс."""
+    if model not in _LISTENERS:
+        _LISTENERS[model] = cfg.build_llm(model)
+    return _LISTENERS[model]
+
+
+def audio_part(path: str) -> dict:
+    return {'type': 'input_audio',
+            'input_audio': {'data': base64.b64encode(Path(path).read_bytes()).decode('ascii'), 'format': 'wav'}}
+
+
 # --- узел ----------------------------------------------------------------------------------------
 
 async def run_proofread(st, d, ev) -> None:
@@ -286,13 +335,24 @@ async def run_proofread(st, d, ev) -> None:
             out[ear] = (r.get('text') or '').strip()
         return out
 
+    listener = (getattr(cfg, 'proofread_listener', '') or '').strip()
+    lpad = float(getattr(cfg, 'proofread_listener_pad_s', 6.0) or 6.0)
+    names = [x for x in list(h.get('names') or ()) + list(st.known or ()) if isinstance(x, str) and x] \
+        if isinstance(st.known, (list, tuple, set)) else [x for x in (h.get('names') or ()) if isinstance(x, str)]
+
     async def resolve(k: int, f: dict) -> None:
         i = f['turn']
         turn = turns[i]
         t0, t1 = time_of(turn, f['a'], f['b'])
         slices = Slices(d, st.tmp, st.wav, f'pf{k}')
+        audio = None
         try:
-            ears = await hear(slices, t0 - pad, t1 + pad)
+            if listener:
+                ears = {}
+                path = await slices.get(max(0.0, t0 - lpad), min(float(st.audio_sec), t1 + lpad) if st.audio_sec else t1 + lpad)
+                audio = audio_part(path)
+            else:
+                ears = await hear(slices, t0 - pad, t1 + pad)
         except Exception as error:      # noqa: BLE001 — без ушей место не решается, запись не падает
             log.warning('proofread: уши на %.1f с не вышли: %s: %s', t0, type(error).__name__, error)
             st.meter['proofread_ear_errors'] = st.meter.get('proofread_ear_errors', 0) + 1
@@ -301,21 +361,28 @@ async def run_proofread(st, d, ev) -> None:
             slices.cleanup()
         around = d._around(turns, i, 1) if hasattr(d, '_around') else ''
         text = marked(turn, f['a'], f['b'])
-        user = (f'ИЗВЕСТНЫЕ НАПИСАНИЯ: {known_str[:1200]}\n\nКОНТЕКСТ:\n{around}\n\nТЕКСТ:\n'
+        known_here = ', '.join(known_near(A, around + ' ' + text, st.gloss, names, list(cfg.always_terms))) if listener \
+            else known_str[:1200]
+        user = (f'ИЗВЕСТНЫЕ НАПИСАНИЯ: {known_here}\n\nКОНТЕКСТ:\n{around}\n\nТЕКСТ:\n'
                 f"[{turn.get('speaker') or turn.get('cluster') or '?'}] {text}\n\nДОГАДКА: {f.get('guess') or '—'}\n"
                 + (SUSPECT_NOTE + '\n' if f.get('suspect') else '')
                 + ''.join(f'УШИ[{e}] (окно ±{pad:.0f} с): «{txt}»\n' for e, txt in ears.items()))
+        system = RESOLVE_SYS.replace(_CORPUS_SLOT, corpus) + (('\n' + LISTEN_NOTE.format(pad=f'{lpad:.0f}')) if listener else '')
+        content = [{'type': 'text', 'text': user}, audio] if audio else user
+        llm = listener_llm(cfg, listener) if listener else d.llm
         async with sem:
             try:
-                got = await d.llm.complete_json(
-                    [{'role': 'system', 'content': RESOLVE_SYS.replace(_CORPUS_SLOT, corpus)},
-                     {'role': 'user', 'content': user}],
-                    schema=RESOLVE_SCHEMA, schema_name='proofread_fix', max_tokens=600)
+                got = await llm.complete_json(
+                    [{'role': 'system', 'content': system},
+                     {'role': 'user', 'content': content}],
+                    schema=RESOLVE_SCHEMA, schema_name='proofread_fix', max_tokens=900 if listener else 600)
             except Exception as error:      # noqa: BLE001
                 log.warning('proofread: решатель на %.1f с сорвался: %s: %s', t0, type(error).__name__, error)
                 st.meter['proofread_resolve_errors'] = st.meter.get('proofread_resolve_errors', 0) + 1
                 return
-        got = got or {}
+        if isinstance(got, list):       # qwen3.8-omni отвечает [{…}] вместо {…} (замерено 15.10)
+            got = next((x for x in got if isinstance(x, dict)), {})
+        got = got if isinstance(got, dict) else {}
         fix = got.get('fix') if isinstance(got.get('fix'), dict) else None
         row = {'turn': i, 'start': round(t0, 2), 'quote': f['quote'], 'guess': f.get('guess', ''),
                'old_error': got.get('old_error'), 'heard': got.get('heard'), 'ok': False, 'why': ''}
@@ -326,13 +393,26 @@ async def run_proofread(st, d, ev) -> None:
         was = str(fix['was']).strip().strip('«»"“”')
         now = str(fix['now']).strip().strip('«»"“”')
         row.update(was=was, now=now)
-        by = [e for e, txt in ears.items() if heard_supports(A, txt, was, now)[0]]
-        # Одно чистое ухо — не свидетель: это та же модель, что основной проход (см. config).
-        weak = by == ['clean'] and len(ears_wanted) > 1 and not getattr(cfg, 'proofread_clean_alone', False)
-        if (len(by) < cfg.proofread_min_ears or weak) and not latin_known(now, known_latin):
-            row['why'] = 'proofread:no_witness' if not weak else 'proofread:clean_alone'
-            fixes_log.append(row)
-            return
+        if listener:
+            # Слух слушателя — свидетель; новую латиницу он один не подтверждает, только канон.
+            heard = str(got.get('heard') or '')
+            by = ['listener'] if heard_supports(A, heard, was, now)[0] else []
+            if by and new_latin(was, now) and not latin_known(now, known_latin):
+                row['why'] = 'proofread:listener_latin'
+                fixes_log.append(row)
+                return
+            if not by and not latin_known(now, known_latin):
+                row['why'] = 'proofread:no_witness'
+                fixes_log.append(row)
+                return
+        else:
+            by = [e for e, txt in ears.items() if heard_supports(A, txt, was, now)[0]]
+            # Одно чистое ухо — не свидетель: это та же модель, что основной проход (см. config).
+            weak = by == ['clean'] and len(ears_wanted) > 1 and not getattr(cfg, 'proofread_clean_alone', False)
+            if (len(by) < cfg.proofread_min_ears or weak) and not latin_known(now, known_latin):
+                row['why'] = 'proofread:no_witness' if not weak else 'proofread:clean_alone'
+                fixes_log.append(row)
+                return
         verdicts: list[dict] = []
         max_was = int(getattr(cfg, 'proofread_max_was_words', 3) or 3)
         new_text, applied, _skipped = d.apply_fixes(turn['final'], [{'was': was, 'now': now}], known_list,
@@ -365,7 +445,7 @@ async def run_proofread(st, d, ev) -> None:
         st.raw_side.setdefault(f"{t['start']:.1f}", {'raw': t.get('raw'), 'final': t['final']})
         st.raw_side[f"{t['start']:.1f}"]['final'] = t['final']
     st.decisions.append({'place': 'proofread', 'flags': len(flags), 'accepted': accepted['n'],
-                         'ears': ears_wanted, 'min_ears': cfg.proofread_min_ears})
+                         'ears': ([f'listener:{listener}'] if listener else ears_wanted), 'min_ears': cfg.proofread_min_ears})
     st.tm['proofread_s'] = round(time.monotonic() - _t, 1)
     st.tm['n_proofread_accepted'] = accepted['n']
     ev.stage_done('proofread', st.tm['proofread_s'], n=len(flags), accepted=accepted['n'])

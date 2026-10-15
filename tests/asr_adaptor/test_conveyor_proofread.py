@@ -159,3 +159,73 @@ def test_node_is_off_by_default():
     assert entry[2](SimpleNamespace(proofread=False), None) is False
     names = [e[0] for e in nodes.NODES]
     assert names.index('final_round') < names.index('proofread') < names.index('speakers')
+
+
+class FakeListener:
+    """Слушатель: аудио-LLM, слышит окно сама; `heard` — её дословная расшифровка окна."""
+
+    def __init__(self, heard: str, fix: dict):
+        self.heard, self.fix, self.seen = heard, fix, []
+
+    async def complete_json(self, messages, schema=None, schema_name='', max_tokens=None, **kw):
+        self.seen.append(messages[-1]['content'])
+        return {'old_error': 'yes', 'heard': self.heard, 'fix': self.fix, 'why': 'тест'}
+
+
+def _listener_deps(tmp_path, listener, **cfg):
+    from conveyor import proofread as P
+    P._LISTENERS.clear()
+    text_llm = FakeLLM({})
+    d = _deps(tmp_path, {'clean': 'не должно звучать', 'second': 'не должно звучать'}, text_llm,
+              proofread_listener='test/omni', proofread_listener_pad_s=6.0, **cfg)
+    d.cfg.build_llm = lambda model=None: listener
+    return d, text_llm
+
+
+async def test_listener_hears_the_window_itself(tmp_path):
+    """Слушатель (ADR-0032, 15.10): звук окна уходит в запрос, уши не зовутся, свидетель — его же слух."""
+    listener = FakeListener('редко материнские платы такого класса', {'was': 'оплаты', 'now': 'платы'})
+    d, text_llm = _listener_deps(tmp_path, listener)
+    d.audio_clients.asr = lambda *a, **k: (_ for _ in ()).throw(AssertionError('уши не нужны'))
+    st = _state(tmp_path)
+    await run_proofread(st, d, Emitter(None, time.monotonic()))
+    assert 'материнские платы такого' in st.turns[0]['final']
+    assert [r['why'] for r in st.round_log if r.get('ok')] == ['proofread:listener']
+    parts = listener.seen[0]
+    assert isinstance(parts, list) and parts[1]['type'] == 'input_audio' and parts[1]['input_audio']['format'] == 'wav'
+    assert text_llm.calls == ['proofread_flags']          # детектор — основная модель, решает слушатель
+
+
+async def test_listener_without_hearing_is_refused(tmp_path):
+    listener = FakeListener('совсем другие слова', {'was': 'оплаты', 'now': 'платы'})
+    d, _ = _listener_deps(tmp_path, listener)
+    st = _state(tmp_path)
+    await run_proofread(st, d, Emitter(None, time.monotonic()))
+    assert 'оплаты' in st.turns[0]['final']
+    assert st.round_log[0]['why'] == 'proofread:no_witness'
+
+
+async def test_listener_alone_does_not_bring_new_latin(tmp_path):
+    """Порчи слушателя по слуху владельца — новая латиница: «слон → Qwen», «Alibaba Plus → Alibaba Cloud»."""
+    listener = FakeListener('материнские Qwen такого', {'was': 'оплаты', 'now': 'Qwen'})
+    d, _ = _listener_deps(tmp_path, listener)
+    st = _state(tmp_path)
+    await run_proofread(st, d, Emitter(None, time.monotonic()))
+    assert 'оплаты' in st.turns[0]['final']
+    assert st.round_log[0]['why'] == 'proofread:listener_latin'
+    d, _ = _listener_deps(tmp_path, listener, always_terms=['Qwen'])   # канон знает — проходит
+    st = _state(tmp_path)
+    await run_proofread(st, d, Emitter(None, time.monotonic()))
+    assert 'материнские Qwen' in st.turns[0]['final']
+
+
+async def test_listener_answer_wrapped_in_a_list(tmp_path):
+    """Живой qwen3.8-omni-flash отдаёт JSON списком из одного объекта — узел не падает и разбирает его."""
+    class ListListener(FakeListener):
+        async def complete_json(self, *a, **k):
+            return [await super().complete_json(*a, **k)]
+    listener = ListListener('редко материнские платы такого', {'was': 'оплаты', 'now': 'платы'})
+    d, _ = _listener_deps(tmp_path, listener)
+    st = _state(tmp_path)
+    await run_proofread(st, d, Emitter(None, time.monotonic()))
+    assert 'материнские платы' in st.turns[0]['final']
