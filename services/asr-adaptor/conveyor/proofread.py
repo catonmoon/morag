@@ -356,8 +356,11 @@ async def run_proofread(st, d, ev) -> None:
     route = (getattr(cfg, 'proofread_route', '') or '').strip()
     both = bool(listener) and route == 'kind' and bool(ears_wanted)
 
-    async def ask(llm, system: str, user, max_tokens: int, t0: float) -> dict | None:
-        async with sem:
+    # Слушатель — облако другой модели: свой лимит одновременных вызовов, не делит его с решателем по ушам.
+    lsem = asyncio.Semaphore(max(1, cfg.round_concurrency))
+
+    async def ask(llm, system: str, user, max_tokens: int, t0: float, gate=None) -> dict | None:
+        async with (gate or sem):
             try:
                 got = await llm.complete_json(
                     [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}],
@@ -420,34 +423,43 @@ async def run_proofread(st, d, ev) -> None:
         turn = turns[i]
         t0, t1 = time_of(turn, f['a'], f['b'])
         slices = Slices(d, st.tmp, st.wav, f'pf{k}')
-        audio, ears = None, {}
-        try:
-            if listener:
-                path = await slices.get(max(0.0, t0 - lpad), min(float(st.audio_sec), t1 + lpad) if st.audio_sec else t1 + lpad)
-                audio = audio_part(path)
-            if not listener or both:
-                ears = await hear(slices, t0 - pad, t1 + pad)
-        except Exception as error:      # noqa: BLE001 — без ушей место не решается, запись не падает
-            log.warning('proofread: уши на %.1f с не вышли: %s: %s', t0, type(error).__name__, error)
-            st.meter['proofread_ear_errors'] = st.meter.get('proofread_ear_errors', 0) + 1
-            return
-        finally:
-            slices.cleanup()
         around = d._around(turns, i, 1) if hasattr(d, '_around') else ''
         text = marked(turn, f['a'], f['b'])
         head = (f'КОНТЕКСТ:\n{around}\n\nТЕКСТ:\n'
                 f"[{turn.get('speaker') or turn.get('cluster') or '?'}] {text}\n\nДОГАДКА: {f.get('guess') or '—'}\n"
                 + (SUSPECT_NOTE + '\n' if f.get('suspect') else ''))
         system = RESOLVE_SYS.replace(_CORPUS_SLOT, corpus)
+        ears: dict = {}
+
+        async def via_listener():
+            # Слушатель не ждёт ушей: его окно режется и уходит в облако сразу.
+            path = await slices.get(max(0.0, t0 - lpad), min(float(st.audio_sec), t1 + lpad) if st.audio_sec else t1 + lpad)
+            known_here = ', '.join(known_near(A, around + ' ' + text, st.gloss, names, list(cfg.always_terms)))
+            return await ask(listener_llm(cfg, listener), system + '\n' + LISTEN_NOTE.format(pad=f'{lpad:.0f}'),
+                             [{'type': 'text', 'text': f'ИЗВЕСТНЫЕ НАПИСАНИЯ: {known_here}\n\n' + head}, audio_part(path)],
+                             900, t0, gate=lsem)
+
+        async def via_ears():
+            ears.update(await hear(slices, t0 - pad, t1 + pad))
+            return await ask(d.llm, system, f'ИЗВЕСТНЫЕ НАПИСАНИЯ: {known_str[:1200]}\n\n' + head
+                             + ''.join(f'УШИ[{e}] (окно ±{pad:.0f} с): «{txt}»\n' for e, txt in ears.items()), 600, t0)
+
         jobs = {}
         if listener:
-            known_here = ', '.join(known_near(A, around + ' ' + text, st.gloss, names, list(cfg.always_terms)))
-            jobs['listener'] = ask(listener_llm(cfg, listener), system + '\n' + LISTEN_NOTE.format(pad=f'{lpad:.0f}'),
-                                   [{'type': 'text', 'text': f'ИЗВЕСТНЫЕ НАПИСАНИЯ: {known_here}\n\n' + head}, audio], 900, t0)
-        if ears:
-            jobs['ears'] = ask(d.llm, system, f'ИЗВЕСТНЫЕ НАПИСАНИЯ: {known_str[:1200]}\n\n' + head
-                               + ''.join(f'УШИ[{e}] (окно ±{pad:.0f} с): «{txt}»\n' for e, txt in ears.items()), 600, t0)
-        answers = dict(zip(jobs, await asyncio.gather(*jobs.values())))
+            jobs['listener'] = via_listener()
+        if not listener or both:
+            jobs['ears'] = via_ears()
+        try:
+            got_all = await asyncio.gather(*jobs.values(), return_exceptions=True)
+        finally:
+            slices.cleanup()
+        answers = {}
+        for name, got in zip(jobs, got_all):
+            if isinstance(got, Exception):      # без ушей/звука место не решается этой стороной, запись не падает
+                log.warning('proofread: %s на %.1f с не вышли: %s: %s', name, t0, type(got).__name__, got)
+                st.meter['proofread_ear_errors'] = st.meter.get('proofread_ear_errors', 0) + 1
+                got = None
+            answers[name] = got
         if all(v is None for v in answers.values()):
             return
         c_l = candidate(answers['listener'], by_listener) if answers.get('listener') is not None else None
