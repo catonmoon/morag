@@ -312,7 +312,8 @@ async def run_proofread(st, d, ev) -> None:
                 got = await d.llm.complete_json(
                     [{'role': 'system', 'content': DETECT_SYS.replace(_CORPUS_SLOT, corpus)},
                      {'role': 'user', 'content': user}],
-                    schema=DETECT_SCHEMA, schema_name='proofread_flags', max_tokens=2500)
+                    schema=DETECT_SCHEMA, schema_name='proofread_flags',
+                    max_tokens=int(getattr(cfg, 'proofread_detect_max_tokens', 2500) or 2500))
             except Exception as error:      # noqa: BLE001 — батч без пометок, не падение записи
                 log.warning('proofread: детектор батча %d сорвался: %s: %s', bi, type(error).__name__, error)
                 st.meter['proofread_detect_errors'] = st.meter.get('proofread_detect_errors', 0) + 1

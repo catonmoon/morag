@@ -267,6 +267,10 @@ class Config:
     proofread_min_ears: int = field(default_factory=lambda: int(_env('ASR_PROOFREAD_MIN_EARS', '1')))
     proofread_pad_s: float = field(default_factory=lambda: float(_env('ASR_PROOFREAD_PAD_S', '4')))
     proofread_max_per_min: float = field(default_factory=lambda: float(_env('ASR_PROOFREAD_MAX_PER_MIN', '4')))
+    # Потолок токенов ответа детектора на страницу. ⚠️ 2500 обрезает JSON на страницах с десятками пометок
+    # (Ornith, 16.10: «Unterminated string» на ~7400 знаках → повтор через 10 с, ~40 с на событие, 4 события на
+    # три записи); 4000 — запас вдвое. Умолчание прежнее.
+    proofread_detect_max_tokens: int = field(default_factory=lambda: int(_env('ASR_PROOFREAD_DETECT_MAX_TOKENS', '2500')))
     proofread_suspect: str = field(default_factory=lambda: _env('ASR_PROOFREAD_SUSPECT', ''))
     # Чистое ухо — та же модель, что основной проход, и ошибается заодно с ним: одно оно свидетелем
     # не считается (контроль молчания 14.10: только clean — 2 верных / 2 порчи, только второе ухо —
