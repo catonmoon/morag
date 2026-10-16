@@ -410,6 +410,16 @@ class Config:
     #     нет слов в окне — прежний запрос к бэкенду. ---
     draft_model: str = field(default_factory=lambda: _env('ASR_DRAFT_MODEL', ''))
     second_from_draft: bool = field(default_factory=lambda: _flag('ASR_SECOND_FROM_DRAFT', '0'))
+    # --- ранние голоса (16.10, ADR-0033 §5): кластеры диаризации узнаются реестром СРАЗУ после диаризации,
+    #     а не после правок. Имена узнанных (реестр + карта вызывающего `hints.speaker_names`) идут в `names`
+    #     подсказки пасса-2 (seed-проход найдёт их в черновике) и в промпты финал-раунда и корректора вместо
+    #     метки кластера, которая им ничего не говорит. Три уровня остаются в данных: кластер → голос → имя. ---
+    voices_early: bool = field(default_factory=lambda: _flag('ASR_VOICES_EARLY', '0'))
+    # --- очередь сервера (ADR-0033 §6): общий замок на всё, что на GPU (полосы gpu, диаризация, выравнивание),
+    #     поверх семафоров ресурсов — две задачи (`ASR_MAX_JOBS=2`) не пересекаются на GPU (13.10: GPU на GPU —
+    #     обе стадии вдвое медленнее), а CPU-полоса и LLM свободны. `ASR_GPU_SLOTS=2` — с пулом whisper. ---
+    gpu_gate: bool = field(default_factory=lambda: _flag('ASR_GPU_GATE', '0'))
+    gpu_slots: int = field(default_factory=lambda: int(_env('ASR_GPU_SLOTS', '1')))
     campp_slots: int = field(default_factory=lambda: int(_env('ASR_CAMPP_SLOTS', '1')))
     align_slots: int = field(default_factory=lambda: int(_env('ASR_ALIGN_SLOTS', '1')))
 

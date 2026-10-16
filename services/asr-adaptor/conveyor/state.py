@@ -58,6 +58,7 @@ class State:
     cents: dict = field(default_factory=dict, metadata={'checkpoint': False})   # биометрия
     air: dict = field(default_factory=dict)
     mapping: dict = field(default_factory=dict)
+    names: dict = field(default_factory=dict)       # Speaker_N → имя (ранние голоса: реестр + hints.speaker_names)
     voice_cos: dict = field(default_factory=dict)    # Speaker_N → косинус матча реестра (для наминга)
     name_map: dict = field(default_factory=dict)
     name_conflicts: list = field(default_factory=list)

@@ -95,16 +95,32 @@ async def opening(st: State, d: Deps, ev: Emitter) -> None:
     1.3 с на минуту звука, диаризация на GPU — 1.5–2 с; черновик прячется под ней целиком). Расписание
     решают полосы, а не отдельная ручка: та же конфигурация на машине без CPU-полосы вернётся к старому порядку."""
     _t = time.monotonic()
+    # Ранние голоса ждут диаризацию, а seed-проход глоссария — имена узнанных голосов: с `ASR_VOICES_EARLY`
+    # глоссарий идёт после обеих ветвей (цена — его ~10 с на запись не прячутся под диаризацией).
+    early = bool(getattr(d.cfg, 'voices_early', False))
+
+    async def diarize_then_voices() -> None:
+        await diarize(st, d, ev)
+        if early:
+            await voices(st, d, ev)
+
     if opening_plan(d.cfg) == 'draft-parallel':
         async def draft_then_text() -> None:
             await pass1(st, d, ev)
             d.prefetch['dsum'] = asyncio.create_task(d.doc_summary(st.full_text, d.llm))
+            if not early:
+                await glossary(st, d, ev)
+        await asyncio.gather(diarize_then_voices(), draft_then_text())
+        if early:
             await glossary(st, d, ev)
-        await asyncio.gather(diarize(st, d, ev), draft_then_text())
     else:
         await pass1(st, d, ev)
         d.prefetch['dsum'] = asyncio.create_task(d.doc_summary(st.full_text, d.llm))
-        await asyncio.gather(diarize(st, d, ev), glossary(st, d, ev))
+        if early:
+            await diarize_then_voices()
+            await glossary(st, d, ev)
+        else:
+            await asyncio.gather(diarize(st, d, ev), glossary(st, d, ev))
     st.tm['opening_s'] = round(time.monotonic() - _t, 1)
 
 
@@ -454,6 +470,9 @@ async def turns(st: State, d: Deps, ev: Emitter) -> None:
         for h0, h1 in d.coverage.holes(d.coverage.turn_segments(t), a, b, cfg.coverage_warn_s):
             log.warning('speech lost: %.1fs at %.1fs (turn %.1f-%.1f)', h1 - h0, h0, a, b)
     st.turns = out
+    if st.mapping:
+        # Ранние голоса: реплика получает голос и имя сразу — их видят промпты финал-раунда и корректора.
+        _label_turns(st)
 
 
 # --- final-round --------------------------------------------------------------------------------
@@ -591,25 +610,31 @@ async def final_round(st: State, d: Deps, ev: Emitter) -> None:
 
 # --- speakers -----------------------------------------------------------------------------------
 
-async def speakers(st: State, d: Deps, ev: Emitter) -> None:
+async def _assign_voices(st: State, d: Deps, ev: Emitter, spans: list, *, ticket: bool) -> None:
+    """Центроиды кластеров по отрезкам `spans` (CAM++) → реестр → `st.mapping` (кластер → Speaker_N), решения
+    реестра — в журнал и ленту. Под билетом — строго в порядке поступления выпусков (нумерация новых голосов
+    детерминирована); без билета — только под файловым замком реестра: так узнаются кластеры, появившиеся
+    ПОСЛЕ ранних голосов (`recover`), чтобы не держать очередь задач от ранней записи до поздней."""
     cfg = d.cfg
-    ev.stage('speakers')
-    _t = time.monotonic()
-    await d._wait_turn(st.ticket)  # реестр — строго в порядке поступления выпусков
-    st.tm['ticket_wait_s'] = round(time.monotonic() - _t, 1)
+    if ticket:
+        _w = time.monotonic()
+        await d._wait_turn(st.ticket)  # реестр — строго в порядке поступления выпусков
+        st.tm['ticket_wait_s'] = round(time.monotonic() - _w, 1)
     async with d._res('campp', cfg.campp_slots):
-        st.cents, st.air = await asyncio.to_thread(d.audio_clients.campp, st.wav, st.spans)
+        cents, air = await asyncio.to_thread(d.audio_clients.campp, st.wav, spans)
     decided: list[dict] | None = [] if (ev.enabled or cfg.record_guard or cfg.naming_trust_cos) else None
     # ⚠️ Ключ передаётся ТОЛЬКО когда включён: заглушки реестра в тестах — прежней сигнатуры.
     guard = {'record_guard': True} if cfg.record_guard else {}
-    st.mapping = await asyncio.to_thread(
-        lambda: d.registry.assign(st.cents, st.air, st.episode or 'adhoc', cfg.registry_path,
+    mapping = await asyncio.to_thread(
+        lambda: d.registry.assign(cents, air, st.episode or 'adhoc', cfg.registry_path,
                                   cfg.match_threshold, cfg.max_centroids, decided, **guard))
-    d._release_turn(st.ticket)
+    if ticket:
+        d._release_turn(st.ticket)
+    st.cents, st.air, st.mapping = {**st.cents, **cents}, {**st.air, **air}, {**st.mapping, **mapping}
     # Решения реестра по кластерам (без центроидов — биометрия в артефакт не едет): без них не
     # понять, почему два ведущих вышли одним голосом или разошлись.
     if cfg.record_guard and decided:
-        st.voice_log['registry'] = decided
+        st.voice_log['registry'] = st.voice_log.get('registry', []) + decided
     # Уверенность матча по метке — наминг по ней решает, перебивать ли голос именем из интро.
     for x in decided or ():
         if x['action'] == 'matched':
@@ -618,7 +643,11 @@ async def speakers(st: State, d: Deps, ev: Emitter) -> None:
         xy = d._project(st.cents)
         for x in decided:
             ev.emit('spk.vec', xy=xy.get(x['cluster'], [0.0, 0.0]), **x)
-    # реплики кластеров без матча (короткий шум) → доминирующий Speaker по air-time
+
+
+def _label_turns(st: State) -> None:
+    """Реплика → голос: кластер по карте реестра, кластер без матча (короткий шум) → доминирующий голос по
+    эфиру; имя — из `st.names`, если голос назван (ранние голоса; без них ключа `name` нет)."""
     air_by_lbl: dict[str, float] = defaultdict(float)
     for t in st.turns:
         lbl = st.mapping.get(t['cluster'])
@@ -627,6 +656,49 @@ async def speakers(st: State, d: Deps, ev: Emitter) -> None:
     dominant = max(air_by_lbl, key=air_by_lbl.get) if air_by_lbl else 'Speaker_0'
     for t in st.turns:
         t['speaker'] = st.mapping.get(t['cluster'], dominant)
+        if st.names.get(t['speaker']):
+            t['name'] = st.names[t['speaker']]
+
+
+async def voices(st: State, d: Deps, ev: Emitter) -> None:
+    """Ранние голоса (ADR-0033 §5): кластеры диаризации узнаются реестром СРАЗУ после диаризации, до пасса-2.
+
+    Три уровня, которые нельзя смешивать: метка кластера (`SPEAKER_X`, центроид этой записи) → голос реестра
+    (`Speaker_N`, один на корпус) → имя человека. Пайплайну полезен ИМЕНОВАННЫЙ спикер: имена узнанных идут в
+    `names` подсказки пасса-2 (seed-проход найдёт их в черновике — канон написания фамилий, когда их называют),
+    в известные написания финал-раунда и корректора и в их промпты вместо метки кластера. Имя — из реестра
+    или карты вызывающего `hints.speaker_names` (словарь имён корпуса; он старше реестра). Данные несут все три
+    уровня: `cluster`, `speaker`, `name`."""
+    cfg = d.cfg
+    ev.stage('voices')
+    _t = time.monotonic()
+    await _assign_voices(st, d, ev, st.spans, ticket=True)
+    given = {str(k): str(v) for k, v in ((st.hints or {}).get('speaker_names') or {}).items() if k and v}
+    st.names = {**(d.registry.names(cfg.registry_path) or {}), **given}
+    known = sorted({st.names[s] for s in set(st.mapping.values()) if st.names.get(s)})
+    if known:
+        h = dict(st.hints or {})
+        h['names'] = list(dict.fromkeys(list(h.get('names') or ()) + known))
+        st.hints = h
+        st.voice_log['names_from_voices'] = known
+    st.tm['voices_s'] = round(time.monotonic() - _t, 1)
+    ev.stage_done('voices', st.tm['voices_s'], n=len(st.mapping), named=len(known))
+    log.info('voices: кластеров %d, узнано голосов %d, с именем %d', len(st.spans and {s['speaker'] for s in st.spans}),
+             len(set(st.mapping.values())), len(known))
+
+
+async def speakers(st: State, d: Deps, ev: Emitter) -> None:
+    cfg = d.cfg
+    ev.stage('speakers')
+    _t = time.monotonic()
+    if getattr(cfg, 'voices_early', False) and st.mapping:
+        # Голоса узнаны рано: здесь — только кластеры, появившиеся после (`recover`), без билета.
+        fresh = sorted({t['cluster'] for t in st.turns} - set(st.mapping))
+        if fresh:
+            await _assign_voices(st, d, ev, [s for s in st.spans if s.get('speaker') in fresh], ticket=False)
+    else:
+        await _assign_voices(st, d, ev, st.spans, ticket=True)
+    _label_turns(st)
     st.tm['speakers_s'] = round(time.monotonic() - _t, 1)
 
 
@@ -660,6 +732,9 @@ async def assemble(st: State, d: Deps, ev: Emitter) -> None:
         out_turns.append({'speaker': t['speaker'], 'speaker_id': t['speaker_id'],
                           'start': round(t['start'], 1), 'end': t['end'],
                           'text': t['final'], 'raw': t['raw'], 'segments': t['segments'],
+                          # Три уровня голоса в артефакте (ADR-0033 §5): кластер, голос реестра, имя.
+                          **({'cluster': t['cluster']} if t.get('name') else {}),
+                          **({'name': t['name']} if t.get('name') else {}),
                           **({'correction_failed': True} if t.get('correction_failed') else {})})
     st.markdown, st.text, st.out_turns = '\n'.join(lines), ' '.join(plain), out_turns
 
@@ -793,6 +868,7 @@ NODES: list[tuple[str, object, object]] = [
     ('prepare', prepare, None),
     ('opening', opening, lambda cfg, st: bool(cfg.overlap)),
     ('diarize', diarize, lambda cfg, st: not cfg.overlap),
+    ('voices', voices, lambda cfg, st: not cfg.overlap and bool(getattr(cfg, 'voices_early', False))),
     ('pass1', pass1, lambda cfg, st: not cfg.overlap),
     ('glossary', glossary, lambda cfg, st: not cfg.overlap),
     ('chunking', chunking, None),

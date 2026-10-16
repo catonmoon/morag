@@ -30,7 +30,9 @@ def result(st: State) -> dict:
     """Результат прежней формы плюс ключ `conveyor` (узлы, журнал, решения, счётчики)."""
     return {'markdown': st.markdown, 'text': st.text, 'turns': st.out_turns,
             'raw_sidecar': st.raw_side, 'timing': st.tm, 'speaker_map': st.mapping,
-            'speaker_names': st.name_map, 'name_conflicts': st.name_conflicts,
+            # Имена: наминг (подкаст) или ранние голоса (реестр + карта вызывающего) — только голоса записи.
+            'speaker_names': st.name_map or {s: st.names[s] for s in sorted(set(st.mapping.values())) if st.names.get(s)},
+            'name_conflicts': st.name_conflicts,
             'coverage': st.cov, 'words': st.words_doc,
             'env': st.env,
             'glossary': st.gloss, 'doc_summary': st.dsum,

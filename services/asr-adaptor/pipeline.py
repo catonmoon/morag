@@ -55,22 +55,31 @@ RES_METER: contextvars.ContextVar[dict | None] = contextvars.ContextVar('asr_res
 
 
 class _Gate:
-    """Семафор ресурса с учётом ожидания и занятости. Вне выпуска (тесты, sync) — просто семафор."""
+    """Семафор ресурса с учётом ожидания и занятости. Вне выпуска (тесты, sync) — просто семафор.
 
-    __slots__ = ('name', 'sem', 't')
+    `parent` — общий замок GPU (`ASR_GPU_GATE`): берётся ПОСЛЕ своего семафора и отпускается ПЕРВЫМ; родитель —
+    лист, цикла ожидания нет. `wait_<имя>_s` — всё ожидание, `wait_gpu_s` — его доля на родителе."""
 
-    def __init__(self, name: str, sem: asyncio.Semaphore) -> None:
-        self.name, self.sem, self.t = name, sem, 0.0
+    __slots__ = ('name', 'sem', 'parent', 't')
+
+    def __init__(self, name: str, sem: asyncio.Semaphore, parent: asyncio.Semaphore | None = None) -> None:
+        self.name, self.sem, self.parent, self.t = name, sem, parent, 0.0
 
     async def __aenter__(self):
         t0 = time.monotonic()
         await self.sem.acquire()
+        if self.parent is not None:
+            t1 = time.monotonic()
+            await self.parent.acquire()
+            _meter_add('wait_gpu_s', time.monotonic() - t1)
         self.t = time.monotonic()
         _meter_add(f'wait_{self.name}_s', self.t - t0)
         return self
 
     async def __aexit__(self, *exc):
         _meter_add(f'busy_{self.name}_s', time.monotonic() - self.t)
+        if self.parent is not None:
+            self.parent.release()
         self.sem.release()
         return False
 
@@ -81,10 +90,24 @@ def _meter_add(key: str, sec: float) -> None:
         m[key] = round(m.get(key, 0.0) + sec, 2)
 
 
+GPU_RESOURCES = frozenset({'whisper', 'diarize', 'align'})
+
+
+def _gpu_resources() -> frozenset:
+    """Ресурсы на GPU: бэкенды whisper/диаризации/выравнивания и полосы с устройством `gpu`."""
+    lanes = getattr(CFG, 'lanes', None) or {}
+    return GPU_RESOURCES | {ln.name for ln in lanes.values() if getattr(ln, 'device', '') == 'gpu'}
+
+
 def _res(name: str, slots: int) -> _Gate:
     if name not in _RES_SEMS:
         _RES_SEMS[name] = asyncio.Semaphore(max(1, slots))
-    return _Gate(name, _RES_SEMS[name])
+    parent = None
+    if getattr(CFG, 'gpu_gate', False) and name in _gpu_resources():
+        if 'gpu' not in _RES_SEMS:
+            _RES_SEMS['gpu'] = asyncio.Semaphore(max(1, int(getattr(CFG, 'gpu_slots', 1) or 1)))
+        parent = _RES_SEMS['gpu']
+    return _Gate(name, _RES_SEMS[name], parent)
 
 
 # Реестр голосов требует ДЕТЕРМИНИЗМА порядка (нумерация Speaker_N по порядку появления): при
@@ -153,7 +176,9 @@ def _around(turns, i: int, n: int = 2) -> str:
     шум, а окно в токенах вообще ничего не значит для смысла.
     """
     lo, hi = max(0, i - n), min(len(turns), i + n + 1)
-    parts = [f"[{t.get('speaker') or t.get('cluster') or '?'}] {t['raw']}"
+    # Имя человека, если голос узнан и назван (ранние голоса, ADR-0033 §5); иначе голос реестра; метка кластера —
+    # последняя: модели она ничего не говорит.
+    parts = [f"[{t.get('name') or t.get('speaker') or t.get('cluster') or '?'}] {t['raw']}"
              for k, t in enumerate(turns[lo:hi], start=lo) if k != i]
     return '\n'.join(parts)
 
