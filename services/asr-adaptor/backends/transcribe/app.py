@@ -117,12 +117,8 @@ def _engine(path: str) -> dict | None:
     return json.loads(f.read_text())
 
 
-def _gigaam_transcribe(model_dir: str, cfg: dict, wav_path: str) -> str:
-    """Текст куска моделью GigaAM. Кусок длиннее 24 с режется на равные части (концы — по сетке
-    времени; это второе ухо, а не основной проход: слово на шве в худшем случае попадёт в спор)."""
+def _load_gigaam(model_dir: str, cfg: dict):
     import gigaam
-    import soundfile as sf
-    from gigaam.preprocess import SAMPLE_RATE, load_audio
     key = (model_dir, cfg['name'])
     if key not in _LOADED:
         # ⚠️ Потоки torch: декодер RNN-T упирается в питоновский цикл по токенам, и потоки ему МЕШАЮТ —
@@ -133,7 +129,23 @@ def _gigaam_transcribe(model_dir: str, cfg: dict, wav_path: str) -> str:
         torch.set_num_threads(max(1, int(os.environ.get('GIGAAM_THREADS', '2') or 2)))
         device = os.environ.get('GIGAAM_DEVICE', '').strip() or cfg.get('device') or 'cpu'
         _LOADED[key] = gigaam.load_model(cfg['name'], download_root=model_dir, device=device)
-    model = _LOADED[key]
+    return _LOADED[key]
+
+
+def _count_cpu(t0: float, audio_s: float) -> None:
+    # Счётчики своей полосы: один поток инференса на процесс, гонки нет; ключи отдельные от mlx —
+    # `/stats` показывает, сколько процесс слушал каждым движком.
+    STATS['requests_cpu'] = STATS.get('requests_cpu', 0) + 1
+    STATS['infer_cpu_s'] = round(STATS.get('infer_cpu_s', 0.0) + time.monotonic() - t0, 2)
+    STATS['audio_cpu_s'] = round(STATS.get('audio_cpu_s', 0.0) + audio_s, 1)
+
+
+def _gigaam_transcribe(model_dir: str, cfg: dict, wav_path: str) -> str:
+    """Текст куска моделью GigaAM. Кусок длиннее 24 с режется на равные части (концы — по сетке
+    времени; это второе ухо, а не основной проход: слово на шве в худшем случае попадёт в спор)."""
+    import soundfile as sf
+    from gigaam.preprocess import SAMPLE_RATE, load_audio
+    model = _load_gigaam(model_dir, cfg)
     t0 = time.monotonic()
     audio = load_audio(wav_path).numpy()
     parts = max(1, math.ceil(len(audio) / (_GIGA_MAX_S * SAMPLE_RATE)))
@@ -146,12 +158,39 @@ def _gigaam_transcribe(model_dir: str, cfg: dict, wav_path: str) -> str:
         with tempfile.NamedTemporaryFile(suffix='.wav') as t:
             sf.write(t.name, piece, SAMPLE_RATE)
             texts.append(str(model.transcribe(t.name)).strip())
-    # Счётчики своей полосы: один поток инференса на процесс, гонки нет; ключи отдельные от mlx —
-    # `/stats` показывает, сколько процесс слушал каждым движком.
-    STATS['requests_cpu'] = STATS.get('requests_cpu', 0) + 1
-    STATS['infer_cpu_s'] = round(STATS.get('infer_cpu_s', 0.0) + time.monotonic() - t0, 2)
-    STATS['audio_cpu_s'] = round(STATS.get('audio_cpu_s', 0.0) + len(audio) / SAMPLE_RATE, 1)
+    _count_cpu(t0, len(audio) / SAMPLE_RATE)
     return ' '.join(x for x in texts if x)
+
+
+def _gigaam_draft(model_dir: str, cfg: dict, wav_path: str, language: str) -> dict:
+    """Черновик записи ЦЕЛИКОМ моделью GigaAM: части по самой тихой точке окна [20, 24] с, слова с
+    временами (RNN-T, покадрово), сегменты по знакам конца предложения и паузам — `cutting.py`.
+    Ответ той же формы, что у mlx-whisper с `word_timestamps`: разрез на куски читает `segments[].words`.
+    Зовётся только по просьбе `word_timestamps=1` — её шлёт пасс-1 с `ASR_DRAFT_MODEL`; короткое ухо на
+    кусках арбитража и корректора идёт прежним путём (сетка, без времён), байт в байт как до 16.10."""
+    import soundfile as sf
+    from gigaam.preprocess import SAMPLE_RATE, load_audio
+    try:
+        import cutting
+    except ImportError:                      # запуск не из каталога бэкенда
+        sys.path.insert(0, str(Path(__file__).parent))
+        import cutting
+    model = _load_gigaam(model_dir, cfg)
+    t0 = time.monotonic()
+    audio = load_audio(wav_path).numpy()
+    words: list[dict] = []
+    texts: list[str] = []
+    for a, b in cutting.quiet_cuts(audio, SAMPLE_RATE, hi=_GIGA_MAX_S):
+        piece = audio[int(a * SAMPLE_RATE):int(b * SAMPLE_RATE)]
+        if len(piece) < SAMPLE_RATE // 10:
+            continue
+        with tempfile.NamedTemporaryFile(suffix='.wav') as t:
+            sf.write(t.name, piece, SAMPLE_RATE)
+            r = model.transcribe(t.name, word_timestamps=True)
+        texts.append(str(r.text).strip())
+        words += [{'word': w.text, 'start': round(a + w.start, 3), 'end': round(a + w.end, 3)} for w in (r.words or [])]
+    _count_cpu(t0, len(audio) / SAMPLE_RATE)
+    return cutting.verbose_json(words, language, len(audio) / SAMPLE_RATE, text=' '.join(x for x in texts if x))
 DEFAULT_MODEL = 'whisper-podlodka-turbo'
 API_KEY = os.environ.get('TRANSCRIBE_API_KEY')  # опц. Bearer-защита
 
@@ -250,19 +289,28 @@ async def transcribe(
     Path(tmp).write_bytes(await file.read())
     engine = _engine(repo)
     if engine is not None:
+        want_words = word_timestamps.strip().lower() in ('1', 'true', 'yes', 'on')
         try:
             if engine.get('engine') != 'gigaam':
                 raise HTTPException(400, f'движок {engine.get("engine")!r} модели {model!r} не поддержан')
-            text = await asyncio.get_running_loop().run_in_executor(
-                _INFER, lambda: _gigaam_transcribe(repo, engine, tmp))
+            if want_words:
+                # Черновик с временами слов (пасс-1 с ASR_DRAFT_MODEL) — см. `_gigaam_draft`.
+                draft = await asyncio.get_running_loop().run_in_executor(
+                    _INFER, lambda: _gigaam_draft(repo, engine, tmp, language))
+                text = draft['text']
+            else:
+                text = await asyncio.get_running_loop().run_in_executor(
+                    _INFER, lambda: _gigaam_transcribe(repo, engine, tmp))
         finally:
             Path(tmp).unlink(missing_ok=True)
-        # Сегментов у второго уха конвейер не читает (только `text`); отдаём один на весь кусок,
-        # чтобы verbose_json оставался того же вида.
         if response_format == 'text':
             return text
         if response_format == 'json':
             return {'text': text}
+        if want_words:
+            return draft
+        # Сегментов у второго уха конвейер не читает (только `text`); отдаём один на весь кусок,
+        # чтобы verbose_json оставался того же вида.
         return {'task': 'transcribe', 'language': language, 'duration': 0.0, 'text': text,
                 'segments': [{'id': 0, 'start': 0.0, 'end': 0.0, 'text': text}] if text else []}
     try:

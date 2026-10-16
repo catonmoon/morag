@@ -41,7 +41,7 @@ from pathlib import Path
 
 from config import lane_for
 from conveyor.editor import heard_supports
-from conveyor.places import Slices
+from conveyor.places import Slices, draft_text, draft_words
 
 log = logging.getLogger('asr')
 
@@ -351,10 +351,19 @@ async def run_proofread(st, d, ev) -> None:
     def _tm(key: str, sec: float) -> None:
         st.tm[key] = round(st.tm.get(key, 0.0) + sec, 2)
 
+    # Второе ухо из слов черновика пасса-1 (`ASR_SECOND_FROM_DRAFT`): черновик той же моделью без подсказки
+    # уже слышал всё окно — переслушивать незачем; нет слов в окне — прежний запрос к бэкенду.
+    draft = draft_words(getattr(st, 'segs', None)) if getattr(cfg, 'second_from_draft', False) else None
+
     async def hear(slices: Slices, a: float, b: float) -> dict[str, str]:
-        path = await slices.get(max(0.0, a), min(float(st.audio_sec or b), b) if st.audio_sec else b)
+        a0, b0 = max(0.0, a), (min(float(st.audio_sec or b), b) if st.audio_sec else b)
+        path = await slices.get(a0, b0)
 
         async def one(ear: str) -> str:
+            if ear == 'second' and draft is not None:
+                heard = draft_text(draft, a0, b0)
+                if heard:
+                    return heard
             if ear == 'omni':
                 # Ухо — аудио-LLM: дословная расшифровка окна, без текста расшифровки и догадки (слух не подстраивается).
                 llm = listener_llm(cfg, cfg.proofread_omni_model, getattr(cfg, 'proofread_omni_base_url', '') or '',

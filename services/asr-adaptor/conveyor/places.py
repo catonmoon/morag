@@ -49,8 +49,28 @@ class Slices:
         self._files.clear()
 
 
-def arbitrate_tools(place: Place, d, slices: Slices, *, journal: list, meter: dict) -> Registry:
-    """Инструменты арбитража одного куска (ADR-0030): ворота-читатель, уши, правила, свидетели."""
+def draft_words(segs) -> list[tuple[str, float, float]] | None:
+    """Слова черновика пасса-1 с временами — только если бэкенд их отдал (`segments[].words`); иначе None и
+    второе ухо слушает бэкенд, как прежде (черновик whisper слов не несёт)."""
+    segs = segs or []
+    if not any(s.get('words') for s in segs):
+        return None
+    from stages.chunking import load_words
+    return load_words({'segments': segs})
+
+
+def draft_text(draft: list[tuple[str, float, float]] | None, a: float, b: float) -> str:
+    """Слова черновика (`(text, start, end)`, по порядку), чья середина лежит в окне [a, b] → текст окна."""
+    if not draft:
+        return ''
+    return ' '.join(w for w, s, e in draft if a <= (float(s) + float(e)) / 2 <= b).strip()
+
+
+def arbitrate_tools(place: Place, d, slices: Slices, *, journal: list, meter: dict, draft=None) -> Registry:
+    """Инструменты арбитража одного куска (ADR-0030): ворота-читатель, уши, правила, свидетели.
+
+    `draft` — слова черновика пасса-1 с временами (`ASR_SECOND_FROM_DRAFT`): второе ухо берёт их из своего
+    окна, не переслушивая; черновик той же моделью без подсказки — то же ухо, только окно другое."""
     cfg = d.cfg
     A = d.arbitrate_stage
     c = place.chunk
@@ -68,6 +88,12 @@ def arbitrate_tools(place: Place, d, slices: Slices, *, journal: list, meter: di
         else:
             disputes = [x for x in place.decisions if x.get('by') == 'спорно']
             a, b = A.ear_window(c, disputes, window, place.audio_sec, place.neighbours)
+        if ear == 'second' and draft is not None:
+            heard = draft_text(draft, a, b)
+            if heard:                        # нет слов в окне — черновик там молчал, переслушиваем как раньше
+                out = {'ear': ear, 'text': heard, 'a': a, 'b': b, 'from': 'draft'}
+                place.heard[ear] = out
+                return out
         path = await slices.get(a, b)
         # Ресурс — полоса модели: второе ухо другой школы на своей полосе (CPU) не ждёт очереди whisper.
         ln = lane_for(cfg, model)
@@ -117,7 +143,8 @@ def arbitrate_tools(place: Place, d, slices: Slices, *, journal: list, meter: di
              schema={'properties': {'ear': {'type': 'string', 'enum': ['second', 'clean']},
                                     'window': {'type': 'string', 'enum': ['same', 'chunk', 'window30', 'neighbours']}},
                      'required': ['ear']},
-             cost=lambda a, r: {'audio_s': float(r['b'] - r['a'])}),
+             # Ухо из черновика звука не стоит — счётчик честен: `audio_s` считает только прослушанное.
+             cost=lambda a, r: {'audio_s': 0.0 if r.get('from') == 'draft' else float(r['b'] - r['a'])}),
         Tool('arbitrate_rules', 'Разобрать расхождения куска с услышанным правилами (частота, канон, '
              'голосование под вето). Возвращает решения и число споров, которые никто не решил.',
              arbitrate_rules),

@@ -59,9 +59,12 @@ async def pass1(st: State, d: Deps, ev: Emitter) -> None:
     cfg = d.cfg
     ev.stage('pass1')
     _t = time.monotonic()
-    ln = lane_for(cfg)                       # полоса модели профиля; без ASR_LANES — прежний ресурс `whisper`
+    # Черновик — моделью `ASR_DRAFT_MODEL` на её полосе (GigaAM на CPU: слова с временами, разрез по тихим
+    # точкам — бэкенд), иначе модель профиля на полосе whisper; без ручек вызов прежний байт в байт.
+    draft = str(getattr(cfg, 'draft_model', '') or '')
+    ln = lane_for(cfg, draft)
     async with d._res(ln.name, ln.slots):
-        p1 = await asyncio.to_thread(d.audio_clients.asr, st.wav, '')
+        p1 = await asyncio.to_thread(d.audio_clients.asr, st.wav, '', **({'model': draft, 'words': True} if draft else {}))
     st.segs = p1['segments']
     st.full_text = ' '.join((s.get('text') or '').strip() for s in st.segs)
     st.tm['pass1_s'] = round(time.monotonic() - _t, 1)
@@ -85,12 +88,32 @@ async def opening(st: State, d: Deps, ev: Emitter) -> None:
     стадии замедлились почти вдвое (64 → 123 с и 81 → 120 с), узел вышел 190 с против 145 по
     очереди. Глоссарию и сводке нужен только черновик пасса-1, диаризации — только звук: их
     наложение бесплатно для GPU. `opening_s` — стеночное время узла.
-    ⚠️ Сводку считаем фоном: её ждёт только финал-раунд."""
+    ⚠️ Сводку считаем фоном: её ждёт только финал-раунд.
+
+    Черновик другой школы на НЕ-GPU полосе (`ASR_DRAFT_MODEL` → `ASR_MODEL_LANES`, устройство cpu/remote) —
+    единственный случай, когда пасс-1 кладётся рядом с диаризацией: GPU он не трогает (16.10: GigaAM на CPU —
+    1.3 с на минуту звука, диаризация на GPU — 1.5–2 с; черновик прячется под ней целиком). Расписание
+    решают полосы, а не отдельная ручка: та же конфигурация на машине без CPU-полосы вернётся к старому порядку."""
     _t = time.monotonic()
-    await pass1(st, d, ev)
-    d.prefetch['dsum'] = asyncio.create_task(d.doc_summary(st.full_text, d.llm))
-    await asyncio.gather(diarize(st, d, ev), glossary(st, d, ev))
+    if opening_plan(d.cfg) == 'draft-parallel':
+        async def draft_then_text() -> None:
+            await pass1(st, d, ev)
+            d.prefetch['dsum'] = asyncio.create_task(d.doc_summary(st.full_text, d.llm))
+            await glossary(st, d, ev)
+        await asyncio.gather(diarize(st, d, ev), draft_then_text())
+    else:
+        await pass1(st, d, ev)
+        d.prefetch['dsum'] = asyncio.create_task(d.doc_summary(st.full_text, d.llm))
+        await asyncio.gather(diarize(st, d, ev), glossary(st, d, ev))
     st.tm['opening_s'] = round(time.monotonic() - _t, 1)
+
+
+def opening_plan(cfg) -> str:
+    """`draft-parallel` — черновик на не-GPU полосе идёт рядом с диаризацией; иначе `serial` (пасс-1 → …)."""
+    draft = str(getattr(cfg, 'draft_model', '') or '')
+    if draft and lane_for(cfg, draft).device != 'gpu':
+        return 'draft-parallel'
+    return 'serial'
 
 
 # --- glossary -----------------------------------------------------------------------------------
@@ -308,7 +331,7 @@ async def relisten(st: State, d: Deps, ev: Emitter) -> None:
 
 async def arbitrate(st: State, d: Deps, ev: Emitter) -> None:
     from conveyor.loop import Place, decide_place
-    from conveyor.places import Slices, arbitrate_tools
+    from conveyor.places import Slices, arbitrate_tools, draft_words
     from conveyor.policy import make_policy
 
     cfg = d.cfg
@@ -316,6 +339,9 @@ async def arbitrate(st: State, d: Deps, ev: Emitter) -> None:
     chunks, hints, gloss = st.chunks, st.hints, st.gloss
     ev.stage('arbitrate')
     _t = time.monotonic()
+    # `ASR_SECOND_FROM_DRAFT`: второе ухо — из слов черновика пасса-1 (та же модель без подсказки уже слышала
+    # всю запись); черновик без времён слов (whisper) → None → уши слушают бэкенд, как прежде.
+    draft = draft_words(st.segs) if getattr(cfg, 'second_from_draft', False) else None
     canon = A.canon_from(hints, gloss)
     gate_terms = [t for t in list((hints or {}).get('terms') or ()) + list((hints or {}).get('names') or ())
                   if isinstance(t, str)] + [x for g in (gloss or ()) for x in (g.get('canonicals') or ())]
@@ -348,7 +374,8 @@ async def arbitrate(st: State, d: Deps, ev: Emitter) -> None:
         place = Place(f'chunk:{i}', 'arbitrate', item=c, canon=canon, gate_terms=gate_terms,
                       audio_sec=st.audio_sec, neighbours=nb, index=i)
         slices = Slices(d, st.tmp, st.wav, f'a{i}')
-        reg = arbitrate_tools(place, d, slices, journal=st.journal, meter=st.meter)
+        reg = arbitrate_tools(place, d, slices, journal=st.journal, meter=st.meter,
+                              **({'draft': draft} if draft is not None else {}))
         try:
             fin = await decide_place(place, policy, reg, cfg.place_steps)
             _account(place)

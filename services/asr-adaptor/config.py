@@ -402,6 +402,14 @@ class Config:
     # Пусто — одна полоса `whisper`, прежнее поведение.
     lanes: dict = field(default_factory=_lanes)
     model_lanes: dict = field(default_factory=_model_lanes)
+    # --- черновик другой школой (16.10). Пасс-1 моделью `ASR_DRAFT_MODEL` вместо модели профиля (пусто —
+    #     как было). Зачем: GigaAM на своей полосе CPU делает черновик записи целиком за 1.3 с на минуту
+    #     звука (whisper-пасс-1 на GPU — ~6 с) и ПАРАЛЛЕЛЬНО диаризации (`ASR_OVERLAP`); слова с временами
+    #     идут разрезу на куски. `ASR_SECOND_FROM_DRAFT=1` — второе ухо арбитража и корректора берёт слова
+    #     черновика в своём окне, не переслушивая: та же модель без подсказки — то же ухо, другое окно;
+    #     нет слов в окне — прежний запрос к бэкенду. ---
+    draft_model: str = field(default_factory=lambda: _env('ASR_DRAFT_MODEL', ''))
+    second_from_draft: bool = field(default_factory=lambda: _flag('ASR_SECOND_FROM_DRAFT', '0'))
     campp_slots: int = field(default_factory=lambda: int(_env('ASR_CAMPP_SLOTS', '1')))
     align_slots: int = field(default_factory=lambda: int(_env('ASR_ALIGN_SLOTS', '1')))
 
