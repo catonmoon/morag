@@ -218,7 +218,9 @@ async def glossary(st: State, d: Deps, ev: Emitter) -> None:
 
 async def chunking(st: State, d: Deps, ev: Emitter) -> None:
     cfg = d.cfg
-    chunks = d.chunk_fn({'segments': st.segs}, st.spans)
+    short = float(getattr(cfg, 'chunk_short_s', 2.0) or 2.0)
+    # ⚠️ Ручка передаётся ТОЛЬКО когда включена: заглушки разреза в тестах — прежней сигнатуры.
+    chunks = d.chunk_fn({'segments': st.segs}, st.spans, **({'short_s': short} if short > 2.0 else {}))
     # ⚠️ Пасс-1 умеет отдавать времена ЗА КОНЦОМ записи — известная беда whisper на длинных
     # файлах. Чанк с началом за пределом звука режется в пустоту, повтор с паддингом зовёт
     # `-ss 4006.52 -to 4000.00` и роняет ВСЮ запись (67-минутная запись умерла на 260-м чанке).

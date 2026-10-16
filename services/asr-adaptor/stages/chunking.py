@@ -73,11 +73,17 @@ def _split_turn(words, max_s):
     return chunks
 
 
-def _merge_short(chunks, max_s=MAX_S, short=SHORT_S):
-    """Короткий чанк (бэкчэннел) клеим к соседу при итоге ≤max_s. Проход1 — к пред., проход2 — к след."""
+def _merge_short(chunks, max_s=MAX_S, short=SHORT_S, same_speaker=False):
+    """Короткий чанк (бэкчэннел) клеим к соседу при итоге ≤max_s. Проход1 — к пред., проход2 — к след.
+
+    `same_speaker` — клеить только к соседу ТОГО ЖЕ голоса (режим `ASR_CHUNK_SHORT_S` > 2: короткие куски whisper
+    декодирует вдвое хуже — 16.10, куски < 10 с 13.5 % ошибок против 7.4 у 10–18 с; клеить чужой голос нельзя —
+    это уже не бэкчэннел, а чья-то реплика)."""
+    def ok(a, b):
+        return not same_speaker or a.get('speaker') == b.get('speaker')
     p1 = []
     for c in chunks:
-        if p1 and (c['end'] - c['start']) < short and (c['end'] - p1[-1]['start']) <= max_s:
+        if p1 and (c['end'] - c['start']) < short and (c['end'] - p1[-1]['start']) <= max_s and ok(c, p1[-1]):
             p1[-1]['end'] = c['end']
             p1[-1]['text'] = (p1[-1]['text'] + ' ' + c['text']).strip()
         else:
@@ -86,7 +92,7 @@ def _merge_short(chunks, max_s=MAX_S, short=SHORT_S):
     while i < len(p1):
         c = p1[i]
         if (c['end'] - c['start']) < short and i + 1 < len(p1) \
-                and (p1[i + 1]['end'] - c['start']) <= max_s:
+                and (p1[i + 1]['end'] - c['start']) <= max_s and ok(c, p1[i + 1]):
             nxt = p1[i + 1]
             nxt['start'] = c['start']
             nxt['text'] = (c['text'] + ' ' + nxt['text']).strip()
@@ -105,8 +111,11 @@ def _drop_silent(chunks):
     return kept
 
 
-def chunk(words, spans, max_s: float = MAX_S):
-    """words (пасс-1) + spans (диаризация) → [{start,end,speaker,text}], single-speaker, ≤max_s."""
+def chunk(words, spans, max_s: float = MAX_S, short_s: float | None = None):
+    """words (пасс-1) + spans (диаризация) → [{start,end,speaker,text}], single-speaker, ≤max_s.
+
+    `short_s` (ASR_CHUNK_SHORT_S) — после штатной склейки бэкчэннелов ещё одна: куски короче `short_s` клеятся к
+    соседу ТОГО ЖЕ голоса, если итог ≤ max_s. Пусто или ≤ SHORT_S — прежний разрез байт в байт."""
     ws = load_words(words)
     raw = [speaker_of(a, b, spans) for _, a, b in ws]
     # forward/back-fill: слово без span'а наследует ближайшего известного спикера (не плодим 'unknown')
@@ -134,7 +143,10 @@ def chunk(words, spans, max_s: float = MAX_S):
     if cur:
         for s, e, txt in _split_turn(cur, max_s):
             out.append({'start': s, 'end': e, 'speaker': cur_spk, 'text': txt})
-    return _drop_silent(_merge_short(out, max_s))
+    merged = _merge_short(out, max_s)
+    if short_s and short_s > SHORT_S:
+        merged = _merge_short(merged, max_s, short_s, same_speaker=True)
+    return _drop_silent(merged)
 
 
 def gap_chunks(holes, spans, max_s: float = MAX_S) -> list[dict]:

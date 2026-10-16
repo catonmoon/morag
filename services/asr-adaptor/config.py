@@ -307,6 +307,9 @@ class Config:
     # hole_min_s — с какой длины считать непокрытый промежуток дырой (и добирать его чанками);
     # coverage_warn_s — расхождение «длительность реплики vs распознанное», с которого пишем WARN.
     hole_min_s: float = field(default_factory=lambda: float(_env('ASR_HOLE_MIN_S', '5')))
+    # Слияние коротких кусков одного голоса до этой длины (16.10: куски < 10 с — 13.5 % ошибок пасса-2 против 7.4 % у
+    # 10–18 с). 2 = только штатная склейка бэкчэннелов, прежний разрез.
+    chunk_short_s: float = field(default_factory=lambda: float(_env('ASR_CHUNK_SHORT_S', '2')))
     coverage_warn_s: float = field(default_factory=lambda: float(_env('ASR_COVERAGE_WARN_S', '5')))
     recover_gaps: bool = field(default_factory=lambda: _flag('ASR_RECOVER_GAPS'))
     retry_empty: bool = field(default_factory=lambda: _flag('ASR_RETRY_EMPTY'))

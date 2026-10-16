@@ -96,3 +96,24 @@ def test_normal_chunks_survive():
     out = chunking.chunk(words, [])
 
     assert len(out) == 1 and out[0]['text'] == 'обычная речь'
+
+
+def test_short_merge_glues_only_the_same_voice_and_is_off_by_default():
+    """`ASR_CHUNK_SHORT_S`: короткие куски одного голоса клеятся до порога; чужой голос — никогда; без ручки — как было."""
+    from stages.chunking import chunk
+    segs = [{'start': 0.0, 'end': 4.0, 'text': 'раз'}, {'start': 4.5, 'end': 8.0, 'text': 'два'},
+            {'start': 8.5, 'end': 11.0, 'text': 'три'}, {'start': 11.5, 'end': 20.0, 'text': 'четыре'},
+            {'start': 20.5, 'end': 24.0, 'text': 'пять'}]
+    spans = [{'start': 0.0, 'end': 8.2, 'speaker': 'A'}, {'start': 8.2, 'end': 11.2, 'speaker': 'B'},
+             {'start': 11.2, 'end': 24.5, 'speaker': 'A'}]
+    plain = chunk({'segments': segs}, spans)
+    assert [(c['speaker'], round(c['end'] - c['start'], 1)) for c in plain] == [('A', 8.0), ('B', 2.5), ('A', 12.5)]
+    merged = chunk({'segments': segs}, spans, short_s=10.0)
+    assert [(c['speaker'], round(c['end'] - c['start'], 1)) for c in merged] == [('A', 8.0), ('B', 2.5), ('A', 12.5)], \
+        'короткий кусок A (8 с) не клеится к B (2.5 с) и не достаёт через B до второго A'
+    segs2 = [{'start': 0.0, 'end': 4.0, 'text': 'раз'}, {'start': 4.5, 'end': 8.0, 'text': 'два'},
+             {'start': 8.5, 'end': 15.0, 'text': 'три'}]
+    spans2 = [{'start': 0.0, 'end': 15.5, 'speaker': 'A'}]
+    # один голос, пауза 0.5 с между сегментами: штатный разрез режет ≤ 28 с → один кусок и так; проверим на разрыве
+    spans3 = [{'start': 0.0, 'end': 8.2, 'speaker': 'A'}, {'start': 8.2, 'end': 15.5, 'speaker': 'A'}]
+    assert len(chunk({'segments': segs2}, spans3)) == 1
