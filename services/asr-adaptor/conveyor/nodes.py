@@ -696,10 +696,16 @@ def _label_turns(st: State) -> None:
         if lbl:
             air_by_lbl[lbl] += sum(c['end'] - c['start'] for c in t['chunks'])
     dominant = max(air_by_lbl, key=air_by_lbl.get) if air_by_lbl else 'Speaker_0'
+    # Подпись для ПРОМПТОВ (владелец 17.10): имя, если голос назван, иначе «Участник k» по порядку появления —
+    # `Speaker_N` модели ничего не говорит, это ключ хранения и узнавания, он остаётся в данных (`speaker`).
+    numbering: dict[str, int] = {}
     for t in st.turns:
         t['speaker'] = st.mapping.get(t['cluster'], dominant)
         if st.names.get(t['speaker']):
             t['name'] = st.names[t['speaker']]
+            t['label'] = t['name']
+        else:
+            t['label'] = f"Участник {numbering.setdefault(t['speaker'], len(numbering) + 1)}"
 
 
 async def voices(st: State, d: Deps, ev: Emitter) -> None:

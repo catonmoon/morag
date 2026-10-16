@@ -137,7 +137,7 @@ def batches(turns: list[dict], max_chars: int = BATCH_CHARS) -> list[list[int]]:
 
 
 def render(turns: list[dict], idx: list[int]) -> str:
-    return '\n'.join(f"[{turns[i].get('name') or turns[i].get('speaker') or turns[i].get('cluster') or '?'} · {_mmss(float(turns[i]['start']))}] "
+    return '\n'.join(f"[{turns[i].get('label') or turns[i].get('speaker') or turns[i].get('cluster') or '?'} · {_mmss(float(turns[i]['start']))}] "
                      f"{turns[i].get('final') or ''}" for i in idx)
 
 
@@ -475,7 +475,7 @@ async def run_proofread(st, d, ev) -> None:
         around = d._around(turns, i, 1) if hasattr(d, '_around') else ''
         text = marked(turn, f['a'], f['b'])
         head = (f'КОНТЕКСТ:\n{around}\n\nТЕКСТ:\n'
-                f"[{turn.get('name') or turn.get('speaker') or turn.get('cluster') or '?'}] {text}\n\nДОГАДКА: {f.get('guess') or '—'}\n"
+                f"[{turn.get('label') or turn.get('speaker') or turn.get('cluster') or '?'}] {text}\n\nДОГАДКА: {f.get('guess') or '—'}\n"
                 + (SUSPECT_NOTE + '\n' if f.get('suspect') else ''))
         system = RESOLVE_SYS.replace(_CORPUS_SLOT, corpus)
         ears: dict = {}

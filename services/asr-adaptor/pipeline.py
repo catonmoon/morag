@@ -178,7 +178,7 @@ def _around(turns, i: int, n: int = 2) -> str:
     lo, hi = max(0, i - n), min(len(turns), i + n + 1)
     # Имя человека, если голос узнан и назван (ранние голоса, ADR-0033 §5); иначе голос реестра; метка кластера —
     # последняя: модели она ничего не говорит.
-    parts = [f"[{t.get('name') or t.get('speaker') or t.get('cluster') or '?'}] {t['raw']}"
+    parts = [f"[{t.get('label') or t.get('speaker') or t.get('cluster') or '?'}] {t['raw']}"
              for k, t in enumerate(turns[lo:hi], start=lo) if k != i]
     return '\n'.join(parts)
 

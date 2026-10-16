@@ -101,13 +101,26 @@ async def test_late_speakers_recognise_only_fresh_clusters_without_the_ticket(tm
     assert campp_spans == []
 
 
-def test_prompt_contexts_prefer_the_name_then_the_voice_then_the_cluster():
-    turns = [{'cluster': 'SPEAKER_00', 'speaker': 'Speaker_0', 'name': 'Мария Кузнецова', 'start': 0.0, 'raw': 'раз', 'final': 'раз'},
-             {'cluster': 'SPEAKER_01', 'speaker': 'Speaker_1', 'start': 5.0, 'raw': 'два', 'final': 'два'},
+def test_prompt_contexts_show_the_label_then_fall_back_to_old_fields():
+    turns = [{'cluster': 'SPEAKER_00', 'speaker': 'Speaker_0', 'name': 'Мария Кузнецова', 'label': 'Мария Кузнецова',
+              'start': 0.0, 'raw': 'раз', 'final': 'раз'},
+             {'cluster': 'SPEAKER_01', 'speaker': 'Speaker_1', 'label': 'Участник 2', 'start': 5.0, 'raw': 'два', 'final': 'два'},
              {'cluster': 'SPEAKER_02', 'start': 9.0, 'raw': 'три', 'final': 'три'}]
-    assert pipeline._around(turns, 1, 1).splitlines() == ['[Мария Кузнецова] раз', '[SPEAKER_02] три']
+    assert pipeline._around(turns, 1, 1).splitlines() == ['[Мария Кузнецова] раз', '[SPEAKER_02] три'], \
+        'без подписи (прежний режим) — прежние поля'
     assert render(turns, [0, 1]).splitlines()[0].startswith('[Мария Кузнецова · ')
-    assert render(turns, [1])[0:11] == '[Speaker_1 '
+    assert render(turns, [1]).startswith('[Участник 2 ')
+
+
+async def test_unnamed_voices_get_neutral_labels_in_order_of_appearance(tmp_path):
+    st = State(audio_path='x.mp3', tmp=str(tmp_path), wav='x.wav')
+    st.mapping = {'SPEAKER_00': 'Speaker_5', 'SPEAKER_01': 'Speaker_9', 'SPEAKER_02': 'Speaker_12'}
+    st.names = {'Speaker_9': 'Мария Кузнецова'}
+    st.turns = [{'cluster': c, 'start': float(i), 'chunks': [{'start': float(i), 'end': i + 1.0}]}
+                for i, c in enumerate(['SPEAKER_00', 'SPEAKER_01', 'SPEAKER_02', 'SPEAKER_00'])]
+    nodes._label_turns(st)
+    assert [t['label'] for t in st.turns] == ['Участник 1', 'Мария Кузнецова', 'Участник 2', 'Участник 1']
+    assert [t['speaker'] for t in st.turns] == ['Speaker_5', 'Speaker_9', 'Speaker_12', 'Speaker_5'], 'данные несут голос реестра'
 
 
 async def test_unsure_match_keeps_the_voice_number_but_withholds_the_name(rich, monkeypatch, silence):
