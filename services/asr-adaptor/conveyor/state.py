@@ -33,6 +33,7 @@ class State:
     # --- diarize / pass1 ------------------------------------------------------------------------
     spans: list = field(default_factory=list)
     segs: list = field(default_factory=list)
+    ear_draft: list = field(default_factory=list)   # слова черновика-уха (text, start, end) — для второго уха из черновика
     full_text: str = ''
     p1_holes: list = field(default_factory=list)
     # --- glossary -------------------------------------------------------------------------------

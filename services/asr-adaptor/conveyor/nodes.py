@@ -80,6 +80,23 @@ async def pass1(st: State, d: Deps, ev: Emitter) -> None:
                  sum(b - a for a, b in st.p1_holes), len(st.p1_holes))
 
 
+async def draft_ear(st: State, d: Deps, ev: Emitter) -> None:
+    """Черновик-ухо: модель другой школы слушает запись целиком на своей полосе и отдаёт слова с временами — только
+    для второго уха (`ASR_SECOND_FROM_DRAFT`). Границы кусков она НЕ задаёт: замер 16.10 — куски по любым границам,
+    кроме сегментов самого whisper, вдвое хуже декодируются (5.6 % против 8.6–17.9)."""
+    cfg = d.cfg
+    model = str(getattr(cfg, 'draft_ear_model', '') or '')
+    ev.stage('draft_ear')
+    _t = time.monotonic()
+    ln = lane_for(cfg, model)
+    async with d._res(ln.name, ln.slots):
+        r = await asyncio.to_thread(d.audio_clients.asr, st.wav, '', model=model, words=True)
+    from conveyor.places import draft_words
+    st.ear_draft = draft_words(r.get('segments') or []) or []
+    st.tm['draft_ear_s'] = round(time.monotonic() - _t, 1)
+    ev.stage_done('draft_ear', st.tm['draft_ear_s'], n=len(st.ear_draft))
+
+
 async def opening(st: State, d: Deps, ev: Emitter) -> None:
     """`ASR_OVERLAP`: пасс-1, затем диаризация (GPU) ∥ глоссарий и сводка записи (LLM).
 
@@ -117,8 +134,14 @@ async def opening(st: State, d: Deps, ev: Emitter) -> None:
             if early:
                 await glossary(st, d, ev)
         else:
+            # Пасс-1 whisper на GPU; черновик-ухо (если задано) — рядом, на своей полосе (CPU ∥ GPU — можно).
+            if getattr(d.cfg, 'draft_ear_model', ''):
+                ev.parallel = True
+                await asyncio.gather(pass1(st, d, ev), draft_ear(st, d, ev))
+            else:
+                ev.parallel = False          # прежняя форма — события прежние байт в байт (золотой снимок `overlap`)
+                await pass1(st, d, ev)
             ev.parallel = False
-            await pass1(st, d, ev)
             d.prefetch['dsum'] = asyncio.create_task(d.doc_summary(st.full_text, d.llm))
             if early:
                 await diarize_then_voices()
@@ -354,7 +377,7 @@ async def relisten(st: State, d: Deps, ev: Emitter) -> None:
 
 async def arbitrate(st: State, d: Deps, ev: Emitter) -> None:
     from conveyor.loop import Place, decide_place
-    from conveyor.places import Slices, arbitrate_tools, draft_words
+    from conveyor.places import Slices, arbitrate_tools, draft_of
     from conveyor.policy import make_policy
 
     cfg = d.cfg
@@ -364,7 +387,7 @@ async def arbitrate(st: State, d: Deps, ev: Emitter) -> None:
     _t = time.monotonic()
     # `ASR_SECOND_FROM_DRAFT`: второе ухо — из слов черновика пасса-1 (та же модель без подсказки уже слышала
     # всю запись); черновик без времён слов (whisper) → None → уши слушают бэкенд, как прежде.
-    draft = draft_words(st.segs) if getattr(cfg, 'second_from_draft', False) else None
+    draft = draft_of(st) if getattr(cfg, 'second_from_draft', False) else None
     canon = A.canon_from(hints, gloss)
     gate_terms = [t for t in list((hints or {}).get('terms') or ()) + list((hints or {}).get('names') or ())
                   if isinstance(t, str)] + [x for g in (gloss or ()) for x in (g.get('canonicals') or ())]
@@ -886,6 +909,7 @@ NODES: list[tuple[str, object, object]] = [
     ('diarize', diarize, lambda cfg, st: not cfg.overlap),
     ('voices', voices, lambda cfg, st: not cfg.overlap and bool(getattr(cfg, 'voices_early', False))),
     ('pass1', pass1, lambda cfg, st: not cfg.overlap),
+    ('draft_ear', draft_ear, lambda cfg, st: not cfg.overlap and bool(getattr(cfg, 'draft_ear_model', ''))),
     ('glossary', glossary, lambda cfg, st: not cfg.overlap),
     ('chunking', chunking, None),
     ('pass2', pass2, None),

@@ -230,3 +230,53 @@ def test_stage_events_mark_parallel_stages_only_while_the_flag_is_set():
     marks = [(e['t'], e['stage'], e.get('parallel')) for e in got if isinstance(e, dict) and e['t'].startswith('stage.')]
     assert marks == [('stage.start', 'pass1', None), ('stage.start', 'diarize', True), ('stage.end', 'diarize', True),
                      ('stage.end', 'pass1', None)]
+
+
+# --- черновик-ухо: whisper режет, GigaAM слушает рядом и кормит только второе ухо (S2b) -------------------------
+
+async def test_draft_ear_runs_on_its_lane_and_feeds_the_second_ear(tmp_path):
+    calls: list = []
+    names: list = []
+
+    def asr(path, prompt='', **kw):
+        calls.append(kw)
+        return {'text': 'раз два. Три четыре', 'segments': SEGS}
+
+    d = SimpleNamespace(cfg=SimpleNamespace(draft_ear_model='giga', whisper_slots=1, asr_urls=['http://w'], lanes=CPU,
+                                            model_lanes={'giga': 'cpu'}),
+                        audio_clients=SimpleNamespace(asr=asr), _res=lambda name, slots: names.append(name) or asyncio.Semaphore(1))
+    st = _st(tmp_path)
+    await nodes.draft_ear(st, d, Emitter(None, time.monotonic()))
+    assert calls == [{'model': 'giga', 'words': True}] and names == ['cpu']
+    assert st.ear_draft == [('раз', 10.0, 10.4), ('два.', 10.6, 11.0), ('Три', 12.0, 12.3), ('четыре', 12.4, 12.9)]
+    assert 'draft_ear_s' in st.tm and st.segs == [], 'сегменты пасса-1 (границы кусков) черновик-ухо не трогает'
+    from conveyor.places import draft_of
+    assert draft_of(st) == st.ear_draft
+    st.ear_draft = []
+    st.segs = SEGS
+    assert draft_of(st) == draft_words(SEGS), 'без черновика-уха — слова пасса-1, если они есть'
+
+
+async def test_opening_runs_whisper_pass1_beside_the_draft_ear(monkeypatch, tmp_path):
+    order: list = []
+
+    def node(name: str, dt: float):
+        async def run(st, d, ev):
+            order.append(('start', name))
+            await asyncio.sleep(dt)
+            order.append(('end', name))
+        return run
+
+    for name, dt in (('pass1', 0.05), ('draft_ear', 0.08), ('diarize', 0.02), ('glossary', 0.01)):
+        monkeypatch.setattr(nodes, name, node(name, dt))
+
+    async def dsum(text, llm):
+        return ''
+
+    st = _st(tmp_path)
+    d = SimpleNamespace(cfg=SimpleNamespace(draft_model='', draft_ear_model='giga', lanes=CPU, model_lanes={'giga': 'cpu'},
+                                            voices_early=False), prefetch={}, doc_summary=dsum, llm=None)
+    await nodes.opening(st, d, Emitter(None, time.monotonic()))
+    assert order.index(('start', 'draft_ear')) < order.index(('end', 'pass1')), 'черновик-ухо стартует, пока идёт пасс-1'
+    assert order.index(('end', 'draft_ear')) < order.index(('start', 'diarize')), 'диаризация — после обоих'
+    assert 'opening_s' in st.tm

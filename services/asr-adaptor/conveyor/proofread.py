@@ -41,7 +41,7 @@ from pathlib import Path
 
 from config import lane_for
 from conveyor.editor import heard_supports
-from conveyor.places import Slices, draft_text, draft_words
+from conveyor.places import Slices, draft_of, draft_text
 
 log = logging.getLogger('asr')
 
@@ -354,7 +354,7 @@ async def run_proofread(st, d, ev) -> None:
 
     # Второе ухо из слов черновика пасса-1 (`ASR_SECOND_FROM_DRAFT`): черновик той же моделью без подсказки
     # уже слышал всё окно — переслушивать незачем; нет слов в окне — прежний запрос к бэкенду.
-    draft = draft_words(getattr(st, 'segs', None)) if getattr(cfg, 'second_from_draft', False) else None
+    draft = draft_of(st) if getattr(cfg, 'second_from_draft', False) else None
 
     async def hear(slices: Slices, a: float, b: float) -> dict[str, str]:
         a0, b0 = max(0.0, a), (min(float(st.audio_sec or b), b) if st.audio_sec else b)

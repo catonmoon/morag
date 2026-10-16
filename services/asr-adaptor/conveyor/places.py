@@ -59,6 +59,12 @@ def draft_words(segs) -> list[tuple[str, float, float]] | None:
     return load_words({'segments': segs})
 
 
+def draft_of(st) -> list[tuple[str, float, float]] | None:
+    """Слова черновика для второго уха: черновик-ухо (`ASR_DRAFT_EAR_MODEL`), иначе слова пасса-1, если бэкенд их отдал."""
+    ear = getattr(st, 'ear_draft', None)
+    return list(ear) if ear else draft_words(getattr(st, 'segs', None))
+
+
 def draft_text(draft: list[tuple[str, float, float]] | None, a: float, b: float) -> str:
     """Слова черновика (`(text, start, end)`, по порядку), чья середина лежит в окне [a, b] → текст окна."""
     if not draft:
