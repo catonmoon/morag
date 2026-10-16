@@ -137,7 +137,7 @@ mkvenv() {                      # mkvenv <имя> <описание> <pip-арг
 }
 
 mkvenv whisper  "mlx-whisper, пасс-1 и пасс-2" \
-        mlx-whisper fastapi uvicorn python-multipart
+        mlx-whisper fastapi uvicorn python-multipart razdel
 
 mkvenv diarizer "pyannote, разметка спикеров" \
         -r "$ADAPTOR_DIR/backends/diarizer/requirements.txt"

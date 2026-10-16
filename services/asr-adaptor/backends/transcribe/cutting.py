@@ -1,7 +1,7 @@
 """Разрез длинного звука на части для модели без длинного режима и сборка сегментов из слов.
 
-Чистый numpy, без torch и mlx: тестируется без весов и переиспользуется другим бэкендом (CUDA, Windows) —
-контракт ответа один (`verbose_json`: `segments[].words = [{word, start, end}]`, как у mlx-whisper).
+Чистый numpy (+ razdel для границ предложений), без torch и mlx: тестируется без весов и переиспользуется
+другим бэкендом (CUDA, Windows) — контракт ответа один (`verbose_json`: `segments[].words = [{word, start, end}]`, как у mlx-whisper).
 
 Зачем. GigaAM-v3 берёт до 25 с звука за вызов, а длинный режим пакета требует pyannote. Для черновика
 записи целиком режем сами: граница части — САМАЯ ТИХАЯ точка окна [20, 24] с (RMS по кадрам 20 мс), а не
@@ -40,14 +40,41 @@ def quiet_cuts(audio: np.ndarray, sr: int, lo: float = 20.0, hi: float = 24.0,
     return out
 
 
+def sentence_ends(words: list[dict]) -> set[int]:
+    """Индексы слов, на которых кончается предложение — по razdel (правило владельца 17.10: границы предложений —
+    библиотекой, не точкой: «т.е.», инициалы, числа — не конец). Нет razdel — запасное правило по знаку конца."""
+    texts = [str(w.get('word') or '').strip() for w in words]
+    try:
+        from razdel import sentenize
+    except ImportError:                       # запасной ход: знак конца предложения
+        return {i for i, t in enumerate(texts) if t.endswith(SENTENCE_END)}
+    joined = ' '.join(texts)
+    # Конец каждого слова в символах склеенного текста → индекс слова по концу предложения razdel.
+    ends: list[int] = []
+    pos = 0
+    for t in texts:
+        pos += len(t)
+        ends.append(pos)
+        pos += 1
+    out: set[int] = set()
+    for sent in sentenize(joined):
+        stop = sent.stop
+        # слово, чей конец ближе всего к концу предложения (razdel не рвёт слова, разница — хвостовые пробелы)
+        k = min(range(len(ends)), key=lambda i: abs(ends[i] - stop)) if ends else None
+        if k is not None:
+            out.add(k)
+    return out
+
+
 def words_to_segments(words: list[dict], pause: float = 0.6) -> list[dict]:
     """Слова `{word, start, end}` (уже в абсолютном времени) → сегменты `{id, start, end, text, words}`.
 
-    Граница сегмента — после слова со знаком конца предложения (e2e-модель ставит пунктуацию) или перед
-    паузой ≥ `pause` с. Разрез на куски читает `words` сегмента и режет по паузам между словами сам —
-    сегменты здесь нужны ради `start`/`end`/`text` для глоссария, ленты и покрытия."""
+    Граница сегмента — конец предложения по razdel (`sentence_ends`) или пауза ≥ `pause` с перед следующим словом.
+    Разрез на куски читает `words` сегмента и режет по паузам между словами сам — сегменты здесь нужны ради
+    `start`/`end`/`text` для глоссария, ленты и покрытия."""
     segs: list[dict] = []
     cur: list[dict] = []
+    ends = sentence_ends(words)
 
     def flush() -> None:
         if cur:
@@ -57,9 +84,8 @@ def words_to_segments(words: list[dict], pause: float = 0.6) -> list[dict]:
 
     for i, w in enumerate(words):
         cur.append(w)
-        text = str(w.get('word') or '').rstrip()
         nxt = words[i + 1] if i + 1 < len(words) else None
-        if text.endswith(SENTENCE_END) or (nxt is not None and float(nxt['start']) - float(w['end']) >= pause):
+        if i in ends or (nxt is not None and float(nxt['start']) - float(w['end']) >= pause):
             flush()
     flush()
     return segs

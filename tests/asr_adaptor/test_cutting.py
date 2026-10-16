@@ -62,3 +62,16 @@ def test_verbose_json_has_the_whisper_shape():
     assert out['text'] == 'раз два.' and out['duration'] == 1.234
     assert cutting.verbose_json([], 'ru', 2.0) == {'task': 'transcribe', 'language': 'ru', 'duration': 2.0,
                                                    'text': '', 'segments': []}
+
+
+def test_sentence_ends_come_from_razdel_not_from_dots():
+    words = [{'word': w, 'start': i * 0.5, 'end': i * 0.5 + 0.3} for i, w in enumerate(
+        'Женя придёт т.е. позже. Начнём с г. Томска. Так что идём дальше.'.split())]
+    ends = cutting.sentence_ends(words)
+    texts = [w['word'] for w in words]
+    assert texts[max(ends)] == 'дальше.'
+    assert 'т.е.' not in {texts[i] for i in ends}, 'сокращение — не конец предложения'
+    assert 'г.' not in {texts[i] for i in ends}
+    segs = cutting.words_to_segments(words, pause=9.0)
+    assert [s['text'] for s in segs][-1] == 'Так что идём дальше.'
+    assert any(s['text'].startswith('Женя придёт т.е. позже.') for s in segs)
