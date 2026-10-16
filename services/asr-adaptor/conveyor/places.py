@@ -10,10 +10,21 @@ import asyncio
 import logging
 from pathlib import Path
 
+from config import lane_for
 from conveyor.loop import Place
 from conveyor.tools import Registry, Tool, ToolError
 
 log_warning = logging.getLogger('asr').warning
+
+
+def tm_add(d, key: str, sec: float) -> None:
+    """Под-тайминг стадии — в `timing` своего выпуска (контекстная переменная `pipeline.RES_METER`, её
+    ставит `run_conveyor`). Вне выпуска и в тестах с заглушкой без `RES_METER` — молча. ⚠️ Ключ — с
+    суффиксом `_s`: золотые снимки режут из `timing` только такие."""
+    meter = getattr(d, 'RES_METER', None)
+    m = meter.get() if meter is not None and hasattr(meter, 'get') else None
+    if isinstance(m, dict):
+        m[key] = round(m.get(key, 0.0) + sec, 2)
 
 
 class Slices:
@@ -58,10 +69,14 @@ def arbitrate_tools(place: Place, d, slices: Slices, *, journal: list, meter: di
             disputes = [x for x in place.decisions if x.get('by') == 'спорно']
             a, b = A.ear_window(c, disputes, window, place.audio_sec, place.neighbours)
         path = await slices.get(a, b)
-        async with d._res('whisper', cfg.whisper_slots):
+        # Ресурс — полоса модели: второе ухо другой школы на своей полосе (CPU) не ждёт очереди whisper.
+        ln = lane_for(cfg, model)
+        t_ear = asyncio.get_running_loop().time()
+        async with d._res(ln.name, ln.slots):
             # ⚠️ Модель передаётся ТОЛЬКО второму уху — чистое ухо зовёт бэкенд прежней формой:
             # заглушки тестов и чужие обёртки знают сигнатуру `asr(path, prompt)`.
             r = await asyncio.to_thread(lambda: d.audio_clients.asr(path, '', **({'model': model} if model else {})))
+        tm_add(d, f'arbitrate_{ear}_s', asyncio.get_running_loop().time() - t_ear)
         out = {'ear': ear, 'text': r.get('text') or '', 'a': a, 'b': b}
         place.heard[ear] = out
         return out
@@ -169,7 +184,8 @@ def final_tools(place: Place, d, slices: Slices, *, st, journal: list, meter: di
         a, b = max(0.0, at - 15), min(place.audio_sec, at + 15)
         try:
             path = await slices.get(a, b)
-            async with d._res('whisper', cfg.whisper_slots):
+            ln = lane_for(cfg)
+            async with d._res(ln.name, ln.slots):
                 got = await asyncio.to_thread(lambda: d.audio_clients.asr(path, ''))
             heard = got.get('text') or ''
         except Exception as error:      # noqa: BLE001 — ухо не роняет реплику

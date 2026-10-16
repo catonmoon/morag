@@ -35,6 +35,84 @@ def _asr_urls() -> list[str]:
     return [base.replace(':8123/', f':{8123 + 10 * k}/') for k in range(n)]
 
 
+# --- полосы: куда едет модель -------------------------------------------------------------------
+# Полоса = имя (оно же имя семафора `pipeline._res`), класс устройства, слоты, адреса бэкендов.
+# Зачем: модель другой школы (GigaAM, torch на CPU) в ОДНОМ процессе с mlx-whisper стоит в той же
+# очереди инференса (у бэкенда один поток), и «CPU-модель» не выигрывает ничего — замерено 16.10 на
+# пяти записях: корректор 598 с = очередь двух ушей, не LLM. Своя полоса = свой процесс бэкенда и
+# свой семафор: CPU-ухо идёт рядом с GPU-ухом, а не за ним. Адрес может быть и удалённым (другая
+# машина, видеокарта) — адаптер устройств не знает, он знает только, что полосы разные.
+# Полоса по умолчанию `whisper` описана прежними ручками (`ASR_BACKEND_URL(S)`, `ASR_WHISPER_INSTANCES`,
+# `ASR_WHISPER_SLOTS`) и здесь не перечисляется: без `ASR_LANES` всё байт в байт как было.
+_LANE_DEVICES = ('gpu', 'cpu', 'remote')
+_ASR_PATH = '/v1/audio/transcriptions'
+
+
+@dataclass(frozen=True)
+class Lane:
+    name: str
+    device: str
+    slots: int
+    urls: tuple
+
+
+def _lane_url(u: str) -> str:
+    """Адрес полосы можно дать базой (`http://127.0.0.1:8223`) — путь транскрипций дописывается."""
+    u = u.strip().rstrip('/')
+    return u if u.endswith(_ASR_PATH) else u + _ASR_PATH
+
+
+def _lanes() -> dict[str, 'Lane']:
+    """`ASR_LANES="cpu=cpu,1,http://127.0.0.1:8223;…"` → {имя: Lane}; форма `имя=устройство,слоты,url[,url…]`."""
+    out: dict[str, Lane] = {}
+    for spec in _env('ASR_LANES').split(';'):
+        spec = spec.strip()
+        if not spec:
+            continue
+        name, eq, rest = spec.partition('=')
+        parts = [p.strip() for p in rest.split(',') if p.strip()]
+        name = name.strip()
+        if not eq or not name or len(parts) < 3:
+            raise ValueError(f'ASR_LANES: «{spec}» — нужно имя=устройство,слоты,url[,url…]')
+        if name == 'whisper':
+            raise ValueError('ASR_LANES: полоса «whisper» задаётся прежними ручками (ASR_BACKEND_URL(S), ASR_WHISPER_SLOTS)')
+        if parts[0] not in _LANE_DEVICES:
+            raise ValueError(f'ASR_LANES: устройство «{parts[0]}» у полосы «{name}» — одно из {", ".join(_LANE_DEVICES)}')
+        out[name] = Lane(name, parts[0], max(1, int(parts[1])), tuple(_lane_url(u) for u in parts[2:]))
+    return out
+
+
+def _model_lanes() -> dict[str, str]:
+    """`ASR_MODEL_LANES="gigaam-v3-e2e-rnnt=cpu,другая=полоса"` → {модель: полоса}; полоса обязана быть описана."""
+    lanes = _lanes()
+    out: dict[str, str] = {}
+    for pair in _env('ASR_MODEL_LANES').split(','):
+        pair = pair.strip()
+        if not pair:
+            continue
+        model, eq, lane = (x.strip() for x in pair.partition('='))
+        if not eq or not model or not lane:
+            raise ValueError(f'ASR_MODEL_LANES: «{pair}» — нужно модель=полоса')
+        if lane not in lanes:
+            raise ValueError(f'ASR_MODEL_LANES: полоса «{lane}» модели «{model}» не описана в ASR_LANES')
+        out[model] = lane
+    return out
+
+
+def lane_for(cfg, model: str = '') -> 'Lane':
+    """Полоса модели (пусто — модель профиля). Записи в карте нет — полоса `whisper` из прежних ручек.
+    Поля берутся через getattr: cfg в тестах узлов — `SimpleNamespace` без полей полос."""
+    model = model or str(getattr(cfg, 'asr_model', '') or '')
+    name = (getattr(cfg, 'model_lanes', None) or {}).get(model, '')
+    lanes = getattr(cfg, 'lanes', None) or {}
+    if name:
+        if name not in lanes:
+            raise ValueError(f'полоса «{name}» модели «{model}» не описана в ASR_LANES')
+        return lanes[name]
+    return Lane('whisper', 'gpu', max(1, int(getattr(cfg, 'whisper_slots', 1) or 1)),
+                tuple(getattr(cfg, 'asr_urls', ()) or ()))
+
+
 def _flag(key: str, default: str = '1') -> bool:
     return _env(key, default) not in ('0', 'false', 'no', '')
 
@@ -320,6 +398,10 @@ class Config:
     diarize_slots: int = field(default_factory=lambda: int(_env('ASR_DIARIZE_SLOTS', '1')))
     # Не задано — по числу процессов пула: слот на процесс (у каждого один поток инференса).
     whisper_slots: int = field(default_factory=lambda: int(_env('ASR_WHISPER_SLOTS') or len(_asr_urls())))
+    # Полосы (см. `Lane` выше): `ASR_LANES` — описания, `ASR_MODEL_LANES` — какая модель куда едет.
+    # Пусто — одна полоса `whisper`, прежнее поведение.
+    lanes: dict = field(default_factory=_lanes)
+    model_lanes: dict = field(default_factory=_model_lanes)
     campp_slots: int = field(default_factory=lambda: int(_env('ASR_CAMPP_SLOTS', '1')))
     align_slots: int = field(default_factory=lambda: int(_env('ASR_ALIGN_SLOTS', '1')))
 

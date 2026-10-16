@@ -11,7 +11,7 @@ from contextlib import contextmanager
 
 import requests
 
-from config import CFG
+from config import CFG, lane_for
 
 
 def diarize(wav_path: str, min_spk: int | None = None, max_spk: int | None = None) -> list[dict]:
@@ -57,9 +57,10 @@ _POOL_LOCK = threading.Lock()
 
 
 @contextmanager
-def _whisper_url(pinned: str = ''):
+def _whisper_url(pinned: str = '', urls=None):
+    """`urls` — адреса полосы модели (см. `config.lane_for`); пусто — пул whisper."""
     with _POOL_LOCK:
-        url = pinned or min(CFG.asr_urls, key=lambda u: _INFLIGHT.get(u, 0))
+        url = pinned or min(urls or CFG.asr_urls, key=lambda u: _INFLIGHT.get(u, 0))
         _INFLIGHT[url] = _INFLIGHT.get(url, 0) + 1
     try:
         yield url
@@ -93,7 +94,8 @@ def asr(wav_path: str, prompt: str = '', temperature: str = '', words: bool = Fa
     if words:
         data['word_timestamps'] = '1'
     headers = {'Authorization': f'Bearer {CFG.asr_key}'} if CFG.asr_key else {}
-    with _whisper_url(url) as url, open(wav_path, 'rb') as f:
+    # Адрес — из полосы модели: модель из `ASR_MODEL_LANES` едет своим процессам, остальные — пулу whisper.
+    with _whisper_url(url, lane_for(CFG, model).urls) as url, open(wav_path, 'rb') as f:
         r = requests.post(url, data=data, files={'file': f}, headers=headers,
                           timeout=_asr_timeout(wav_path))
     r.raise_for_status()
@@ -131,7 +133,8 @@ def health() -> dict:
     """Пинг всех downstream-бэкендов (для /health сервиса)."""
     out = {}
     pool = [(f'asr{k}' if k else 'asr', u) for k, u in enumerate(CFG.asr_urls)]
-    for name, url in (('diarizer', CFG.diarizer_url), *pool, ('campp', CFG.campp_url)):
+    lanes = [(f'{ln.name}{k or ""}', u) for ln in (getattr(CFG, 'lanes', None) or {}).values() for k, u in enumerate(ln.urls)]
+    for name, url in (('diarizer', CFG.diarizer_url), *pool, *lanes, ('campp', CFG.campp_url)):
         base = url.split('/v1')[0] if '/v1' in url else url.rsplit('/', 1)[0]
         try:
             requests.get(base.rstrip('/') + '/health', timeout=5)

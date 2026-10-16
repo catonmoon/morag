@@ -115,10 +115,15 @@ def warmup():
     out = {}
     # Каждый процесс пула whisper — своей моделью и вторым ухом (`ASR_SECOND_MODEL`): иначе первый
     # кусок арбитража на каждом процессе стоит загрузки весов.
-    ears = [m for m in (CFG.asr_model, CFG.second_model) if m]
+    # Модель с полосой (`ASR_MODEL_LANES`) греется на процессах СВОЕЙ полосы, а не пула whisper.
+    lanes = getattr(CFG, 'model_lanes', None) or {}
+    ears = [m for m in (CFG.asr_model, CFG.second_model) if m and m not in lanes]
     whisper = [(f"asr{k or ''}{'' if m == CFG.asr_model else ':' + m}",
                 lambda u=u, m=m: audio_clients.asr(tmp, model=m, url=u))
                for k, u in enumerate(CFG.asr_urls) for m in ears]
+    whisper += [(f"{lane}{k or ''}:{m}", lambda u=u, m=m: audio_clients.asr(tmp, model=m, url=u))
+                for m, lane in lanes.items() if m in (CFG.asr_model, CFG.second_model)
+                for k, u in enumerate(CFG.lanes[lane].urls)]
     for name, call in (('diarizer', lambda: audio_clients.diarize(tmp, 1, 2)),
                        *whisper,
                        ('campp', lambda: audio_clients.campp(

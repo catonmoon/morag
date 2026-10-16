@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 import audio_clients
-from config import CFG
+from config import CFG, lane_for  # noqa: F401 — `lane_for` берут узлы (conveyor.deps.NAMES)
 from stages import align, coverage, registry  # noqa: F401 — берут узлы (conveyor.deps.NAMES)
 from stages import relisten as relisten_stage  # noqa: F401 — берут узлы (conveyor.deps.NAMES)
 from stages import arbitrate as arbitrate_stage  # noqa: F401 — берут узлы (conveyor.deps.NAMES)
@@ -398,14 +398,15 @@ async def _decode(wav: str, sl: str, c: dict, prompt: str, audio_sec: float) -> 
     # одной записи, WER 3.28 → 3.95 % по пяти). Граница такого куска — край дыры, где пасс-1 речи
     # не слышал, соседских слов там нет; а времена слов декодера на коротком куске неточны.
     await asyncio.to_thread(_slice, wav, c['start'], c['end'], sl)
-    async with _res('whisper', CFG.whisper_slots):
+    ln = lane_for(CFG)                       # полоса модели профиля; без ASR_LANES — прежний ресурс `whisper`
+    async with _res(ln.name, ln.slots):
         r = await asyncio.to_thread(lambda: audio_clients.asr(sl, prompt, **ask))
     off = c['start']
     if not r['text'] and CFG.retry_empty:
         a, b = max(0.0, c['start'] - PAD_S), min(audio_sec, c['end'] + PAD_S)
         await asyncio.to_thread(_slice, wav, a, b, sl)
         ask2 = {'words': True} if CFG.seam else ask
-        async with _res('whisper', CFG.whisper_slots):
+        async with _res(ln.name, ln.slots):
             again = await asyncio.to_thread(lambda: audio_clients.asr(sl, '', **ask2))
         if CFG.seam:
             again, a = _inside(again, a, c), 0.0
@@ -451,12 +452,13 @@ async def _relisten_chunk(wav: str, sl: str, c: dict, audio_sec: float) -> dict:
     await asyncio.to_thread(_slice, wav, a, b, sl)
     # Шов: запас в полторы секунды звучит речью соседа — с `ASR_SEAM` берём только своё.
     ask = {'words': True} if CFG.seam else {}
-    async with _res('whisper', CFG.whisper_slots):
+    ln = lane_for(CFG)
+    async with _res(ln.name, ln.slots):
         r = await asyncio.to_thread(lambda: audio_clients.asr(sl, '', **ask))
     if CFG.seam:
         r = _inside(r, a, c)
     if relisten_stage.looped(r['text']):
-        async with _res('whisper', CFG.whisper_slots):
+        async with _res(ln.name, ln.slots):
             mild = await asyncio.to_thread(
                 lambda: audio_clients.asr(sl, '', relisten_stage.MILD, **ask))
         if CFG.seam:

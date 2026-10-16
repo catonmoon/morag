@@ -28,6 +28,7 @@ import re
 import time
 from difflib import SequenceMatcher
 
+from config import lane_for
 from conveyor.places import Slices
 from conveyor.tools import Registry, Tool, ToolError
 
@@ -206,7 +207,8 @@ def editor_tools(ps: PageState, st, d, slices: Slices, known: list[str], canon: 
         if ear == 'second' and not cfg.second_model:
             raise ToolError('второго уха нет в этой установке', hint='ear=clean')
         path = await slices.get(a, b)
-        async with d._res('whisper', cfg.whisper_slots):
+        ln = lane_for(cfg, cfg.second_model if ear == 'second' else '')
+        async with d._res(ln.name, ln.slots):
             r = await asyncio.to_thread(lambda: d.audio_clients.asr(
                 path, '', **({'model': cfg.second_model} if ear == 'second' else {})))
         text = r.get('text') or ''

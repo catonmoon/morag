@@ -125,8 +125,16 @@ def _gigaam_transcribe(model_dir: str, cfg: dict, wav_path: str) -> str:
     from gigaam.preprocess import SAMPLE_RATE, load_audio
     key = (model_dir, cfg['name'])
     if key not in _LOADED:
-        _LOADED[key] = gigaam.load_model(cfg['name'], download_root=model_dir, device=cfg.get('device') or 'cpu')
+        # ⚠️ Потоки torch: декодер RNN-T упирается в питоновский цикл по токенам, и потоки ему МЕШАЮТ —
+        # замерено 16.10 на M4 Pro (5 мин звука): 1–2 потока 1.32 с на минуту, 4 — 1.47, 8 — 1.95,
+        # 12 — 2.51. Умолчание 2; задаётся до первого вызова, в потоке инференса. `GIGAAM_DEVICE`
+        # перекрывает `engine.json` (cpu | mps | cuda — под другую машину, без правки папки модели).
+        import torch
+        torch.set_num_threads(max(1, int(os.environ.get('GIGAAM_THREADS', '2') or 2)))
+        device = os.environ.get('GIGAAM_DEVICE', '').strip() or cfg.get('device') or 'cpu'
+        _LOADED[key] = gigaam.load_model(cfg['name'], download_root=model_dir, device=device)
     model = _LOADED[key]
+    t0 = time.monotonic()
     audio = load_audio(wav_path).numpy()
     parts = max(1, math.ceil(len(audio) / (_GIGA_MAX_S * SAMPLE_RATE)))
     step = math.ceil(len(audio) / parts)
@@ -138,6 +146,11 @@ def _gigaam_transcribe(model_dir: str, cfg: dict, wav_path: str) -> str:
         with tempfile.NamedTemporaryFile(suffix='.wav') as t:
             sf.write(t.name, piece, SAMPLE_RATE)
             texts.append(str(model.transcribe(t.name)).strip())
+    # Счётчики своей полосы: один поток инференса на процесс, гонки нет; ключи отдельные от mlx —
+    # `/stats` показывает, сколько процесс слушал каждым движком.
+    STATS['requests_cpu'] = STATS.get('requests_cpu', 0) + 1
+    STATS['infer_cpu_s'] = round(STATS.get('infer_cpu_s', 0.0) + time.monotonic() - t0, 2)
+    STATS['audio_cpu_s'] = round(STATS.get('audio_cpu_s', 0.0) + len(audio) / SAMPLE_RATE, 1)
     return ' '.join(x for x in texts if x)
 DEFAULT_MODEL = 'whisper-podlodka-turbo'
 API_KEY = os.environ.get('TRANSCRIBE_API_KEY')  # опц. Bearer-защита

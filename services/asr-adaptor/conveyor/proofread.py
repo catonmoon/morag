@@ -39,6 +39,7 @@ import time
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from config import lane_for
 from conveyor.editor import heard_supports
 from conveyor.places import Slices
 
@@ -328,7 +329,9 @@ async def run_proofread(st, d, ev) -> None:
                         'guess': str(f.get('guess') or ''), 'why': str(f.get('why') or '')})
         return out
 
+    t_d = time.monotonic()
     flags = [f for lst in await asyncio.gather(*(detect(i) for i in range(len(bs)))) for f in lst]
+    st.tm['proofread_detect_s'] = round(time.monotonic() - t_d, 1)
     flags += suspect_flags(turns, roots)
     # Бюджет: не больше `proofread_max_per_min` мест на минуту звука — детектор шумит (~2/мин на
     # Мостике), а каждое место стоит два прослушивания и вызов модели.
@@ -345,10 +348,13 @@ async def run_proofread(st, d, ev) -> None:
     accepted = {'n': 0}
     fixes_log: list[dict] = []
 
+    def _tm(key: str, sec: float) -> None:
+        st.tm[key] = round(st.tm.get(key, 0.0) + sec, 2)
+
     async def hear(slices: Slices, a: float, b: float) -> dict[str, str]:
         path = await slices.get(max(0.0, a), min(float(st.audio_sec or b), b) if st.audio_sec else b)
-        out = {}
-        for ear in ears_wanted:
+
+        async def one(ear: str) -> str:
             if ear == 'omni':
                 # Ухо — аудио-LLM: дословная расшифровка окна, без текста расшифровки и догадки (слух не подстраивается).
                 llm = listener_llm(cfg, cfg.proofread_omni_model, getattr(cfg, 'proofread_omni_base_url', '') or '',
@@ -359,13 +365,20 @@ async def run_proofread(st, d, ev) -> None:
                     schema=HEARD_SCHEMA, schema_name='heard', max_tokens=500)
                 if isinstance(got, list):
                     got = next((x for x in got if isinstance(x, dict)), {})
-                out[ear] = str((got or {}).get('heard') or '').strip() if isinstance(got, dict) else ''
-                continue
+                return str((got or {}).get('heard') or '').strip() if isinstance(got, dict) else ''
             extra = {'model': cfg.second_model} if ear == 'second' else {}
-            async with d._res('whisper', cfg.whisper_slots):
+            ln = lane_for(cfg, extra.get('model', ''))
+            async with d._res(ln.name, ln.slots):
                 r = await asyncio.to_thread(lambda: d.audio_clients.asr(path, '', **extra))
-            out[ear] = (r.get('text') or '').strip()
-        return out
+            return (r.get('text') or '').strip()
+
+        # Уши — РЯДОМ, не по очереди: чистое ухо на полосе GPU и второе на полосе CPU иначе стояли в одной
+        # очереди (16.10: 598 с корректора на пяти записях — это была она, не LLM). Порядок ответа — прежний,
+        # по `ears_wanted`: из него строятся строки `УШИ[…]` промпта решателя и `why` правки.
+        t_h = time.monotonic()
+        texts = await asyncio.gather(*(one(e) for e in ears_wanted))
+        _tm('proofread_ears_s', time.monotonic() - t_h)
+        return dict(zip(ears_wanted, texts))
 
     gloss_words = {w.lower() for g in st.gloss for c in list(g.get('canonicals') or ()) + [g.get('heard') or '']
                    for w in re.findall(r"[\w'-]+", str(c)) if len(w) >= 3}
@@ -382,6 +395,7 @@ async def run_proofread(st, d, ev) -> None:
 
     async def ask(llm, system: str, user, max_tokens: int, t0: float, gate=None) -> dict | None:
         async with (gate or sem):
+            t_a = time.monotonic()
             try:
                 got = await llm.complete_json(
                     [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}],
@@ -390,6 +404,8 @@ async def run_proofread(st, d, ev) -> None:
                 log.warning('proofread: решатель на %.1f с сорвался: %s: %s', t0, type(error).__name__, error)
                 st.meter['proofread_resolve_errors'] = st.meter.get('proofread_resolve_errors', 0) + 1
                 return None
+            finally:
+                _tm('proofread_llm_s', time.monotonic() - t_a)       # время модели, без ожидания семафора
         if isinstance(got, list):       # qwen3.8-omni отвечает [{…}] вместо {…} (замерено 15.10)
             got = next((x for x in got if isinstance(x, dict)), {})
         return got if isinstance(got, dict) else {}

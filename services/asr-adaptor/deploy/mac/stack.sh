@@ -54,6 +54,27 @@ WHISPER_N="${ASR_WHISPER_INSTANCES:-1}"
 whisper_port() { echo $(( PORT_WHISPER + 10 * $1 )); }
 whisper_name() { (( $1 == 0 )) && echo whisper || echo "whisper$1"; }
 
+# Полосы (`ASR_LANES="cpu=cpu,1,http://127.0.0.1:8223;…"`, см. config.py): на каждый ЛОКАЛЬНЫЙ адрес
+# полосы — свой процесс того же бэкенда (`lane-<имя>[k]`, порт из адреса); удалённый адрес — просто
+# адрес. Так модель другой школы (GigaAM на CPU) слушает в своём процессе и не стоит в очереди whisper.
+lane_entries() {               # печатает строки «имя порт» по локальным адресам всех полос
+  local spec name rest url host port k
+  IFS=';' read -ra _SPECS <<< "${ASR_LANES:-}"
+  for spec in "${_SPECS[@]}"; do
+    spec="${spec// /}"; [[ -z "$spec" ]] && continue
+    name="${spec%%=*}"; rest="${spec#*=}"
+    IFS=',' read -ra _P <<< "$rest"
+    k=0
+    for url in "${_P[@]:2}"; do
+      host="${url#*://}"; host="${host%%/*}"; port="${host##*:}"; host="${host%%:*}"
+      if [[ "$host" == 127.0.0.1 || "$host" == localhost ]]; then
+        echo "lane-$name$([[ $k -gt 0 ]] && echo "$k") $port"
+      fi
+      k=$((k+1))
+    done
+  done
+}
+
 listening() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
 
 start_one() {                   # start_one <имя> <порт> <лог> <команда...>
@@ -93,6 +114,17 @@ cmd_up() {
       --host 127.0.0.1 --port "$(whisper_port $k)" --log-level info
   done
 
+  # Бэкенды полос — тот же код, свой порт; модели грузятся по первому запросу (прогрев — /warmup).
+  local lane_name lane_port
+  while read -r lane_name lane_port; do
+    [[ -z "$lane_name" ]] && continue
+    PATH="/opt/homebrew/bin:$PATH" \
+    TRANSCRIBE_MODELS_DIR="${TRANSCRIBE_MODELS_DIR:-$STACK_HOME/models}" \
+    start_one "$lane_name" "$lane_port" "$LOGS/$lane_name.log" \
+      "$VENVS/whisper/bin/uvicorn" --app-dir "$ADAPTOR_DIR/backends/transcribe" app:app \
+      --host 127.0.0.1 --port "$lane_port" --log-level info
+  done < <(lane_entries)
+
   # Адаптер последним — он на старте пингует downstream.
   start_one adaptor "$PORT_ASR" "$LOGS/adaptor.log" \
     "$VENVS/adaptor/bin/uvicorn" --app-dir "$ADAPTOR_DIR" app:app \
@@ -101,6 +133,9 @@ cmd_up() {
   say "ждём готовности (диаризатор грузит модель до ~90 с)"
   wait_port "$PORT_CAMPP"   30 campp    || true
   for (( k = 0; k < WHISPER_N; k++ )); do wait_port "$(whisper_port $k)" 60 "$(whisper_name $k)" || true; done
+  while read -r lane_name lane_port; do
+    [[ -n "$lane_name" ]] && { wait_port "$lane_port" 60 "$lane_name" || true; }
+  done < <(lane_entries)
   wait_port "$PORT_ASR"     60 adaptor  || true
   wait_port "$PORT_DIAR"   180 diarizer || true
   cmd_health
@@ -109,7 +144,9 @@ cmd_up() {
 cmd_down() {
   # Пул whisper гасится целиком, даже если ASR_WHISPER_INSTANCES с тех пор уменьшили.
   local k
-  for name in adaptor whisper whisper{1..7} campp diarizer; do
+  # Полосы — по pid-файлам `lane-*`: гасятся и те, которых в ASR_LANES уже нет.
+  local lanes=(); for f in "$RUN"/lane-*.pid; do [[ -f "$f" ]] && lanes+=("$(basename "$f" .pid)"); done
+  for name in adaptor whisper whisper{1..7} "${lanes[@]}" campp diarizer; do
     [[ $name == whisper? && ! -f "$RUN/$name.pid" ]] && continue
     local pid_file="$RUN/$name.pid"
     if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
@@ -120,7 +157,7 @@ cmd_down() {
     rm -f "$pid_file"
   done
   # uvicorn мог родить воркеров — добираем по порту.
-  for p in $PORT_ASR $(for k in {0..7}; do whisper_port $k; done) $PORT_CAMPP $PORT_DIAR; do
+  for p in $PORT_ASR $(for k in {0..7}; do whisper_port $k; done) $(lane_entries | awk '{print $2}') $PORT_CAMPP $PORT_DIAR; do
     local pids; pids="$(lsof -nP -iTCP:"$p" -sTCP:LISTEN -t 2>/dev/null || true)"
     [[ -n "$pids" ]] && { echo "$pids" | xargs kill 2>/dev/null || true; ok "порт $p освобождён"; }
   done
@@ -129,6 +166,7 @@ cmd_down() {
 cmd_status() {
   local pairs=("адаптер:$PORT_ASR" "диаризатор:$PORT_DIAR" "CAM++:$PORT_CAMPP") k
   for (( k = 0; k < WHISPER_N; k++ )); do pairs+=("$(whisper_name $k):$(whisper_port $k)"); done
+  while read -r lane_name lane_port; do [[ -n "$lane_name" ]] && pairs+=("$lane_name:$lane_port"); done < <(lane_entries)
   for pair in "${pairs[@]}"; do
     local name="${pair%%:*}" port="${pair##*:}"
     if listening "$port"; then

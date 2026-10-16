@@ -15,6 +15,7 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
+from config import lane_for
 from conveyor.deps import Deps
 from conveyor.events import Emitter
 from conveyor.state import State
@@ -58,7 +59,8 @@ async def pass1(st: State, d: Deps, ev: Emitter) -> None:
     cfg = d.cfg
     ev.stage('pass1')
     _t = time.monotonic()
-    async with d._res('whisper', cfg.whisper_slots):
+    ln = lane_for(cfg)                       # полоса модели профиля; без ASR_LANES — прежний ресурс `whisper`
+    async with d._res(ln.name, ln.slots):
         p1 = await asyncio.to_thread(d.audio_clients.asr, st.wav, '')
     st.segs = p1['segments']
     st.full_text = ' '.join((s.get('text') or '').strip() for s in st.segs)
