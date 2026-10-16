@@ -62,9 +62,18 @@ async def pass1(st: State, d: Deps, ev: Emitter) -> None:
     # Черновик — моделью `ASR_DRAFT_MODEL` на её полосе (GigaAM на CPU: слова с временами, разрез по тихим
     # точкам — бэкенд), иначе модель профиля на полосе whisper; без ручек вызов прежний байт в байт.
     draft = str(getattr(cfg, 'draft_model', '') or '')
+    clean = bool(getattr(cfg, 'clean_from_draft', False)) and not draft
     ln = lane_for(cfg, draft)
     async with d._res(ln.name, ln.slots):
-        p1 = await asyncio.to_thread(d.audio_clients.asr, st.wav, '', **({'model': draft, 'words': True} if draft else {}))
+        p1 = await asyncio.to_thread(d.audio_clients.asr, st.wav, '',
+                                     **({'model': draft, 'words': True} if draft else ({'words': True} if clean else {})))
+    if clean:
+        # Слова пасса-1 — чистому уху (`ASR_CLEAN_FROM_DRAFT`); разрезу на куски — только сегменты: куски по словам
+        # whisper декодируются вдвое хуже (16.10: 11.2 % против 5.6 по его сегментам).
+        from conveyor.places import draft_words
+        st.clean_draft = draft_words(p1['segments']) or []
+        for s in p1['segments']:
+            s.pop('words', None)
     st.segs = p1['segments']
     st.full_text = ' '.join((s.get('text') or '').strip() for s in st.segs)
     st.tm['pass1_s'] = round(time.monotonic() - _t, 1)
@@ -388,6 +397,7 @@ async def arbitrate(st: State, d: Deps, ev: Emitter) -> None:
     # `ASR_SECOND_FROM_DRAFT`: второе ухо — из слов черновика пасса-1 (та же модель без подсказки уже слышала
     # всю запись); черновик без времён слов (whisper) → None → уши слушают бэкенд, как прежде.
     draft = draft_of(st) if getattr(cfg, 'second_from_draft', False) else None
+    clean_draft = list(st.clean_draft) if getattr(cfg, 'clean_from_draft', False) and st.clean_draft else None
     canon = A.canon_from(hints, gloss)
     gate_terms = [t for t in list((hints or {}).get('terms') or ()) + list((hints or {}).get('names') or ())
                   if isinstance(t, str)] + [x for g in (gloss or ()) for x in (g.get('canonicals') or ())]
@@ -421,7 +431,8 @@ async def arbitrate(st: State, d: Deps, ev: Emitter) -> None:
                       audio_sec=st.audio_sec, neighbours=nb, index=i)
         slices = Slices(d, st.tmp, st.wav, f'a{i}')
         reg = arbitrate_tools(place, d, slices, journal=st.journal, meter=st.meter,
-                              **({'draft': draft} if draft is not None else {}))
+                              **({'draft': draft} if draft is not None else {}),
+                              **({'clean_draft': clean_draft} if clean_draft is not None else {}))
         try:
             fin = await decide_place(place, policy, reg, cfg.place_steps)
             _account(place)

@@ -72,7 +72,7 @@ def draft_text(draft: list[tuple[str, float, float]] | None, a: float, b: float)
     return ' '.join(w for w, s, e in draft if a <= (float(s) + float(e)) / 2 <= b).strip()
 
 
-def arbitrate_tools(place: Place, d, slices: Slices, *, journal: list, meter: dict, draft=None) -> Registry:
+def arbitrate_tools(place: Place, d, slices: Slices, *, journal: list, meter: dict, draft=None, clean_draft=None) -> Registry:
     """Инструменты арбитража одного куска (ADR-0030): ворота-читатель, уши, правила, свидетели.
 
     `draft` — слова черновика пасса-1 с временами (`ASR_SECOND_FROM_DRAFT`): второе ухо берёт их из своего
@@ -94,8 +94,9 @@ def arbitrate_tools(place: Place, d, slices: Slices, *, journal: list, meter: di
         else:
             disputes = [x for x in place.decisions if x.get('by') == 'спорно']
             a, b = A.ear_window(c, disputes, window, place.audio_sec, place.neighbours)
-        if ear == 'second' and draft is not None:
-            heard = draft_text(draft, a, b)
+        src = draft if ear == 'second' else clean_draft
+        if src is not None:
+            heard = draft_text(src, a, b)
             if heard:                        # нет слов в окне — черновик там молчал, переслушиваем как раньше
                 out = {'ear': ear, 'text': heard, 'a': a, 'b': b, 'from': 'draft'}
                 place.heard[ear] = out

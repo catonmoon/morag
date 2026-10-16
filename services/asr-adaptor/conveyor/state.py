@@ -34,6 +34,7 @@ class State:
     spans: list = field(default_factory=list)
     segs: list = field(default_factory=list)
     ear_draft: list = field(default_factory=list)   # слова черновика-уха (text, start, end) — для второго уха из черновика
+    clean_draft: list = field(default_factory=list)  # слова пасса-1 whisper (text, start, end) — чистое ухо из черновика
     full_text: str = ''
     p1_holes: list = field(default_factory=list)
     # --- glossary -------------------------------------------------------------------------------

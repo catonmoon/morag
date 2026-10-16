@@ -355,14 +355,16 @@ async def run_proofread(st, d, ev) -> None:
     # Второе ухо из слов черновика пасса-1 (`ASR_SECOND_FROM_DRAFT`): черновик той же моделью без подсказки
     # уже слышал всё окно — переслушивать незачем; нет слов в окне — прежний запрос к бэкенду.
     draft = draft_of(st) if getattr(cfg, 'second_from_draft', False) else None
+    clean_draft = list(st.clean_draft) if getattr(cfg, 'clean_from_draft', False) and getattr(st, 'clean_draft', None) else None
 
     async def hear(slices: Slices, a: float, b: float) -> dict[str, str]:
         a0, b0 = max(0.0, a), (min(float(st.audio_sec or b), b) if st.audio_sec else b)
         path = await slices.get(a0, b0)
 
         async def one(ear: str) -> str:
-            if ear == 'second' and draft is not None:
-                heard = draft_text(draft, a0, b0)
+            src = draft if ear == 'second' else (clean_draft if ear == 'clean' else None)
+            if src is not None:
+                heard = draft_text(src, a0, b0)
                 if heard:
                     return heard
             if ear == 'omni':

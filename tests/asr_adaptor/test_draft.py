@@ -280,3 +280,32 @@ async def test_opening_runs_whisper_pass1_beside_the_draft_ear(monkeypatch, tmp_
     assert order.index(('start', 'draft_ear')) < order.index(('end', 'pass1')), 'черновик-ухо стартует, пока идёт пасс-1'
     assert order.index(('end', 'draft_ear')) < order.index(('start', 'diarize')), 'диаризация — после обоих'
     assert 'opening_s' in st.tm
+
+
+# --- чистое ухо из черновика пасса-1 (ASR_CLEAN_FROM_DRAFT) ------------------------------------------------------
+
+async def test_pass1_with_clean_from_draft_keeps_words_for_the_ear_but_not_for_chunking(tmp_path):
+    calls: list = []
+
+    def asr(path, prompt='', **kw):
+        calls.append(kw)
+        return {'text': 'раз два. Три четыре', 'segments': [dict(s, words=list(s['words'])) for s in SEGS]}
+
+    d = _pass1_deps(calls, clean_from_draft=True)
+    d.audio_clients = SimpleNamespace(asr=asr)
+    st = _st(tmp_path)
+    await nodes.pass1(st, d, Emitter(None, time.monotonic()))
+    assert calls == [{'words': True}]
+    assert st.clean_draft == [('раз', 10.0, 10.4), ('два.', 10.6, 11.0), ('Три', 12.0, 12.3), ('четыре', 12.4, 12.9)]
+    assert all('words' not in s for s in st.segs), 'разрезу на куски — сегменты, не слова'
+
+
+async def test_clean_ear_from_draft_needs_no_backend(tmp_path):
+    calls: list = []
+    d = _arb_deps(tmp_path, calls)
+    reg = arbitrate_tools(_place(9.5, 13.0), d, Slices(d, str(tmp_path), 'x.wav', 'a3'), journal=[], meter={},
+                          clean_draft=draft_words(SEGS))
+    heard = await reg.call('listen', ear='clean')
+    assert heard['text'] == 'раз два. Три четыре' and heard['from'] == 'draft' and calls == []
+    second = await reg.call('listen', ear='second')
+    assert second['text'] == 'слышно бэкендом' and calls == ['giga'], 'второе ухо без своего черновика слушает бэкенд'
