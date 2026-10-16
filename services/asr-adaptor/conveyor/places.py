@@ -97,12 +97,13 @@ def arbitrate_tools(place: Place, d, slices: Slices, *, journal: list, meter: di
         path = await slices.get(a, b)
         # Ресурс — полоса модели: второе ухо другой школы на своей полосе (CPU) не ждёт очереди whisper.
         ln = lane_for(cfg, model)
-        t_ear = asyncio.get_running_loop().time()
         async with d._res(ln.name, ln.slots):
             # ⚠️ Модель передаётся ТОЛЬКО второму уху — чистое ухо зовёт бэкенд прежней формой:
             # заглушки тестов и чужие обёртки знают сигнатуру `asr(path, prompt)`.
+            t_ear = asyncio.get_running_loop().time()
             r = await asyncio.to_thread(lambda: d.audio_clients.asr(path, '', **({'model': model} if model else {})))
-        tm_add(d, f'arbitrate_{ear}_s', asyncio.get_running_loop().time() - t_ear)
+            # Время самого прослушивания, без очереди за семафором (очередь — в `wait_<полоса>_s`).
+            tm_add(d, f'arbitrate_{ear}_s', asyncio.get_running_loop().time() - t_ear)
         out = {'ear': ear, 'text': r.get('text') or '', 'a': a, 'b': b}
         place.heard[ear] = out
         return out
