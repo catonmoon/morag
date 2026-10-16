@@ -18,8 +18,18 @@ from conveyor.state import State
 from fakes import HINTS
 
 
+def _assign_with_cos(cos: float):
+    """Заглушка реестра, которая отчитывается решением (`out`) с косинусом матча — его читает порог имени."""
+    def assign(cents, air, episode, path, threshold, max_centroids, out=None, **kw):
+        if out is not None:
+            out.append({'cluster': 'SPEAKER_00', 'action': 'matched', 'label': 'Speaker_0', 'cos': cos})
+        return {'SPEAKER_00': 'Speaker_0'}
+    return assign
+
+
 async def test_early_voices_name_turns_feed_hints_and_the_artifact(rich, monkeypatch, silence):
     monkeypatch.setattr(pipeline.CFG, 'voices_early', True)
+    monkeypatch.setattr(pipeline.registry, 'assign', _assign_with_cos(0.91))
     monkeypatch.setattr(pipeline.registry, 'names', lambda path: {'Speaker_0': 'Голос Реестра'})
     hints = {**HINTS, 'speaker_names': {'Speaker_0': 'Мария Кузнецова'}}
     r = await run_conveyor(str(silence), llm=object(), episode='ep1', hints=hints)
@@ -50,6 +60,7 @@ async def test_recognised_names_join_the_hint_names(rich, monkeypatch, silence):
 
     monkeypatch.setattr(pipeline, 'build_hints', build_hints)
     monkeypatch.setattr(pipeline.CFG, 'voices_early', True)
+    monkeypatch.setattr(pipeline.registry, 'assign', _assign_with_cos(0.8))
     await run_conveyor(str(silence), llm=object(), episode='ep1',
                        hints={**HINTS, 'names': ['Пётр Ковалёв'], 'speaker_names': {'Speaker_0': 'Мария Кузнецова'}})
     assert seen['names'] == ['Пётр Ковалёв', 'Мария Кузнецова'], 'имя узнанного голоса — к именам подсказки, после данных'
@@ -97,3 +108,22 @@ def test_prompt_contexts_prefer_the_name_then_the_voice_then_the_cluster():
     assert pipeline._around(turns, 1, 1).splitlines() == ['[Мария Кузнецова] раз', '[SPEAKER_02] три']
     assert render(turns, [0, 1]).splitlines()[0].startswith('[Мария Кузнецова · ')
     assert render(turns, [1])[0:11] == '[Speaker_1 '
+
+
+async def test_unsure_match_keeps_the_voice_number_but_withholds_the_name(rich, monkeypatch, silence):
+    """Порог имени (`ASR_VOICES_NAME_COS`, 0.75) строже порога матча: cos 0.62 — голос узнан, имя не подсказываем."""
+    monkeypatch.setattr(pipeline.CFG, 'voices_early', True)
+    monkeypatch.setattr(pipeline.registry, 'assign', _assign_with_cos(0.62))
+    r = await run_conveyor(str(silence), llm=object(), episode='ep1',
+                           hints={**HINTS, 'speaker_names': {'Speaker_0': 'Мария Кузнецова'}})
+    assert all(t['speaker_id'] == 'Speaker_0' and 'name' not in t for t in r['turns'])
+    assert r['speaker_names'] == {}
+    assert r['voices']['names_withheld'] == [{'speaker': 'Speaker_0', 'cos': 0.62}]
+
+
+async def test_match_without_a_reported_cos_gets_no_name(rich, monkeypatch, silence):
+    """Реестр не отчитался решением (чужая реализация) — косинус неизвестен, имя не подсказываем."""
+    monkeypatch.setattr(pipeline.CFG, 'voices_early', True)
+    r = await run_conveyor(str(silence), llm=object(), episode='ep1',
+                           hints={**HINTS, 'speaker_names': {'Speaker_0': 'Мария Кузнецова'}})
+    assert all('name' not in t for t in r['turns']) and r['speaker_names'] == {}

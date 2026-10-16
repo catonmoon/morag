@@ -629,7 +629,8 @@ async def _assign_voices(st: State, d: Deps, ev: Emitter, spans: list, *, ticket
         st.tm['ticket_wait_s'] = round(time.monotonic() - _w, 1)
     async with d._res('campp', cfg.campp_slots):
         cents, air = await asyncio.to_thread(d.audio_clients.campp, st.wav, spans)
-    decided: list[dict] | None = [] if (ev.enabled or cfg.record_guard or cfg.naming_trust_cos) else None
+    decided: list[dict] | None = [] if (ev.enabled or cfg.record_guard or cfg.naming_trust_cos
+                                        or getattr(cfg, 'voices_early', False)) else None
     # ⚠️ Ключ передаётся ТОЛЬКО когда включён: заглушки реестра в тестах — прежней сигнатуры.
     guard = {'record_guard': True} if cfg.record_guard else {}
     mapping = await asyncio.to_thread(
@@ -681,8 +682,16 @@ async def voices(st: State, d: Deps, ev: Emitter) -> None:
     _t = time.monotonic()
     await _assign_voices(st, d, ev, st.spans, ticket=True)
     given = {str(k): str(v) for k, v in ((st.hints or {}).get('speaker_names') or {}).items() if k and v}
-    st.names = {**(d.registry.names(cfg.registry_path) or {}), **given}
-    known = sorted({st.names[s] for s in set(st.mapping.values()) if st.names.get(s)})
+    all_names = {**(d.registry.names(cfg.registry_path) or {}), **given}
+    # Имя — только уверенному матчу (`ASR_VOICES_NAME_COS`): косинус ниже порога или неизвестен (реестр не
+    # отчитался решением) — голос остаётся номером; чужая фамилия в подсказке дороже, чем её отсутствие.
+    gate = float(getattr(cfg, 'voices_name_cos', 0.75) or 0.75)
+    sure = {s for s in set(st.mapping.values()) if st.voice_cos.get(s, 0.0) >= gate}
+    st.names = {s: all_names[s] for s in sure if all_names.get(s)}
+    unsure = sorted(s for s in set(st.mapping.values()) if all_names.get(s) and s not in sure)
+    if unsure:
+        st.voice_log['names_withheld'] = [{'speaker': s, 'cos': round(st.voice_cos.get(s, 0.0), 3)} for s in unsure]
+    known = sorted(set(st.names.values()))
     if known:
         h = dict(st.hints or {})
         h['names'] = list(dict.fromkeys(list(h.get('names') or ()) + known))
