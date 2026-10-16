@@ -216,3 +216,17 @@ async def test_opening_runs_the_draft_beside_diarization_only_on_a_non_gpu_lane(
     d.prefetch = {}
     await nodes.opening(st, d, ev)
     assert order[:2] == [('start', 'pass1'), ('end', 'pass1')], 'без черновика — прежний порядок: пасс-1 первым'
+
+
+def test_stage_events_mark_parallel_stages_only_while_the_flag_is_set():
+    got: list = []
+    ev = Emitter(got.append, time.monotonic())
+    ev.stage('pass1')
+    ev.parallel = True
+    ev.stage('diarize')
+    ev.stage_done('diarize', 1.0)
+    ev.parallel = False
+    ev.stage_done('pass1', 2.0)
+    marks = [(e['t'], e['stage'], e.get('parallel')) for e in got if isinstance(e, dict) and e['t'].startswith('stage.')]
+    assert marks == [('stage.start', 'pass1', None), ('stage.start', 'diarize', True), ('stage.end', 'diarize', True),
+                     ('stage.end', 'pass1', None)]

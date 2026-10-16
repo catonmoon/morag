@@ -27,6 +27,9 @@ class Emitter:
     def __init__(self, progress, t0: float) -> None:
         self._progress = progress
         self._t0 = t0
+        # Стадии, идущие РЯДОМ (`opening` при ASR_OVERLAP), помечаются `parallel: true`: окно загрузки показывает
+        # «текущую стадию» одной строкой, и без пометки стадии, перемежающиеся во времени, выглядели бы как чехарда.
+        self.parallel = False
 
     @property
     def enabled(self) -> bool:
@@ -47,7 +50,7 @@ class Emitter:
     def stage(self, name: str, **f) -> None:
         """Начало стадии: прежняя строка прогресса И событие — одним вызовом."""
         self.step(name)
-        self.emit('stage.start', stage=name, **f)
+        self.emit('stage.start', stage=name, **f, **({'parallel': True} if self.parallel else {}))
 
     def stage_done(self, name: str, sec, **f) -> None:
-        self.emit('stage.end', stage=name, sec=sec, **f)
+        self.emit('stage.end', stage=name, sec=sec, **f, **({'parallel': True} if self.parallel else {}))

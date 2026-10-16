@@ -104,23 +104,30 @@ async def opening(st: State, d: Deps, ev: Emitter) -> None:
         if early:
             await voices(st, d, ev)
 
-    if opening_plan(d.cfg) == 'draft-parallel':
-        async def draft_then_text() -> None:
+    ev.parallel = True          # события стадий, идущих рядом, несут `parallel: true` (окно загрузки)
+    try:
+        if opening_plan(d.cfg) == 'draft-parallel':
+            async def draft_then_text() -> None:
+                await pass1(st, d, ev)
+                d.prefetch['dsum'] = asyncio.create_task(d.doc_summary(st.full_text, d.llm))
+                if not early:
+                    await glossary(st, d, ev)
+            await asyncio.gather(diarize_then_voices(), draft_then_text())
+            ev.parallel = False
+            if early:
+                await glossary(st, d, ev)
+        else:
+            ev.parallel = False
             await pass1(st, d, ev)
             d.prefetch['dsum'] = asyncio.create_task(d.doc_summary(st.full_text, d.llm))
-            if not early:
+            if early:
+                await diarize_then_voices()
                 await glossary(st, d, ev)
-        await asyncio.gather(diarize_then_voices(), draft_then_text())
-        if early:
-            await glossary(st, d, ev)
-    else:
-        await pass1(st, d, ev)
-        d.prefetch['dsum'] = asyncio.create_task(d.doc_summary(st.full_text, d.llm))
-        if early:
-            await diarize_then_voices()
-            await glossary(st, d, ev)
-        else:
-            await asyncio.gather(diarize(st, d, ev), glossary(st, d, ev))
+            else:
+                # Прежняя форма наложения — события прежние байт в байт (золотой снимок `overlap`): пометки нет.
+                await asyncio.gather(diarize(st, d, ev), glossary(st, d, ev))
+    finally:
+        ev.parallel = False
     st.tm['opening_s'] = round(time.monotonic() - _t, 1)
 
 
