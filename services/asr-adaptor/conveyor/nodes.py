@@ -65,15 +65,13 @@ async def pass1(st: State, d: Deps, ev: Emitter) -> None:
     clean = bool(getattr(cfg, 'clean_from_draft', False)) and not draft
     ln = lane_for(cfg, draft)
     async with d._res(ln.name, ln.slots):
-        p1 = await asyncio.to_thread(d.audio_clients.asr, st.wav, '',
-                                     **({'model': draft, 'words': True} if draft else ({'words': True} if clean else {})))
+        p1 = await asyncio.to_thread(d.audio_clients.asr, st.wav, '', **({'model': draft, 'words': True} if draft else {}))
     if clean:
-        # Слова пасса-1 — чистому уху (`ASR_CLEAN_FROM_DRAFT`); разрезу на куски — только сегменты: куски по словам
-        # whisper декодируются вдвое хуже (16.10: 11.2 % против 5.6 по его сегментам).
-        from conveyor.places import draft_words
-        st.clean_draft = draft_words(p1['segments']) or []
-        for s in p1['segments']:
-            s.pop('words', None)
+        # Чистое ухо из черновика (`ASR_CLEAN_FROM_DRAFT`) — СЕГМЕНТАМИ пасса-1, не словами: времена слов удваивают
+        # пасс-1 (17.10, S7: 66 → 126 с на запись — выравнивание в mlx-whisper), а окно уха по сегментам даже шире
+        # (ADR-0030: шире — лучше). Куски арбитража резаны по этим же сегментам — окно совпадает точно.
+        from stages.chunking import load_words
+        st.clean_draft = load_words({'segments': p1['segments']}) or []    # слова, если бэкенд их дал, иначе сегменты
     st.segs = p1['segments']
     st.full_text = ' '.join((s.get('text') or '').strip() for s in st.segs)
     st.tm['pass1_s'] = round(time.monotonic() - _t, 1)

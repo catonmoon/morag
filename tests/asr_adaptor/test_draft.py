@@ -295,9 +295,10 @@ async def test_pass1_with_clean_from_draft_keeps_words_for_the_ear_but_not_for_c
     d.audio_clients = SimpleNamespace(asr=asr)
     st = _st(tmp_path)
     await nodes.pass1(st, d, Emitter(None, time.monotonic()))
-    assert calls == [{'words': True}]
-    assert st.clean_draft == [('раз', 10.0, 10.4), ('два.', 10.6, 11.0), ('Три', 12.0, 12.3), ('четыре', 12.4, 12.9)]
-    assert all('words' not in s for s in st.segs), 'разрезу на куски — сегменты, не слова'
+    assert calls == [{}], 'времён слов не просим — они удваивают пасс-1 (17.10)'
+    assert st.clean_draft == [('раз', 10.0, 10.4), ('два.', 10.6, 11.0), ('Три', 12.0, 12.3), ('четыре', 12.4, 12.9)], \
+        'заглушка отдаёт слова — берём их; без слов были бы сегменты'
+    assert st.segs == [dict(s, words=list(s['words'])) for s in SEGS], 'сегменты пасса-1 — как пришли'
 
 
 async def test_clean_ear_from_draft_needs_no_backend(tmp_path):
@@ -309,3 +310,19 @@ async def test_clean_ear_from_draft_needs_no_backend(tmp_path):
     assert heard['text'] == 'раз два. Три четыре' and heard['from'] == 'draft' and calls == []
     second = await reg.call('listen', ear='second')
     assert second['text'] == 'слышно бэкендом' and calls == ['giga'], 'второе ухо без своего черновика слушает бэкенд'
+
+
+async def test_clean_draft_from_segments_when_the_backend_gives_no_words(tmp_path):
+    """Штатный пасс-1 whisper слов не отдаёт — чистое ухо берёт сегменты: окно уха — целые фразы."""
+    calls: list = []
+
+    def asr(path, prompt='', **kw):
+        calls.append(kw)
+        return {'text': 'раз два. Три четыре', 'segments': [{k: s[k] for k in ('id', 'start', 'end', 'text')} for s in SEGS]}
+
+    d = _pass1_deps(calls, clean_from_draft=True)
+    d.audio_clients = SimpleNamespace(asr=asr)
+    st = _st(tmp_path)
+    await nodes.pass1(st, d, Emitter(None, time.monotonic()))
+    assert st.clean_draft == [('раз два.', 10.0, 11.0), ('Три четыре', 12.0, 12.9)]
+    assert draft_text(st.clean_draft, 9.5, 11.5) == 'раз два.' and draft_text(st.clean_draft, 11.8, 13.0) == 'Три четыре'
