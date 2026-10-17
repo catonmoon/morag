@@ -23,10 +23,19 @@ from conveyor.state import State
 log = logging.getLogger('asr')
 
 
+def always_of(cfg, h: dict | None) -> list[str]:
+    """Постоянные термины ЭТОЙ записи: корпуса (`ASR_ALWAYS_TERMS`) + записи (`hints.always` — термины из авторских
+    источников записи: название, аннотация, слайды). Идут в подсказку каждого куска первыми. Замер 17.10: подсказка
+    пасса-2 без постоянных терминов — WER 4.18 % против 3.08 на эталонах встреч; у конференции каждый доклад о своём,
+    и общий список корпуса ей не годится — отсюда список записи. Пустой `hints.always` — прежнее поведение."""
+    own = [str(t).strip() for t in ((h or {}).get('always') or ()) if isinstance(t, str) and t.strip()]
+    return list(dict.fromkeys(list(cfg.always_terms) + own))
+
+
 def _known_spellings(cfg, h: dict) -> list[str]:
-    """Известные написания записи: постоянные термины корпуса + канал подсказок."""
-    return list(cfg.always_terms) + [str(t) for k_ in ('terms', 'names', 'spellings')
-                                     for t in (h.get(k_) or ()) if t]
+    """Известные написания записи: постоянные термины корпуса и записи + канал подсказок."""
+    return always_of(cfg, h) + [str(t) for k_ in ('terms', 'names', 'spellings')
+                                for t in (h.get(k_) or ()) if t]
 
 
 # --- prepare ------------------------------------------------------------------------------------
@@ -262,6 +271,10 @@ async def pass2(st: State, d: Deps, ev: Emitter) -> None:
     screen = [x for x in (st.hints or {}).get('screen') or () if isinstance(x, dict)]
     n_screen_chunks = n_done = 0
 
+    always = always_of(cfg, st.hints)
+    # ⚠️ Кортеж, как `cfg.always_terms`: без терминов записи подсказка байт в байт прежняя.
+    always = tuple(always) if always != list(cfg.always_terms) else cfg.always_terms
+
     async def one(i: int, c: dict) -> None:
         nonlocal n_broken, n_hinted_chunks, n_screen_chunks, n_done
         src = c['text'] or d._neighbour_text(chunks, i)
@@ -285,7 +298,7 @@ async def pass2(st: State, d: Deps, ev: Emitter) -> None:
                 hint_set = frozenset(st.hint_set | {w.casefold() for w in near})
         if any(x.casefold() in st.hint_set for x in canon):
             n_hinted_chunks += 1
-        prompt = d.build_prompt(canon, st.counter, cfg.prompt_budget, cfg.always_terms, hint_set,
+        prompt = d.build_prompt(canon, st.counter, cfg.prompt_budget, always, hint_set,
                                 # ⚠️ Форму и выключатель глоссария передаём ТОЛЬКО когда они
                                 # заданы: заглушки в тестах и чужие обёртки знают прежнюю сигнатуру.
                                 **({'prefix': cfg.prompt_prefix} if cfg.prompt_prefix else {}),
@@ -562,7 +575,7 @@ async def final_round(st: State, d: Deps, ev: Emitter) -> None:
     for t in turns_:
         t['raw'] = ' '.join(c['raw'] for c in t['chunks'] if c['raw']).strip()
     # Подтверждённые каноники — ЗАЩИТА: замена, ломающая уже верный термин, отбрасывается.
-    st.protect = list(cfg.always_terms) + [c for h in st.seed for c in h['canonicals']]
+    st.protect = always_of(cfg, st.hints) + [c for h in st.seed for c in h['canonicals']]
     # ⚠️ `protect` — постоянные термины для `_term_survives`; известные слова записи — отдельное
     # имя `known` (первый вариант затенил `protect` пустым кортежем и отключил старое вето).
     st.known = ()
