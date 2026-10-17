@@ -84,6 +84,8 @@ async def run_conveyor(audio_path: str, llm, *, episode: str = '', title: str = 
             if ckpt is not None:
                 try:
                     st.save(ckpt)
+                    if getattr(cfg, 'checkpoints_keep', False):
+                        shutil.copy2(ckpt, ckpt.with_name(f'{ckpt.stem}.{name}.json'))
                 except Exception:  # noqa: BLE001 — чекпойнт не имеет права уронить прогон
                     log.warning('чекпойнт %s не записался', ckpt, exc_info=True)
         order = [n for n, _, _ in nodes.NODES]

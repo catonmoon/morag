@@ -61,3 +61,23 @@ async def test_without_a_checkpoint_dir_nothing_is_written(rich, silence, monkey
     monkeypatch.setattr(pipeline.CFG, 'checkpoints', '')
     r = await run_conveyor(str(silence), llm=object(), episode='ep1', hints=HINTS)
     assert 'checkpoint' not in r['conveyor']
+
+
+async def test_keep_writes_a_snapshot_after_every_node_and_tail_resumes_from_one(rich, silence, tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline.CFG, 'checkpoints', str(tmp_path / 'ck'))
+    monkeypatch.setattr(pipeline.CFG, 'checkpoints_keep', True, raising=False)
+    full = await run_conveyor(str(silence), llm=object(), episode='ep1', hints=HINTS)
+    ck = Path(full['conveyor']['checkpoint'])
+    snaps = {p.name.split('.')[-2]: p for p in ck.parent.glob(f'{ck.stem}.*.json')}
+    assert set(snaps) == set(full['conveyor']['nodes']), 'снимок на каждый пройденный узел'
+    turns = json.loads(snaps['turns'].read_text(encoding='utf-8'))
+    assert turns['done'][-1] == 'turns' and oct(os.stat(snaps['turns']).st_mode & 0o777) == '0o600'
+    again = await run_conveyor(str(silence), llm=object(), episode='ep1', hints=HINTS, resume=str(snaps['turns']))
+    assert _norm(again) == _norm(full), 'хвост со снимка узла даёт тот же результат'
+
+
+async def test_without_keep_only_one_checkpoint_file(rich, silence, tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline.CFG, 'checkpoints', str(tmp_path / 'ck'))
+    monkeypatch.setattr(pipeline.CFG, 'checkpoints_keep', False, raising=False)
+    await run_conveyor(str(silence), llm=object(), episode='ep1', hints=HINTS)
+    assert len(list((tmp_path / 'ck').glob('*.json'))) == 1

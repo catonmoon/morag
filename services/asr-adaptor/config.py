@@ -210,6 +210,9 @@ class Config:
     # Каталог чекпойнтов конвейера: после каждого узла состояние пишется в JSON (0600, без центроидов
     # голосов), `run_conveyor(resume=<файл>)` продолжает с первого непройденного узла. Пусто — выключено.
     checkpoints: str = field(default_factory=lambda: _env('ASR_CHECKPOINTS', ''))
+    # Хранить ещё и снимок после КАЖДОГО узла (`<ep>-<ts>.<узел>.json`), а не только последний: повтор хвоста с
+    # любого узла (стенд стадии без шума стадий до неё — корректор с одного чекпойнта). Выключено — один файл.
+    checkpoints_keep: bool = field(default_factory=lambda: _flag('ASR_CHECKPOINTS_KEEP', '0'))
     # Свои события конвейера в ленте (`conveyor.node` со счётчиком после каждого узла). Выключено —
     # лента прежняя: её читает окно загрузки записи.
     node_events: bool = field(default_factory=lambda: _flag('ASR_NODE_EVENTS', '0'))
