@@ -2,7 +2,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from morag.llm.client import GenerationParams, LLMClient, _reset_shared_semaphores
+from morag.llm.client import GenerationParams, LLMClient, _reset_shared_semaphores, salvage_truncated_json
+from morag.llm.retry import RetryPolicy
 
 
 @pytest.fixture(autouse=True)
@@ -13,13 +14,14 @@ def _clear_shared_semaphores():
     _reset_shared_semaphores()
 
 
-def make_completion(content: str, reasoning: str | None = None):
+def make_completion(content: str, reasoning: str | None = None, finish_reason: str = 'stop'):
     """Build a fake ChatCompletion response object."""
     message = MagicMock()
     message.content = content
     message.reasoning = reasoning
     choice = MagicMock()
     choice.message = message
+    choice.finish_reason = finish_reason
     completion = MagicMock()
     completion.choices = [choice]
     return completion
@@ -586,3 +588,82 @@ class TestStaticExtraBody:
         mock_openai.chat.completions.create.return_value = make_completion('ok')
         await client.complete([{'role': 'user', 'content': 'hi'}])
         assert 'extra_body' not in mock_openai.chat.completions.create.call_args.kwargs
+
+
+TRUNCATED = '{"terms":[{"heard":"alpha","canonicals":["Alpha"]},{"heard":"beta","canonicals":["Be'
+
+
+class TestTruncatedJSON:
+    """Ответ, обрезанный потолком max_tokens, спасается префиксом вместо повтора."""
+
+    def test_salvage_cuts_at_the_last_complete_element(self):
+        assert salvage_truncated_json(TRUNCATED) == {'terms': [{'heard': 'alpha', 'canonicals': ['Alpha']}]}
+
+    def test_salvage_handles_cut_inside_a_string_and_after_a_key(self):
+        assert salvage_truncated_json('{"flags": ["one", "two", "thr') == {'flags': ['one', 'two']}
+        assert salvage_truncated_json('{"a": {"b": 1}, "c"') == {'a': {'b': 1}}
+        assert salvage_truncated_json('{"items":[1,2,3],"tail') == {'items': [1, 2, 3]}
+
+    def test_salvage_gives_up_on_an_empty_body(self):
+        assert salvage_truncated_json('{') is None
+        assert salvage_truncated_json('') is None
+        assert salvage_truncated_json('}') is None
+
+    def test_salvage_returns_complete_json_unchanged(self):
+        assert salvage_truncated_json('{"a": [1, {"b": "x"}]}') == {'a': [1, {'b': 'x'}]}
+
+    async def test_complete_json_salvages_when_finish_reason_is_length(self, client, mock_openai, caplog):
+        schema = {'type': 'object', 'properties': {}, 'required': []}
+        mock_openai.chat.completions.create.return_value = make_completion(TRUNCATED, finish_reason='length')
+        result = await client.complete_json([{'role': 'user', 'content': 'json'}], schema=schema)
+        assert result == {'terms': [{'heard': 'alpha', 'canonicals': ['Alpha']}]}
+        assert any('truncated' in r.message for r in caplog.records)
+
+    async def test_complete_json_still_raises_when_the_model_stopped_on_its_own(self, client, mock_openai):
+        schema = {'type': 'object', 'properties': {}, 'required': []}
+        mock_openai.chat.completions.create.return_value = make_completion(TRUNCATED, finish_reason='stop')
+        with pytest.raises(ValueError, match='invalid JSON'):
+            await client.complete_json([{'role': 'user', 'content': 'json'}], schema=schema)
+
+    async def test_empty_body_asks_for_a_short_retry_pause(self, client, mock_openai):
+        schema = {'type': 'object', 'properties': {}, 'required': []}
+        mock_openai.chat.completions.create.return_value = make_completion('{', finish_reason='stop')
+        with pytest.raises(ValueError) as ei:
+            await client.complete_json([{'role': 'user', 'content': 'json'}], schema=schema)
+        assert ei.value.retry_delay == 1.0
+
+
+class TestRetryDelayHint:
+    async def test_policy_honours_retry_delay_on_the_exception(self):
+        slept = []
+        calls = {'n': 0}
+
+        async def flaky():
+            calls['n'] += 1
+            if calls['n'] == 1:
+                err = ValueError('empty body')
+                err.retry_delay = 0.25
+                raise err
+            return 'ok'
+
+        with patch('morag.llm.retry.asyncio.sleep', side_effect=lambda d: slept.append(d) or _noop()):
+            assert await RetryPolicy(max_retries=2, delay=10.0, backoff=1.0).call(flaky, 'x') == 'ok'
+        assert slept == [0.25], 'пауза взята из исключения, а не из политики'
+
+    async def test_policy_keeps_its_own_delay_without_a_hint(self):
+        slept = []
+        calls = {'n': 0}
+
+        async def flaky():
+            calls['n'] += 1
+            if calls['n'] == 1:
+                raise ValueError('spike')
+            return 'ok'
+
+        with patch('morag.llm.retry.asyncio.sleep', side_effect=lambda d: slept.append(d) or _noop()):
+            assert await RetryPolicy(max_retries=2, delay=10.0, backoff=1.0).call(flaky, 'x') == 'ok'
+        assert slept == [10.0]
+
+
+async def _noop():
+    return None

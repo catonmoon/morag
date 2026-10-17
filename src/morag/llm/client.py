@@ -78,6 +78,49 @@ def _strip_thinking(text: str) -> str:
     return _THINKING_RE.sub('', text)
 
 
+def salvage_truncated_json(content: str, max_tries: int = 200):
+    """Обрезанный по max_tokens JSON → самый длинный разборный префикс (dict/list) или None.
+
+    Идём по тексту, помня стек открытых скобок и состояние строки; каждое место, где закончился
+    элемент (закрылась скобка или строка вне строки), — кандидат на разрез. С конца пробуем:
+    префикс до кандидата + закрывающие скобки стека. Строка считается границей только как элемент
+    списка: внутри объекта она ключ или поле, и объект без остальных полей — не элемент, а обрывок.
+    Ничего не разобралось (например, тело «{») — None."""
+    stack: list[str] = []
+    cuts: list[tuple[int, tuple[str, ...]]] = []
+    in_str = esc = False
+    for i, ch in enumerate(content):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == '\\':
+                esc = True
+            elif ch == '"':
+                in_str = False
+                if stack and stack[-1] == '[':
+                    # строка — элемент списка; строка внутри объекта — ключ или одно из полей, и
+                    # обрезать после неё значило бы вернуть объект без половины полей
+                    cuts.append((i + 1, tuple(stack)))
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in '{[':
+            stack.append(ch)
+        elif ch in '}]':
+            if not stack:
+                return None
+            stack.pop()
+            cuts.append((i + 1, tuple(stack)))
+    for idx, st in reversed(cuts[-max_tries:]):
+        prefix = content[:idx].rstrip().rstrip(',')
+        closers = ''.join('}' if c == '{' else ']' for c in reversed(st))
+        try:
+            return json.loads(prefix + closers)
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
 def _extract_content(message) -> str:
     """Извлечь текст из ответа.
 
@@ -520,13 +563,30 @@ class LLMClient:
         if max_tokens is not None:
             kwargs['max_tokens'] = max_tokens
         response = await self._create(**kwargs)
-        content = _extract_content(response.choices[0].message) or '{}'
+        choice = response.choices[0]
+        content = _extract_content(choice.message) or '{}'
+        finish = getattr(choice, 'finish_reason', None)
         logger.debug('LLM raw response: %s', content)
         try:
             return json.loads(content)
         except json.JSONDecodeError as e:
-            logger.warning('LLM returned invalid JSON: %s\nRaw content: %s', e, content)
-            raise ValueError(f'LLM returned invalid JSON: {e}') from e
+            if finish == 'length':
+                # Ответ обрезан потолком max_tokens (деген-петля или честно длинный список): префикс
+                # до последнего целого элемента разборен и ничем не хуже повтора, который займёт
+                # столько же времени и упрётся в тот же потолок. Замерено (asr-adaptor, 17.10): два
+                # повтора обрезанного глоссария стоили записи 150 с из 450.
+                fixed = salvage_truncated_json(content)
+                if fixed is not None:
+                    logger.warning('LLM JSON truncated at max_tokens (%d chars): salvaged the parsable '
+                                   'prefix instead of retrying', len(content))
+                    return fixed
+            logger.warning('LLM returned invalid JSON (finish_reason=%s): %s\nRaw content: %s', finish, e, content)
+            err = ValueError(f'LLM returned invalid JSON: {e}')
+            if len(content.strip()) <= 2:
+                # Тело вроде «{» — шлюз отдал пустой ответ (201 из 218 битых JSON за ночь 16–17.10
+                # у asr-adaptor): это не спайк провайдера, пауза перед повтором нужна короткая.
+                err.retry_delay = 1.0
+            raise err from e
 
 
 class _ModelUnavailableError(Exception):

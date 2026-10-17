@@ -40,11 +40,15 @@ class RetryPolicy:
             except Exception as exc:
                 last_exc = exc
                 if attempt < self.max_retries:
+                    # Исключение может само назначить паузу (`retry_delay`): пустое тело от шлюза —
+                    # не спайк провайдера, ждать десять секунд незачем.
+                    pause = getattr(exc, 'retry_delay', None)
+                    pause = current_delay if pause is None else float(pause)
                     logger.warning(
                         'Call failed%s (attempt %d/%d): %s — retrying in %.1fs...',
-                        ctx, attempt + 1, self.max_retries + 1, exc, current_delay,
+                        ctx, attempt + 1, self.max_retries + 1, exc, pause,
                     )
-                    await asyncio.sleep(current_delay)
+                    await asyncio.sleep(pause)
                     current_delay *= self.backoff
                 else:
                     logger.warning(
