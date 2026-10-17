@@ -113,3 +113,30 @@ def test_document_branch_never_prints_annotations(field):
     doc_chunk = {'doc_id': DOC, 'text': 'страница', 'title': 'Страница', 'order': 0, 'path': ['alpha.md'], 'screen': SCREEN}
     out = _block([doc_chunk], field=field, timestamps=False)
     assert 'На экране' not in out and 'страница' in out
+
+
+# --- нога keywords (GTE на запросе) ------------------------------------------------------------
+
+async def test_sparse_query_off_skips_gte_and_keywords_leg(monkeypatch):
+    monkeypatch.delenv('MORAG_SPARSE_GTE', raising=False)
+    on = _searcher({'full'})
+    on_pf = await on._build_rrf_prefetch('chunks', 'пирамида', 10)
+    assert [p.using for p in on_pf[-1].prefetch] == ['keywords']        # по умолчанию — как было
+    assert on._sparse.embed_query.await_count == 1
+
+    off = _searcher({'full'})
+    off._sparse_query = False
+    off_pf = await off._build_rrf_prefetch('chunks', 'пирамида', 10)
+    assert [p.using for p in off_pf if p.using] == ['full']             # лексической ноги нет вовсе
+    assert off._sparse.embed_query.await_count == 0                      # эмбеддер не зван
+
+
+def test_env_switches_gte_off_over_config(monkeypatch):
+    from morag.retrieval import searcher as mod
+    kw = dict(qdrant=None, dense_embedder=None, sparse_embedder=None,
+              chunks_collection='c', docs_collection='d')
+    monkeypatch.delenv('MORAG_SPARSE_GTE', raising=False)
+    assert mod.HybridSearcher(**kw)._sparse_query is True
+    assert mod.HybridSearcher(**kw, sparse_query=False)._sparse_query is False
+    monkeypatch.setenv('MORAG_SPARSE_GTE', 'off')
+    assert mod.HybridSearcher(**kw)._sparse_query is False
