@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from qdrant_client import AsyncQdrantClient, models
 
 from morag import shortid
-from morag.config import Config, DenseEmbedderConfig, PdfConfig, SparseEmbedderConfig, load_config
+from morag.config import Config, DenseEmbedderConfig, PdfConfig, SparseEmbedderConfig, load_config, sparse_enabled
 from morag.indexing.bm25 import build_bm25_index
 from morag.indexing.chunker import (
     BoundaryChunker,
@@ -582,7 +582,12 @@ async def cmd_index(
             prompt_template=config.indexing.context.prompt,
         ) if config.indexing.context.mode == 'llm' else NoopContextGenerator()
     )
-    sparse_embedder = _make_sparse_embedder(config.indexing.sparse_embedder)
+    # GTE-sparse (`keywords`) — только если включён; иначе эмбеддер не нужен вовсе (и не поднят).
+    sparse_embedder = (
+        _make_sparse_embedder(config.indexing.sparse_embedder)
+        if sparse_enabled(config.indexing.sparse_embedder) else None
+    )
+    logger.info('GTE-sparse (keywords): %s', 'on' if sparse_embedder else 'off')
 
     doc_processors = []
     # Короткий код документа — ПЕРВЫМ: остальные процессоры дороже (LLM, эмбеддинги), и если прогон
@@ -634,13 +639,14 @@ async def cmd_index(
         ))
     chunk_processors += [
         DenseEmbeddingProcessor(embedder),
-        SparseEmbeddingProcessor(
+    ]
+    if sparse_embedder is not None:
+        chunk_processors.append(SparseEmbeddingProcessor(
             sparse_embedder,
             include_doc_summary=config.indexing.lexical_doc_summary,
             include_chunk_context=config.indexing.lexical_chunk_context,
             annotation_field=ann_field if (ann_field and ann.in_sparse) else None,
-        ),
-    ]
+        ))
 
     # В LLM-режиме блок + ответ LLM должны влезть в контекстное окно.
     # Ответ ≈ такого же размера как вход, поэтому безопасный лимит: (context_window - overhead) / 2.
@@ -1312,27 +1318,23 @@ async def cmd_query(config_path: str, question: str, top_k: int) -> None:
         )
 
     embedder = _make_dense_embedder(config.indexing.dense_embedder)
-    sparse_embedder = _make_sparse_embedder(config.indexing.sparse_embedder)
-
     dense_vec = embedder.embed_query(question)
-    sparse_indices, sparse_values = sparse_embedder.embed_query(question)
 
     from qdrant_client.models import Prefetch, FusionQuery, Fusion, SparseVector
 
+    prefetch = [Prefetch(query=dense_vec, using='full', limit=top_k * 2)]
+    if sparse_enabled(config.indexing.sparse_embedder):
+        sparse_embedder = _make_sparse_embedder(config.indexing.sparse_embedder)
+        sparse_indices, sparse_values = sparse_embedder.embed_query(question)
+        prefetch.insert(0, Prefetch(
+            query=SparseVector(indices=sparse_indices, values=sparse_values),
+            using='keywords',
+            limit=top_k * 2,
+        ))
+
     results = await client.query_points(
         collection_name=config.qdrant.collection_chunks,
-        prefetch=[
-            Prefetch(
-                query=SparseVector(indices=sparse_indices, values=sparse_values),
-                using='keywords',
-                limit=top_k * 2,
-            ),
-            Prefetch(
-                query=dense_vec,
-                using='full',
-                limit=top_k * 2,
-            ),
-        ],
+        prefetch=prefetch,
         query=FusionQuery(fusion=Fusion.RRF),
         limit=top_k,
         with_payload=True,

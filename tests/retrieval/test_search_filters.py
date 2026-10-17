@@ -47,6 +47,7 @@ async def test_filter_reaches_every_prefetch():
     s._sparse = SimpleNamespace(embed_query=AsyncMock(return_value=([1, 2], [0.5, 0.5])))
     s.get_sparse_vector_names = AsyncMock(return_value={'keywords'})
     s._hnsw_ef = 0
+    s._sparse_query = True   # нога keywords тоже обязана получить фильтр
     prefetch = await s._build_rrf_prefetch('chunks', 'kafka', 10, filters={'category': ['Очереди']})
     dense = prefetch[0]
     lexical = prefetch[1].prefetch

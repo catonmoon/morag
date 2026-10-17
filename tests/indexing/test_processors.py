@@ -382,3 +382,20 @@ class TestShortIdProcessor:
     async def test_length_is_configurable(self):
         doc = await ShortIdProcessor({}, length=7).process(make_doc('local:demo:a/doc.md'))
         assert len(doc.payload['short_id']) == 9  # буква типа + 7 + контрольный знак
+
+
+class _WordCounter:
+    def count(self, text: str) -> int:
+        return len(text.split())
+
+    def truncate(self, text: str, n: int) -> str:
+        return ' '.join(text.split()[:n])
+
+
+def test_doc_vector_without_gte_writes_only_dense():
+    from morag.indexing.processors import DocVectorProcessor
+    off = DocVectorProcessor(FakeEmbedder(), None, _WordCounter(), max_tokens=8000)
+    doc = asyncio.run(off.process(make_document()))
+    assert set(doc.vectors) == {'full'}
+    on = DocVectorProcessor(FakeEmbedder(), FakeSparseEmbedder(), _WordCounter(), max_tokens=8000)
+    assert set(asyncio.run(on.process(make_document())).vectors) == {'full', 'keywords'}

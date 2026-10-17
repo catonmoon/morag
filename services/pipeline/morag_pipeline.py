@@ -20,7 +20,7 @@ from markdown_it import MarkdownIt
 # Импорт из installed morag-пакета (ставится через services/pipeline/Dockerfile).
 # Файл специально назван morag_pipeline.py (не morag.py) чтобы избежать коллизии с
 # пакетом в sys.modules — OWUI регистрирует файл по filename как имя модуля.
-from morag.config import ADMIN_HEADER, Config, load_config
+from morag.config import ADMIN_HEADER, Config, load_config, sparse_enabled
 from morag.llm.client import GenerationParams, LLMClient
 from morag.indexing.embedder import HttpEmbedder, HttpGteSparseEmbedder
 from morag.retrieval import (
@@ -383,8 +383,8 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
         'annotation_label': str(
             getattr(features, 'annotation_label', 'Аннотации') or 'Аннотации') if features else 'Аннотации',
         'annotation_leg': bool(getattr(features, 'annotation_leg', False)) if features else False,
-        # Нога `keywords` (GTE на запросе); env MORAG_SPARSE_GTE=off выключает в самом поисковике.
-        'sparse_query': bool(getattr(features, 'sparse_query', True)) if features else True,
+        # Нога `keywords` (GTE на запросе): `indexing.sparse_embedder.enabled`, env MORAG_SPARSE_GTE.
+        'sparse_query': sparse_enabled(sparse),
 
         'http_timeout': _int_or(
             v.HTTP_TIMEOUT, retr.http_timeout if retr else None, default=300,
@@ -617,7 +617,7 @@ class Pipeline:
             source_kinds=s['source_kinds'],
             annotation_field=s.get('annotation_field'),
             annotation_leg=s.get('annotation_leg', False),
-            sparse_query=s.get('sparse_query', True),
+            sparse_query=s.get('sparse_query', False),
         )
         # Реранкеры (search и get_doc) — оба на rerank-LLM + TiktokenCounter.
         # Бюджет input'а считается по `llm.context_window`.

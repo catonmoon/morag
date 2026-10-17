@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Annotated, Any, Literal, Union
 
@@ -250,6 +251,15 @@ class DenseEmbedderConfig(BaseModel):
 
 
 class SparseEmbedderConfig(BaseModel):
+    # Sparse-вектор `keywords` (GTE) — третий лексический канал рядом с bm25 и bm25_trigram.
+    # ⚠️ Выключен по умолчанию: замерено на корпусе лекций (20 вопросов по редким терминам) —
+    # без него эталон в топ-10 тот же (20/20), MRR 0.900 против 0.892, поиск 0.48 с против 0.74;
+    # bm25-каналы точные слова уже ловят, а эмбеддер — отдельный процесс на ~2 ГБ памяти.
+    # Выключенный не зовётся ни на запросе (нет ноги `keywords` в RRF), ни при индексации (чанки и
+    # документы пишутся без вектора `keywords`). Отпечаток индекса от него не зависит, но
+    # включить обратно — значит переиндексировать всё, что успело записаться без вектора.
+    # Env `MORAG_SPARSE_GTE=on|off` перекрывает конфиг (см. `sparse_enabled`).
+    enabled: bool = False
     model: str = 'Alibaba-NLP/gte-multilingual-base'
     base_url: str | None = None
     timeout: int = 30
@@ -259,6 +269,16 @@ class SparseEmbedderConfig(BaseModel):
     # запросы — burst > N → healthcheck timeout → autoheal restart →
     # in-flight rвутся. None = без cap'a, ограничение только через indexing.concurrency.
     max_concurrent: int | None = None
+
+
+def sparse_enabled(cfg: SparseEmbedderConfig | None) -> bool:
+    """Включён ли GTE-sparse: env `MORAG_SPARSE_GTE` (on/off) главнее конфига."""
+    env = os.environ.get('MORAG_SPARSE_GTE', '').strip().lower()
+    if env in ('off', '0', 'false', 'no'):
+        return False
+    if env in ('on', '1', 'true', 'yes'):
+        return True
+    return bool(cfg.enabled) if cfg else False
 
 
 class OversizedConfig(BaseModel):
@@ -583,12 +603,6 @@ class RetrievalFeaturesConfig(BaseModel):
     # тянет короткие титульные слайды, чей текст совпал с ключевым словом вопроса (5 из 10 вместо
     # 2). Включать только вместе с `indexing.annotations.vector: true` и после своего замера.
     annotation_leg: bool = False
-    # Нога `keywords` (GTE-sparse) в RRF: вектор запроса считает отдельный эмбеддер. Выключение
-    # снимает и вызов эмбеддера, и ногу; bm25 и bm25_trigram остаются. Замерено на корпусе лекций
-    # (20 вопросов по редким терминам): без GTE эталон в топ-10 тот же (20/20), MRR 0.900 против
-    # 0.892, поиск 0.48 с против 0.74 — а память эмбеддера на маленьком сервере дорога. Индексации
-    # GTE нужен по-прежнему. Env `MORAG_SPARSE_GTE=off` выключает поверх конфига.
-    sparse_query: bool = True
 
 
 # Дефолтная доменная «роль» агента в начале system prompt. Единый источник истины:

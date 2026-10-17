@@ -34,6 +34,7 @@ def _searcher(dense_names: set[str], field: str | None = 'screen', leg: bool = T
     s._hnsw_ef = 0
     s._annotation_field = field
     s._annotation_leg = leg
+    s._sparse_query = False
     s._extra_fields = (field,) if field else ()
     return s
 
@@ -115,28 +116,28 @@ def test_document_branch_never_prints_annotations(field):
     assert 'На экране' not in out and 'страница' in out
 
 
-# --- нога keywords (GTE на запросе) ------------------------------------------------------------
+# --- GTE-sparse выключен по умолчанию (indexing.sparse_embedder.enabled) ----------------------
 
-async def test_sparse_query_off_skips_gte_and_keywords_leg(monkeypatch):
-    monkeypatch.delenv('MORAG_SPARSE_GTE', raising=False)
+async def test_keywords_leg_only_when_gte_enabled():
     on = _searcher({'full'})
+    on._sparse_query = True
     on_pf = await on._build_rrf_prefetch('chunks', 'пирамида', 10)
-    assert [p.using for p in on_pf[-1].prefetch] == ['keywords']        # по умолчанию — как было
+    assert [p.using for p in on_pf[-1].prefetch] == ['keywords']
     assert on._sparse.embed_query.await_count == 1
 
     off = _searcher({'full'})
-    off._sparse_query = False
     off_pf = await off._build_rrf_prefetch('chunks', 'пирамида', 10)
     assert [p.using for p in off_pf if p.using] == ['full']             # лексической ноги нет вовсе
     assert off._sparse.embed_query.await_count == 0                      # эмбеддер не зван
 
 
-def test_env_switches_gte_off_over_config(monkeypatch):
-    from morag.retrieval import searcher as mod
-    kw = dict(qdrant=None, dense_embedder=None, sparse_embedder=None,
-              chunks_collection='c', docs_collection='d')
+def test_sparse_enabled_default_off_env_overrides(monkeypatch):
+    from morag.config import SparseEmbedderConfig, sparse_enabled
     monkeypatch.delenv('MORAG_SPARSE_GTE', raising=False)
-    assert mod.HybridSearcher(**kw)._sparse_query is True
-    assert mod.HybridSearcher(**kw, sparse_query=False)._sparse_query is False
+    assert sparse_enabled(SparseEmbedderConfig()) is False
+    assert sparse_enabled(None) is False
+    assert sparse_enabled(SparseEmbedderConfig(enabled=True)) is True
     monkeypatch.setenv('MORAG_SPARSE_GTE', 'off')
-    assert mod.HybridSearcher(**kw)._sparse_query is False
+    assert sparse_enabled(SparseEmbedderConfig(enabled=True)) is False
+    monkeypatch.setenv('MORAG_SPARSE_GTE', 'on')
+    assert sparse_enabled(SparseEmbedderConfig()) is True

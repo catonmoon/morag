@@ -12,7 +12,6 @@ CLI-скрипты, тесты.
 from __future__ import annotations
 
 import logging
-import os
 import time
 from typing import Any
 
@@ -104,10 +103,6 @@ def _bm25_trigram_query_vector(text: str) -> tuple[list[int], list[float]]:
     return to_sparse_vector(tokenize_trigram(text))
 
 
-
-def _sparse_gte_off() -> bool:
-    return os.environ.get('MORAG_SPARSE_GTE', '').strip().lower() in ('off', '0', 'false', 'no')
-
 class HybridSearcher:
     """Qdrant-фасад: RRF-поиск по chunks/docs + fetch хелперы.
 
@@ -132,7 +127,7 @@ class HybridSearcher:
         cache_ttl_seconds: float = 300.0,
         annotation_field: str | None = None,
         annotation_leg: bool = False,
-        sparse_query: bool = True,
+        sparse_query: bool = False,
     ) -> None:
         self._qdrant = qdrant
         self._dense = dense_embedder
@@ -142,9 +137,8 @@ class HybridSearcher:
         # запроса (по умолчанию выключено — замерено, что нога шумит титульными слайдами).
         self._annotation_field = annotation_field
         self._annotation_leg = annotation_leg
-        # Нога `keywords` и вызов GTE на запросе; env `MORAG_SPARSE_GTE=off` выключает поверх
-        # конфига — так правка доезжает до процесса без правки конфига корпуса.
-        self._sparse_query = sparse_query and not _sparse_gte_off()
+        # Нога `keywords` и вызов GTE на запросе (`indexing.sparse_embedder.enabled`, по умолчанию нет).
+        self._sparse_query = sparse_query
         self._extra_fields: tuple[str, ...] = (annotation_field,) if annotation_field else ()
         self._dense_vector_names_cache: dict[str, set[str]] = {}
         self._chunks_collection = chunks_collection
@@ -296,7 +290,7 @@ class HybridSearcher:
         kind_filter = build_payload_filter(exclude_source_names, filters)
 
         lexical: list[Prefetch] = []
-        if 'keywords' in available_sparse and getattr(self, '_sparse_query', True):
+        if 'keywords' in available_sparse and self._sparse_query:
             indices, values = await self._sparse.embed_query(text)
             lexical.append(Prefetch(
                 query=SparseVector(indices=indices, values=values),

@@ -616,7 +616,7 @@ class DocVectorProcessor(DocumentProcessor):
 
     Записывает в `document.vectors`:
     - `full`: dense-эмбеддинг `path + text` (тот же embedder что для чанков)
-    - `keywords`: sparse GTE
+    - `keywords`: sparse GTE — только если эмбеддер передан (`indexing.sparse_embedder.enabled`)
 
     BM25 (`bm25`, `bm25_trigram`) доливается post-indexing через `build_bm25_index(docs)`.
 
@@ -627,7 +627,7 @@ class DocVectorProcessor(DocumentProcessor):
     def __init__(
         self,
         dense_embedder: Embedder,
-        sparse_embedder: SparseEmbedder,
+        sparse_embedder: SparseEmbedder | None,
         token_counter: TokenCounter,
         max_tokens: int,
     ) -> None:
@@ -656,8 +656,8 @@ class DocVectorProcessor(DocumentProcessor):
         # Fail hard: если doc-level embed не удался — документ не должен upsert'иться,
         # иначе в docs остаётся запись без векторов и документ становится невидим для
         # section-level retrieval. Семантика как у DocSummaryProcessor / chunk embeddings.
-        dense_vec = await self._dense.embed(text)
-        sparse_idx, sparse_val = await self._sparse.embed(text)
-        document.vectors['full'] = dense_vec
-        document.vectors['keywords'] = {'indices': sparse_idx, 'values': sparse_val}
+        document.vectors['full'] = await self._dense.embed(text)
+        if self._sparse is not None:
+            sparse_idx, sparse_val = await self._sparse.embed(text)
+            document.vectors['keywords'] = {'indices': sparse_idx, 'values': sparse_val}
         return document
