@@ -6,6 +6,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from morag.access import ACCESS_FIELD, read_sidecar
 from morag.sources.base import Document, Source
 
 logger = logging.getLogger(__name__)
@@ -62,12 +63,16 @@ class MarkdownSource(Source):
         return 'markdown'
 
     def __init__(self, root: Path | str, name: str = 'default',
-                 annotations_suffix: str | None = None) -> None:
+                 annotations_suffix: str | None = None,
+                 access_suffix: str | None = None) -> None:
         self._root = Path(root).resolve()
         self._kind = 'local'
         self._name = name
         # ADR-0027: сайдкар `<stem><suffix>` рядом с файлом. None — не ищется вовсе.
         self._annotations_suffix = annotations_suffix
+        # ADR-0034: сайдкар метки доступа `<stem><suffix>`. В `updated_at` НЕ входит: правка прав
+        # не стоит пересчёта векторов — метку в индексе обновляет `sync-access`.
+        self._access_suffix = access_suffix
 
     # --- аннотации (ADR-0027) -------------------------------------------------------------------
 
@@ -164,7 +169,7 @@ class MarkdownSource(Source):
             updated_at = self._updated_at(path, stat.st_mtime)
             external = str(path.relative_to(self._root))
             doc_id = self.make_id(external)
-            return Document(
+            doc = Document(
                 id=doc_id,
                 path=[external],
                 text=text,
@@ -185,5 +190,10 @@ class MarkdownSource(Source):
                             if k not in ('title', 'url', 'source_name', 'source_kind')
                             and v not in (None, '')}},
             )
+            # Документ рождается с меткой — ни секунды не бывает открытым. Сайдкар сильнее шапки.
+            label = read_sidecar(path, self._access_suffix)
+            if label is not None:
+                doc.payload[ACCESS_FIELD] = label
+            return doc
         except OSError:
             return None

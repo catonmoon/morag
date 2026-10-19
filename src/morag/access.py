@@ -13,10 +13,12 @@
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import threading
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterable
 
 import httpx
@@ -154,6 +156,28 @@ def parse_asker(
             scope[name] = vals
     user = raw.get('user') if isinstance(raw.get('user'), dict) else {}
     return RequestContext(asker=asker, principals=frozenset(principals), scope=scope, user=user)
+
+
+def read_sidecar(path: Path, suffix: str | None) -> list[str] | None:
+    """Метка документа из сайдкара `<stem><suffix>` рядом с файлом: `{"access": [...]}`.
+
+    None — сайдкара нет (или чтение выключено): метку не трогаем. Пустой список — открыт всем.
+    ⚠️ Битый сайдкар — `["!unreadable"]`: такой строки не проходит никто, документ закрыт. Открыть
+    документ из-за опечатки в файле прав было бы дороже, чем временно его спрятать."""
+    if not suffix:
+        return None
+    side = path.with_name(path.stem + suffix)
+    if not side.is_file():
+        return None
+    try:
+        data = json.loads(side.read_text(encoding='utf-8'))
+        label = data.get(ACCESS_FIELD) if isinstance(data, dict) else None
+        if not isinstance(label, list):
+            raise ValueError(f'нет списка {ACCESS_FIELD}')
+        return sorted({str(x) for x in label if str(x).strip()})
+    except (OSError, ValueError) as e:
+        logger.warning('[access] sidecar %s unreadable — document closed: %s', side, e)
+        return ['!unreadable']
 
 
 def visible(payload: dict | None, principals: frozenset[str] | None) -> bool:

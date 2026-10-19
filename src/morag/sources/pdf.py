@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+from morag.access import ACCESS_FIELD, read_sidecar
 from morag.sources.base import Document, Source
 from morag.sources.pdf_converter import PdfConverter
 
@@ -26,8 +27,10 @@ class PdfSource(Source):
         root: Path | str,
         converter: PdfConverter,
         name: str = 'default',
+        access_suffix: str | None = None,
     ) -> None:
         self._root = Path(root).resolve()
+        self._access_suffix = access_suffix  # ADR-0034, как у MarkdownSource
         self._converter = converter
         self._kind = 'local'
         self._name = name
@@ -60,7 +63,7 @@ class PdfSource(Source):
             logger.error('Failed to convert PDF: %s', doc_id)
             return None
 
-        return Document(
+        doc = Document(
             id=self.make_id(external),
             path=[external],
             text=markdown,
@@ -73,6 +76,10 @@ class PdfSource(Source):
             paged=True,
             payload={'source_name': self._name, 'source_kind': self._kind},
         )
+        label = read_sidecar(path, self._access_suffix)
+        if label is not None:
+            doc.payload[ACCESS_FIELD] = label
+        return doc
 
     def _strip_prefix(self, doc_id: str) -> str:
         prefix = f'{self._kind}:{self._name}:'

@@ -16,6 +16,8 @@ from pydantic import BaseModel
 from qdrant_client import AsyncQdrantClient, models
 
 from morag import shortid
+from morag.access import ACCESS_FIELD
+from morag.indexing.access_sync import sync_access
 from morag.config import Config, DenseEmbedderConfig, PdfConfig, SparseEmbedderConfig, load_config, sparse_enabled
 from morag.indexing.bm25 import build_bm25_index
 from morag.indexing.chunker import (
@@ -177,7 +179,8 @@ def build_source_for_instance(
         return JiraSource(src_cfg, {}, {})
     if kind == 'local':
         return LocalDocumentSource(root=src_cfg.path, pdf_converter=None, name=src_cfg.name,
-                                   annotations_suffix=_annotations_suffix(config))
+                                   annotations_suffix=_annotations_suffix(config),
+                                   access_suffix=_access_suffix(config))
     logger.warning('build_source_for_instance: неподдержанный kind=%s', kind)
     return None
 
@@ -186,6 +189,28 @@ def _annotations_suffix(config: Config) -> str | None:
     """Суффикс сайдкара аннотаций (ADR-0027); None — секции нет, сайдкары не читаются."""
     ann = config.indexing.annotations if config.indexing else None
     return ann.suffix if ann else None
+
+
+def _access_suffix(config: Config) -> str | None:
+    """Суффикс сайдкара меток доступа (ADR-0034); None — доступ выключен, метки не читаются."""
+    acc = config.retrieval.access if config.retrieval else None
+    return acc.sidecar if (acc and acc.enabled and acc.sidecar) else None
+
+
+async def _sync_local_access(config: Config, client: AsyncQdrantClient, scope=None):
+    """Сверить метки доступа локальных источников с их сайдкарами (ADR-0034). Возвращает
+    суммарный `SyncResult` или None, если доступ выключен."""
+    suffix = _access_suffix(config)
+    if suffix is None:
+        return None
+    desired: dict[str, list[str]] = {}
+    for src_cfg in config.sources_by_kind('local'):
+        if not src_cfg.enabled or (scope is not None and not scope(src_cfg.name)):
+            continue
+        desired.update(LocalDocumentSource(root=src_cfg.path, name=src_cfg.name,
+                                           access_suffix=suffix).access_map())
+    return await sync_access(client, config.qdrant.collection_docs,
+                             config.qdrant.collection_chunks, desired)
 
 
 def _make_pdf_converter(
@@ -450,6 +475,11 @@ async def cmd_index(
             await ensure_payload_indexes(client, name, filter_fields)
         logger.info('Payload indexes for search filters: %s', ', '.join(filter_fields))
 
+    # ADR-0034: метка доступа — индексом в обеих коллекциях (условие каждого поиска).
+    if _access_suffix(config) is not None:
+        for name in (config.qdrant.collection_docs, config.qdrant.collection_chunks):
+            await ensure_payload_indexes(client, name, [ACCESS_FIELD])
+
     doc_repo = DocRepository(client, config.qdrant.collection_docs)
     chunk_repo = ChunkRepository(client, config.qdrant.collection_chunks)
 
@@ -713,6 +743,7 @@ async def cmd_index(
                     pdf_converter=pdf_converter,
                     name=src_cfg.name,
                     annotations_suffix=_annotations_suffix(config),
+                    access_suffix=_access_suffix(config),
                 )
                 pdf_mode = config.pdf.mode if config.pdf else 'disabled'
                 logger.info('Source: local[%s] path=%s (pdf=%s)',
@@ -798,6 +829,11 @@ async def cmd_index(
             reporter.document_done('bm25_chunks')
             await build_bm25_index(client, config.qdrant.collection_docs)
             reporter.document_done('bm25_docs')
+
+        # ADR-0034: правка прав не меняет текста — индексатор её не видел. Сверяем метки до Карты,
+        # чтобы Карта строилась уже без закрытого.
+        if not cancel_event.is_set():
+            await _sync_local_access(config, client, scope=_in_scope)
 
         # Post-indexing: Knowledge Map
         if not cancel_event.is_set() and config.indexing.knowledge_map.enabled:
@@ -929,6 +965,29 @@ async def cmd_rebuild_km(
         await client.close()
 
     logger.info('Knowledge Map rebuild complete')
+
+
+async def cmd_sync_access(config_path: str, rebuild_km: bool = True) -> dict:
+    """Сверить метки доступа в индексе с сайдкарами — без переэмбеддинга (ADR-0034).
+
+    Документ, ставший закрытым, мог остаться в Карте знаний (она общая на все запросы) —
+    тогда Карта пересобирается (`rebuild_km`). Возвращает `{changed, closed}`."""
+    config = load_config(config_path)
+    if _access_suffix(config) is None:
+        logger.error('retrieval.access.enabled is false — nothing to sync')
+        return {'changed': 0, 'closed': 0}
+    client = AsyncQdrantClient(host=config.qdrant.host, port=config.qdrant.port, timeout=60)
+    try:
+        for name in (config.qdrant.collection_docs, config.qdrant.collection_chunks):
+            await ensure_payload_indexes(client, name, [ACCESS_FIELD])
+        result = await _sync_local_access(config, client)
+    finally:
+        await client.close()
+    logger.info('Access sync: %d changed, %d closed', len(result.changed), len(result.closed))
+    if (rebuild_km and result.closed and config.indexing
+            and config.indexing.knowledge_map.enabled):
+        await cmd_rebuild_km(config_path)
+    return {'changed': len(result.changed), 'closed': len(result.closed)}
 
 
 async def cmd_rebind_embedder(config_path: str, from_fp: str, dry_run: bool = False) -> None:
@@ -1246,6 +1305,20 @@ async def cmd_serve(config_path: str) -> None:
         except SetupIncomplete as e:
             raise HTTPException(status_code=412, detail={'blockers': e.blockers}) from e
 
+    @app.post('/control/sync-access')
+    async def _sync_access():
+        """ADR-0034: вызывающий поменял права (сайдкары) — метки в индекс сразу, без ожидания
+        ночной индексации. Закрытие документа пересобирает Карту в фоне (через control-plane:
+        если идёт индексация, Карту соберёт она сама)."""
+        res = await cmd_sync_access(config_path, rebuild_km=False)
+        if res['closed']:
+            try:
+                await control_plane.start_rebuild_km()
+                res['km'] = 'rebuilding'
+            except (AlreadyRunning, SetupIncomplete) as e:
+                res['km'] = f'skipped: {type(e).__name__}'
+        return res
+
     @app.post('/control/fetch-page')
     async def _fetch_page(req: _FetchPageReq):
         """Live-fetch одной страницы (read_pages Фаза 2): строит Source инстанса и зовёт
@@ -1407,6 +1480,13 @@ def main() -> None:
         help='Путь к конфигу (по умолчанию: env MORAG_CONFIG_PATH или config.yml)',
     )
 
+    sync_parser = subparsers.add_parser(
+        'sync-access', help='Сверить метки доступа в индексе с сайдкарами (без переиндексации)')
+    sync_parser.add_argument(
+        '--config', default=os.environ.get('MORAG_CONFIG_PATH', 'config.yml'), metavar='PATH',
+        help='Путь к конфигу (по умолчанию: env MORAG_CONFIG_PATH или config.yml)',
+    )
+
     backfill_parser = subparsers.add_parser(
         'backfill-short-ids',
         help='Проставить документам короткий код для агента (без переиндексации)',
@@ -1464,6 +1544,8 @@ def main() -> None:
         asyncio.run(cmd_index(args.config, reset=args.reset))
     elif args.command == 'rebuild-km':
         asyncio.run(cmd_rebuild_km(args.config))
+    elif args.command == 'sync-access':
+        asyncio.run(cmd_sync_access(args.config))
     elif args.command == 'backfill-short-ids':
         asyncio.run(cmd_backfill_short_ids(args.config, dry_run=args.dry_run))
     elif args.command == 'rebind-embedder':

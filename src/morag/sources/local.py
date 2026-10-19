@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from morag.access import read_sidecar
 from morag.sources.directory import DirectorySource
 from morag.sources.markdown import MarkdownSource
 from morag.sources.pdf import PdfSource
@@ -25,11 +26,13 @@ class LocalDocumentSource:
         pdf_converter: PdfConverter | None = None,
         name: str = 'default',
         annotations_suffix: str | None = None,
+        access_suffix: str | None = None,
     ) -> None:
         self._root = Path(root).resolve()
         self._pdf_converter = pdf_converter
         self._name = name
         self._annotations_suffix = annotations_suffix  # ADR-0027; None — сайдкары не читаются
+        self._access_suffix = access_suffix  # ADR-0034; None — метки доступа не читаются
 
     async def run(self, pipeline) -> None:
         logger.info('Indexing local documents [%s] from %s', self._name, self._root)
@@ -39,15 +42,29 @@ class LocalDocumentSource:
         await pipeline.run(dir_source)
 
         md_source = MarkdownSource(self._root, name=self._name,
-                                   annotations_suffix=self._annotations_suffix)
+                                   annotations_suffix=self._annotations_suffix,
+                                   access_suffix=self._access_suffix)
         logger.info('Phase 2/3: indexing markdown files...')
         await pipeline.run(md_source)
 
         if self._pdf_converter is not None:
-            pdf_source = PdfSource(self._root, converter=self._pdf_converter, name=self._name)
+            pdf_source = PdfSource(self._root, converter=self._pdf_converter, name=self._name,
+                                   access_suffix=self._access_suffix)
             logger.info('Phase 3/3: indexing PDF files...')
             await pipeline.run(pdf_source)
         else:
             logger.info('Phase 3/3: skipping PDF (not configured)')
 
         logger.info('Local documents indexing complete')
+
+    def access_map(self) -> dict[str, list[str]]:
+        """ADR-0034: желаемая метка каждого документа источника — для `sync-access`. Файл без
+        сайдкара — пустая метка (открыт всем): так снятый сайдкар открывает документ и в индексе."""
+        if not self._access_suffix:
+            return {}
+        out: dict[str, list[str]] = {}
+        for pattern in ('*.md', '*.pdf'):
+            for path in sorted(self._root.rglob(pattern)):
+                external = str(path.relative_to(self._root))
+                out[f'local:{self._name}:{external}'] = read_sidecar(path, self._access_suffix) or []
+        return out

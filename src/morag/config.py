@@ -578,6 +578,9 @@ class RetrievalAccessConfig(BaseModel):
     # Имя переменной окружения с общим секретом вызывающего. Секрет в конфиг не пишется.
     key_env: str = 'MORAG_ACCESS_KEY'
     provider: RetrievalAccessProviderConfig = RetrievalAccessProviderConfig()
+    # Сайдкар метки рядом с файлом локального источника: `<stem><sidecar>` = `{"access": [...]}`.
+    # Читается индексатором только при `enabled`; правку метки в индекс несёт `sync-access`.
+    sidecar: str = '.access.json'
 
 
 class RetrievalFeaturesConfig(BaseModel):
