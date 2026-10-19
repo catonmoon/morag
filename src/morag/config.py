@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, Union
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 
 # ============================================================================
@@ -519,6 +519,15 @@ class RetrievalSearchFilterConfig(BaseModel):
     enum: bool = True
     max_values: int = 60
 
+    @field_validator('field')
+    @classmethod
+    def _not_access_label(cls, v: str) -> str:
+        # ADR-0034: перечень значений фильтра уходит в схему инструмента — по полю доступа он
+        # выдал бы список принципалов (логины, группы) каждому, кто спрашивает.
+        if v == 'access':
+            raise ValueError('поле доступа `access` нельзя делать фильтром агента')
+        return v
+
 
 class RetrievalSearchConfig(BaseModel):
     # Поля payload, по которым агент может фильтровать `search`. Пусто — параметра у
@@ -799,6 +808,14 @@ class RetrievalCatalogToolConfig(_RetrievalToolBase):
     legacy-блок; новый способ объявления — записью в `tools`)."""
     type: Literal['catalog'] = 'catalog'
     fields: list[str] = Field(default_factory=list)
+
+    @field_validator('fields')
+    @classmethod
+    def _no_access_column(cls, v: list[str]) -> list[str]:
+        # ADR-0034: колонка с меткой доступа показала бы агенту, кому открыт каждый документ.
+        if 'access' in v:
+            raise ValueError('поле доступа `access` нельзя делать колонкой каталога')
+        return v
 
 
 RetrievalToolConfig = Annotated[

@@ -17,6 +17,7 @@ from collections import defaultdict
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
+from morag.access import ACCESS_FIELD
 from morag.indexing.token_counter import TokenCounter, TiktokenCounter
 from morag.llm.client import GenerationParams
 from morag.sources.base import Document
@@ -273,6 +274,13 @@ class KnowledgeMapGenerator:
             if before != len(all_docs):
                 logger.info('KnowledgeMap: filtered %d → %d docs (excluded: %s)',
                             before, len(all_docs), ', '.join(self._exclude_source_types))
+        # ADR-0034: Карта — общий текст на все запросы, поэтому в неё идут только документы,
+        # открытые всем. Документ с меткой доступа в Карте не появляется ни у кого: ни сводкой, ни
+        # заголовком, ни кластером. Находится он поиском — у тех, кому можно.
+        labeled = [d for d in all_docs if d.payload.get(ACCESS_FIELD)]
+        if labeled:
+            all_docs = [d for d in all_docs if not d.payload.get(ACCESS_FIELD)]
+            logger.info('KnowledgeMap: %d doc(s) with access labels left out', len(labeled))
         if not all_docs:
             logger.warning('KnowledgeMap: no documents found')
             return {}
@@ -1343,7 +1351,8 @@ class KnowledgeMapGenerator:
                         # идентификаторах, разойдясь с выдачей search: самый частый маршрут агента
                         # («взять id из Карты → search(section_ids=…)») перестал бы работать.
                         k: v for k, v in payload.items()
-                        if k in ('doc_summary', 'source_kind', 'source_name', 'short_id')
+                        if k in ('doc_summary', 'source_kind', 'source_name', 'short_id',
+                                 ACCESS_FIELD)
                     },
                 ))
             if offset is None:

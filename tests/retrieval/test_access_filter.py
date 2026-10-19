@@ -149,3 +149,21 @@ def test_scope_keeps_only_known_fields():
 def test_request_context_defaults():
     assert not OPEN.active
     assert RequestContext(principals=frozenset()).active
+
+
+# --- конфиг -------------------------------------------------------------------
+
+
+def test_access_field_cannot_become_an_agent_filter_or_catalog_column():
+    from pydantic import ValidationError
+
+    from morag.config import RetrievalCatalogToolConfig, RetrievalSearchFilterConfig
+    with pytest.raises(ValidationError):
+        RetrievalSearchFilterConfig(field=ACCESS_FIELD)
+    with pytest.raises(ValidationError):
+        RetrievalCatalogToolConfig(fields=['title', ACCESS_FIELD])
+
+
+def test_access_is_off_by_default():
+    from morag.config import RetrievalConfig
+    assert RetrievalConfig().access.enabled is False
