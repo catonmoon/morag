@@ -77,7 +77,7 @@ SPEC = ToolSpec(
     },
     describe=_describe,
     prompt_section=lambda cfg: '',
-    handler=lambda p, cfg, args: p._tool_lookup(cfg.get('doc_ids') or [], args['query']),
+    handler=lambda p, cfg, args, ctx: p._tool_lookup(cfg.get('doc_ids') or [], args['query'], ctx),
     status=_status,
     icon='📖',
 )

@@ -18,9 +18,10 @@
 Seam: внешние HTTP/MCP-тулы — отдельный тип, чей handler проксирует вызов
 на endpoint из конфига (транспорт пишется один раз).
 
-Контракт handler'а: `(pipeline, cfg: dict, args: dict) -> tuple[str, list[dict]]`
+Контракт handler'а: `(pipeline, cfg: dict, args: dict, ctx) -> tuple[str, list[dict]]`
 — (текст для LLM, чанки для цитат). `cfg` — model_dump инстанса из конфига,
-поэтому handler инстанс-aware (у каждого lookup — СВОИ doc_ids).
+поэтому handler инстанс-aware (у каждого lookup — СВОИ doc_ids). `ctx` — кто спрашивает
+(`morag.access.RequestContext`, ADR-0034): handler обязан передать его во все свои выдачи.
 """
 from __future__ import annotations
 
@@ -35,7 +36,7 @@ class ToolSpec(NamedTuple):
     parameters: dict         # JSON-schema параметров функции (OpenAI tools)
     describe: Callable       # (cfg: dict) -> str — description в schema; интерпретирует cfg['description']
     prompt_section: Callable # (cfg: dict) -> str — секция system-prompt ('' = нет)
-    handler: Callable | None # (pipeline, cfg, args) -> (text, chunks); None = core-dispatch
+    handler: Callable | None # (pipeline, cfg, args, ctx) -> (text, chunks); None = core-dispatch
     status: Callable | None  # (cfg, args, resolve_title) -> str; None = generic
     icon: str = '🛠️'
 

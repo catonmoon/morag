@@ -43,7 +43,7 @@ SPEC = ToolSpec(
     parameters={'type': 'object', 'properties': {}, 'required': []},
     describe=_describe,
     prompt_section=lambda cfg: '',
-    handler=lambda p, cfg, args: p._tool_catalog(cfg.get('fields') or []),
+    handler=lambda p, cfg, args, ctx: p._tool_catalog(cfg.get('fields') or [], ctx),
     status=lambda cfg, args, _t: 'читаю каталог корпуса',
     icon='📋',
 )

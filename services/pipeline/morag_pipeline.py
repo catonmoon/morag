@@ -15,6 +15,7 @@ from typing import Any, Coroutine, Dict, Generator, Iterator, List, TypeVar, Uni
 import httpx
 from pydantic import BaseModel
 from qdrant_client import AsyncQdrantClient
+from qdrant_client.models import Filter
 from markdown_it import MarkdownIt
 
 # Импорт из installed morag-пакета (ставится через services/pipeline/Dockerfile).
@@ -31,6 +32,17 @@ from morag.retrieval import (
 )
 from morag.retrieval.tools import REGISTRY, build_tool_schema
 from morag import shortid
+from morag.access import (
+    OPEN,
+    AccessRefused,
+    RequestContext,
+    RightsOwner,
+    access_conditions,
+    describe_scope,
+    parse_asker,
+    scope_conditions,
+    visible,
+)
 from morag.retrieval.prompt import build_system_prompt
 from morag.retrieval.tools.core import CORE_EXECUTION_METHODOLOGY
 
@@ -198,6 +210,7 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
     find_sec = search.find_section if search else None
     features = retr.features if retr else None
     prompts = retr.prompts if retr else None
+    access_cfg = getattr(retr, 'access', None) if retr else None
     # getattr — back-compat: старый morag.config (на деплоях, которые ещё не
     # обновили src/morag/config.py) не знает поле glossary.
     # Единый список тулов. Legacy-блоки glossary/catalog уже мигрированы в tools
@@ -411,6 +424,17 @@ def _resolve_settings(v: 'Pipeline.Valves', cfg: Config | None) -> dict:
 
         # Инстансы агентских тулов (model_dump — handler'ы/билдеры работают с dict).
         'tools': [t.model_dump() for t in tools_cfg],
+
+        # ADR-0034: доступ на ретриве. Секреты — из окружения по имени переменной, не из конфига.
+        'access_enabled': bool(access_cfg.enabled) if access_cfg else False,
+        'access_key': os.getenv(access_cfg.key_env, '') if access_cfg and access_cfg.key_env else '',
+        'access_owner_url': access_cfg.provider.url if access_cfg else '',
+        'access_owner_key': (
+            os.getenv(access_cfg.provider.key_env, '')
+            if access_cfg and access_cfg.provider.key_env else ''
+        ),
+        'access_owner_ttl': access_cfg.provider.ttl if access_cfg else 300,
+        'access_owner_timeout': access_cfg.provider.timeout if access_cfg else 10.0,
     }
     return s
 
@@ -651,6 +675,12 @@ class Pipeline:
             chunk_peek_docs=s['find_section_chunk_peek_docs'],
         )
         tools, tool_instances = self._build_tools(s)
+        # ADR-0034: доступ включён — перечень значений фильтров только из открытых всем документов.
+        searcher._access_enabled = bool(s.get('access_enabled'))
+        rights_owner = RightsOwner(
+            s['access_owner_url'], key=s.get('access_owner_key', ''),
+            ttl=s.get('access_owner_ttl', 300), timeout=s.get('access_owner_timeout', 10.0),
+        ) if s.get('access_enabled') and s.get('access_owner_url') else None
 
         # Атомарный свап: всё собрано без исключений — присваиваем self.* разом.
         # NB: присваивания поатрибутны, поэтому теоретически параллельный pipe()
@@ -671,6 +701,7 @@ class Pipeline:
         self._find_section_config = find_section_config
         self._tools = tools
         self._tool_instances = tool_instances
+        self._rights_owner = rights_owner
         logger.info(
             'Pipeline (re)built from config: agent=%s/%s, rerank=%s/%s, qdrant=%s, '
             'config_loaded=%s, tools=%s',
@@ -756,6 +787,19 @@ class Pipeline:
             )
             return
 
+        # 0.6 «Кто спрашивает» (ADR-0034). Модель этого поля не видит — его читает только код:
+        # контекст едет явным параметром до инструментов и поисковых вызовов. Подпись не сошлась —
+        # отказ, а не тихое понижение прав: неверный секрет — поломка вызывающего.
+        try:
+            ctx = self._request_context(body)
+        except AccessRefused as exc:
+            logger.warning('[access] request refused: %s', exc)
+            yield '⚠️ Запрос отклонён: не подтверждено, кто спрашивает.'
+            return
+        if ctx.active:
+            logger.info('[access] asker=%s principals=%d scope=%s',
+                        ctx.asker or '-', len(ctx.principals or ()), ctx.scope or {})
+
         # 1. Подтянуть карту документации — только если она включена конфигом.
         knowledge_map = self._fetch_knowledge_map() if self._s.get('knowledge_map_enabled', True) else ''
 
@@ -833,7 +877,8 @@ class Pipeline:
             logger.info('[auto-fetch] refs from question: %s', auto_refs)
             yield self._emit_status(
                 '📑', f'в вопросе ссылки ({len(auto_refs)}) — загружаю страницы целиком', False)
-            fr = self._fetch_refs(auto_refs, budget=self._auto_fetch_budget(agent_messages))
+            fr = self._fetch_refs(auto_refs, budget=self._auto_fetch_budget(agent_messages),
+                                  ctx=ctx)
             if fr['chunks']:
                 for c in fr['chunks']:
                     all_chunks[c['chunk_id']] = c
@@ -1023,7 +1068,7 @@ class Pipeline:
                     })
                     continue
                 try:
-                    result, chunks = self._execute_tool(fn_name, fn_args)
+                    result, chunks = self._execute_tool(fn_name, fn_args, ctx)
                     last_ok_call, last_ok_call_id = repeat_sig, call_id
                 except Exception as exc:  # noqa: BLE001 — транзиентные сбои провайдеров
                     # Ошибка тула НЕ должна убивать pipe()-генератор: обрыв посреди
@@ -1323,8 +1368,11 @@ class Pipeline:
 
     # ── Tool execution ────────────────────────────────────────────────────────
 
-    def _execute_tool(self, name: str, args: dict) -> tuple[str, list[dict]]:
-        """Выполнить tool, вернуть (текстовый результат для LLM, список чанков)."""
+    def _execute_tool(self, name: str, args: dict,
+                      ctx: RequestContext = OPEN) -> tuple[str, list[dict]]:
+        """Выполнить tool, вернуть (текстовый результат для LLM, список чанков).
+
+        `ctx` — кто спрашивает (ADR-0034): едет до каждого инструмента и поискового вызова."""
         args, notes = self._normalize_tool_ids(name, args)
         # Идентификатор не развернулся: для get_doc это и есть весь результат (звать инструмент
         # незачем), для search — сужение потеряло часть скоупа, но искать по остальному надо.
@@ -1334,33 +1382,74 @@ class Pipeline:
             text, chunks = self._tool_search(
                 args['query'], args.get('limit'),
                 args.get('section_ids'), args.get('doc_ids'),
-                filters=args.get('filters'),
+                filters=args.get('filters'), ctx=ctx,
             )
             return ('\n'.join([*notes, '', text]) if notes else text), chunks
         elif name == 'find_section':
-            return self._tool_find_section(args['query'])
+            return self._tool_find_section(args['query'], ctx)
         elif name == 'get_doc':
-            return self._tool_get_doc(args['doc_id'], args['query'])
+            return self._tool_get_doc(args['doc_id'], args['query'], ctx)
         # Инстанс-тулы из реестра (lookup/catalog/…) — handler из ToolSpec,
         # cfg инстанса передаётся в handler (у каждого lookup — свои doc_ids).
         inst = self._tool_instances.get(name)
         if inst is not None and inst[0].handler is not None:
             spec, cfg = inst
-            return spec.handler(self, cfg, args)
+            return spec.handler(self, cfg, args, ctx)
         return f'Неизвестный инструмент: {name}', []
 
-    def _tool_lookup(self, doc_ids: list[str], query: str) -> tuple[str, list[dict]]:
+    # ── Доступ (ADR-0034) ─────────────────────────────────────────────────────
+
+    def _request_context(self, body: dict | None) -> RequestContext:
+        return parse_asker(
+            body,
+            enabled=bool(self._s.get('access_enabled')),
+            secret=self._s.get('access_key', ''),
+            scope_fields=self._filter_fields().keys(),
+            owner=getattr(self, '_rights_owner', None),
+        )
+
+    def _required(self, ctx: RequestContext) -> list:
+        """Обязательные условия поиска этого запроса: доступ + фильтры, выбранные человеком.
+        В условие доступа идут только принципалы, встречающиеся в метках индекса."""
+        if not ctx.active:
+            return []
+        labels = self._run(self._searcher.label_values())
+        return access_conditions(ctx.principals, labels) + scope_conditions(ctx.scope)
+
+    def _live_allowed(self, ctx: RequestContext, doc_ids) -> set[str]:
+        """Живая проверка у хозяина прав перед выдачей агенту. Копия прав в индексе может
+        отставать (документ закрыли час назад) — хозяин нет. Без хозяина — все (метки индекса уже
+        отфильтровали поиск)."""
+        ids = {d for d in doc_ids if d}
+        owner = getattr(self, '_rights_owner', None)
+        if not ctx.active or owner is None or not ids:
+            return ids
+        allowed = owner.check(ctx.asker, ids)
+        if allowed != ids:
+            logger.info('[access] live check dropped %d of %d docs', len(ids - allowed), len(ids))
+        return allowed
+
+    def _doc_allowed(self, ctx: RequestContext, doc) -> bool:
+        """Точечная выдача (документ по id): метка в индексе И живая проверка."""
+        if doc is None:
+            return False
+        if not ctx.active:
+            return True
+        return visible(doc.payload, ctx.principals) and bool(self._live_allowed(ctx, [doc.id]))
+
+    def _tool_lookup(self, doc_ids: list[str], query: str,
+                     ctx: RequestContext = OPEN) -> tuple[str, list[dict]]:
         """`lookup`-тип: `_tool_get_doc` для каждого doc_id инстанса, мерджим
         результаты. Для одного doc_id — тождественно `_tool_get_doc`."""
         if not doc_ids:
             return 'Справочный инструмент не настроен (нет страниц).', []
         if len(doc_ids) == 1:
-            return self._tool_get_doc(doc_ids[0], query)
+            return self._tool_get_doc(doc_ids[0], query, ctx)
         # Multi-doc: rerank каждый документ независимо, склеиваем top'ы.
         text_parts: list[str] = []
         all_chunks: list[dict] = []
         for did in doc_ids:
-            text, chunks = self._tool_get_doc(did, query)
+            text, chunks = self._tool_get_doc(did, query, ctx)
             if chunks:
                 text_parts.append(text)
                 all_chunks.extend(chunks)
@@ -1371,12 +1460,16 @@ class Pipeline:
             ), []
         return '\n\n---\n\n'.join(text_parts), all_chunks
 
-    def _tool_catalog(self, fields: list[str]) -> tuple[str, list[dict]]:
+    def _tool_catalog(self, fields: list[str], ctx: RequestContext = OPEN) -> tuple[str, list[dict]]:
         """`catalog`-тип: полный структурный каталог документов корпуса. Агент сам
         считает агрегации по таблице — закрывает дыру RAG на «перечисли / сколько /
         где не было / самый частый». Чанков не возвращает (цитировать нечего).
         Доменный контекст (кто ведущие vs гости) живёт в ОПИСАНИИ тула, не в шапке."""
-        rows = self._run(self._fetch_catalog_rows(fields))
+        rows = self._run(self._fetch_catalog_rows(fields, self._required(ctx)))
+        ids = [r.pop('_id', '') for r in rows]
+        if ctx.active and rows:
+            allowed = self._live_allowed(ctx, ids)
+            rows = [r for r, did in zip(rows, ids) if did in allowed]
         if not rows:
             return 'Каталог пуст (нет документов с метаданными).', []
 
@@ -1406,7 +1499,7 @@ class Pipeline:
         head = f'Каталог корпуса — {len(rows)} записей.'
         return head + '\n\n' + '\n'.join(lines), []
 
-    async def _fetch_catalog_rows(self, fields: list[str]) -> list[dict]:
+    async def _fetch_catalog_rows(self, fields: list[str], required: list | None = None) -> list[dict]:
         """Скан docs-коллекции → по строке (выбранные поля) на каждый
         НЕструктурный документ. Структурные folder-узлы пропускаем.
 
@@ -1418,13 +1511,15 @@ class Pipeline:
             pts, offset = await self._qdrant.scroll(
                 collection_name=self._s['docs_collection'],
                 limit=256, offset=offset,
-                with_payload=[*fields, 'structural'], with_vectors=False,
+                # ADR-0034: доступ и фильтры человека — условием скролла, как у поиска.
+                scroll_filter=Filter(must=required) if required else None,
+                with_payload=[*fields, 'structural', 'id'], with_vectors=False,
             )
             for p in pts:
                 pl = p.payload or {}
                 if pl.get('structural'):
                     continue
-                rows.append({f: pl.get(f) for f in fields})
+                rows.append({**{f: pl.get(f) for f in fields}, '_id': pl.get('id', '')})
             if offset is None:
                 break
         return rows
@@ -1436,6 +1531,7 @@ class Pipeline:
         section_ids: list[str] | None = None,
         doc_ids: list[str] | None = None,
         filters: dict | None = None,
+        ctx: RequestContext = OPEN,
     ) -> tuple[str, list[dict]]:
         limit = min(limit or self._s['search_limit'], self._s['search_limit'])
         filters, filter_notes = self._check_filters(filters)
@@ -1461,12 +1557,26 @@ class Pipeline:
             query[:100], scope_active, len(section_ids or []), len(doc_ids or []),
             len(allowed_doc_ids), filters or {}, limit,
         )
-        chunks = self._search(query, limit, scope_active=scope_active, filters=query_filters)
+        # `required` — только когда он есть: без доступа вызов `_search` остаётся прежним.
+        required = self._required(ctx)
+        chunks = self._search(query, limit, scope_active=scope_active, filters=query_filters,
+                              **({'required': required} if required else {}))
+        # ADR-0034: живая проверка у хозяина прав — копия прав в индексе могла отстать.
+        if ctx.active and chunks:
+            allowed = self._live_allowed(ctx, {c['doc_id'] for c in chunks})
+            chunks = [c for c in chunks if c['doc_id'] in allowed]
         logger.info(
             '[search] retrieved %d chunks; by source_type=%s',
             len(chunks), _count_by(chunks, 'source_type'),
         )
         applied = '; '.join(f'{k}: {", ".join(v)}' for k, v in (filters or {}).items())
+        # Фильтры, выбранные человеком на сайте: агент обязан видеть, что поиск ограничен НЕ им,
+        # и не может его снять — за пределы выбранного не выходим.
+        chosen = describe_scope(ctx.scope)
+        if not chunks and chosen:
+            return (f'Искал только в выбранном пользователем ({chosen}) — там ничего не нашлось. '
+                    'Искать за пределами выбранного нельзя: так и ответь и предложи снять '
+                    'ограничение на странице.'), []
         if not chunks:
             if allowed_doc_ids:
                 # Фильтр по документу отдаёт ВСЕ его чанки, ранжированные запросом, — пусто
@@ -1525,6 +1635,8 @@ class Pipeline:
         # категории про это не говорили» от «не нашлось вообще» — и не поймёт, почему выдача
         # уже, чем ожидал. Замечания о снятых фильтрах — тем же блоком, сверху.
         head = [*filter_notes]
+        if chosen:
+            head.append(f'Искал в выбранном пользователем: {chosen}.')
         if applied:
             head.append(f'Фильтр: {applied}.')
         if head:
@@ -1731,7 +1843,7 @@ class Pipeline:
 
     # ── Section-level retrieval (find_section) ────────────────────────────────
 
-    def _tool_find_section(self, query: str) -> tuple[str, list[dict]]:
+    def _tool_find_section(self, query: str, ctx: RequestContext = OPEN) -> tuple[str, list[dict]]:
         """Найти релевантные РАЗДЕЛЫ документации для запроса.
 
         Вся retrieval-логика (RRF по docs + vote counting + adaptive descent +
@@ -1739,7 +1851,17 @@ class Pipeline:
         Pipeline только форматирует SectionResult как markdown для LLM-агента.
         """
         logger.info('[find_section] q=%r', query[:100])
-        result = self._run(find_section(query, self._searcher, self._find_section_config))
+        required = self._required(ctx)
+        result = self._run(find_section(query, self._searcher, self._find_section_config,
+                                        **({'required': required} if required else {})))
+        if ctx.active:
+            # Живая проверка документов выдачи (разделы-папки — без содержимого, им не нужна).
+            doc_ids = {e.section_id for e in result.refined if e.kind == 'doc'}
+            doc_ids |= {d.doc_id for d in result.extra_docs}
+            allowed = self._live_allowed(ctx, doc_ids)
+            result.refined = [e for e in result.refined if e.kind != 'doc' or e.section_id in allowed]
+            result.extra_docs = [d for d in result.extra_docs if d.doc_id in allowed]
+            result.doc_ids = [d for d in result.doc_ids if d in allowed]
         if result.error == 'no_docs':
             logger.info('[find_section] no_docs')
             return 'Не удалось найти релевантные документы для определения разделов.', []
@@ -1910,7 +2032,8 @@ class Pipeline:
                 len(pool), kept, dropped, budget, used,
             )
 
-    def _tool_get_doc(self, doc_id: str, query: str) -> tuple[str, list[dict]]:
+    def _tool_get_doc(self, doc_id: str, query: str,
+                      ctx: RequestContext = OPEN) -> tuple[str, list[dict]]:
         """Получить релевантные фрагменты одного документа.
 
         Алгоритм:
@@ -1927,6 +2050,10 @@ class Pipeline:
         )
         # 1. Метаданные документа
         doc = self._run(self._doc_repo.get_by_id(doc_id))
+        # ADR-0034: закрытое неотличимо от несуществующего — тот же отказ.
+        if doc is not None and not self._doc_allowed(ctx, doc):
+            logger.info('[get_doc] %s — closed for asker, answered as missing', doc_id)
+            doc = None
         if doc is None:
             # ⚠️ Говорим не только «нет», но и ЧТО ДЕЛАТЬ. Замерено на живом корпусе: получив
             # голое «не найден», агент звал тот же несуществующий id трижды подряд, переставляя
@@ -2130,7 +2257,8 @@ class Pipeline:
                     budget, ctx, taken, len(agent_messages), output_reserve, safety)
         return budget
 
-    def _fetch_refs(self, refs: list[str] | str, budget: int | None = None) -> dict:
+    def _fetch_refs(self, refs: list[str] | str, budget: int | None = None,
+                    ctx: RequestContext = OPEN) -> dict:
         """Резолв + загрузка набора ссылок ЦЕЛИКОМ (по URL/ID, только config-источники).
         Движок авто-fetch ссылок из вопроса (детерминированно в `pipe()`) — возвращает
         структурно, чтобы вызыватель сам оформил статус/контекст:
@@ -2163,7 +2291,8 @@ class Pipeline:
             # СНАЧАЛА live-fetch — явная ссылка должна быть максимально СВЕЖЕЙ (индексная
             # версия устаревает: cron индексит редко). Индекс — только fallback ниже.
             kind, name, ext = (doc_id.split(':', 2) + ['', '', ''])[:3]
-            live = self._fetch_page_live(kind, name, ext)
+            # ADR-0034: у живой загрузки нет метки доступа — при включённом доступе не зовём.
+            live = None if ctx.active else self._fetch_page_live(kind, name, ext)
             if live and live.get('text'):
                 title = live.get('title') or doc_id
                 self._live_titles[doc_id] = title  # цитаты/статус берут имя отсюда
@@ -2177,8 +2306,8 @@ class Pipeline:
                 # live-fetch не отдал (индексер рестартует / API моргнул) → FALLBACK на
                 # индекс, если страница там есть: не свежая, но лучше «не удалось».
                 doc = self._run(self._doc_repo.get_by_id(doc_id))
-                if doc is None:
-                    not_indexed.append(ref)
+                if doc is None or not self._doc_allowed(ctx, doc):
+                    not_indexed.append(ref)  # закрытое — как несуществующее
                     continue
                 lite = self._run(self._searcher.fetch_doc_chunks_lite(doc_id))
                 orders = [c['order'] for c in lite]
@@ -2351,9 +2480,11 @@ class Pipeline:
     # ── Qdrant + retrieval — тонкие sync-обёртки над HybridSearcher ──────────
 
     def _search(self, text: str, limit: int, scope_active: bool = False,
-                filters: dict[str, list[str]] | None = None) -> list[dict]:
+                filters: dict[str, list[str]] | None = None,
+                required: list | None = None) -> list[dict]:
+        extra = {'required': required} if required else {}
         return self._run(self._searcher.search_chunks(
-            text, limit, scope_active=scope_active, filters=filters or None))
+            text, limit, scope_active=scope_active, filters=filters or None, **extra))
 
     def _fetch_doc_summaries(self, doc_ids: list[str]) -> dict[str, str]:
         return self._run(self._searcher.fetch_doc_summaries(doc_ids))

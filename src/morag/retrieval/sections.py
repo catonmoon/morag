@@ -169,11 +169,15 @@ async def find_section(
     query: str,
     searcher: 'HybridSearcher',
     config: FindSectionConfig | None = None,
+    required: list | None = None,
 ) -> SectionResult:
     """Найти релевантные разделы документации для запроса.
 
     Полный pipeline: search_docs → aggregate → descend → top-K safety → enrich.
     Возвращает `SectionResult` готовый к отображению или передаче в search.
+
+    `required` — обязательные условия запроса (ADR-0034: доступ и фильтры человека) в оба канала:
+    голосуют только документы, доступные спрашивающему, — их сводки и заголовки и уходят агенту.
     """
     cfg = config or FindSectionConfig()
     # Параллельно: doc-level RRF (основной канал, для секций) и chunk-level
@@ -182,9 +186,10 @@ async def find_section(
     # Оба канала с default-фильтрацией ролей (см. HybridSearcher): supplementary
     # источники (Jira) не голосуют за секции независимо; они подтянутся через
     # descendants(section_id) в основном search'е если scope угадан правильно.
+    extra = {'required': required} if required else {}
     docs, chunks_peek = await asyncio.gather(
-        searcher.search_docs(query, cfg.doc_pool),
-        searcher.search_chunks(query, cfg.chunk_peek_limit),
+        searcher.search_docs(query, cfg.doc_pool, **extra),
+        searcher.search_chunks(query, cfg.chunk_peek_limit, **extra),
     )
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug('[find_section] docs candidates (%d):', len(docs))
