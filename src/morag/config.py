@@ -551,6 +551,26 @@ class RetrievalSearchConfig(BaseModel):
     get_doc: RetrievalGetDocConfig = RetrievalGetDocConfig()
 
 
+class RetrievalAccessProviderConfig(BaseModel):
+    """Хозяин прав (ADR-0034): HTTP-сервис, который знает, что человек «проходит» (`/principals`)
+    и можно ли ему документы сейчас (`/check`). Пустой `url` — хозяина нет: принципал — сам `id`,
+    живой проверки нет (только метки индекса)."""
+    url: str = ''
+    key_env: str = ''
+    ttl: int = 300
+    timeout: float = 10.0
+
+
+class RetrievalAccessConfig(BaseModel):
+    """Доступ на ретриве (ADR-0034). `enabled: false` (умолчание) — поле `asker` запроса не
+    читается, фильтров нет, поведение прежнее байт в байт. Включён — каждый запрос фильтруется:
+    без `asker` видно только открытое всем; `asker` с неверной подписью — отказ."""
+    enabled: bool = False
+    # Имя переменной окружения с общим секретом вызывающего. Секрет в конфиг не пишется.
+    key_env: str = 'MORAG_ACCESS_KEY'
+    provider: RetrievalAccessProviderConfig = RetrievalAccessProviderConfig()
+
+
 class RetrievalFeaturesConfig(BaseModel):
     enable_diversity_nudge: bool = True
     # Посекундные (moment-level) цитаты. Чанки со `start_sec` (аудио-транскрипты)
@@ -808,6 +828,7 @@ class RetrievalConfig(BaseModel):
     search: RetrievalSearchConfig = RetrievalSearchConfig()
     features: RetrievalFeaturesConfig = RetrievalFeaturesConfig()
     prompts: RetrievalPromptsConfig = RetrievalPromptsConfig()
+    access: RetrievalAccessConfig = RetrievalAccessConfig()
     # Единый список агентских тулов (core + optional). Источник истины для
     # pipeline; legacy-блоки glossary/catalog авто-мигрируются сюда валидатором.
     tools: list[RetrievalToolConfig] = Field(default_factory=list)

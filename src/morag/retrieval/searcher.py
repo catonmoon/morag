@@ -21,14 +21,17 @@ from qdrant_client.models import (
     Filter,
     Fusion,
     FusionQuery,
+    IsEmptyCondition,
     MatchAny,
     MatchValue,
+    PayloadField,
     Prefetch,
     SearchParams,
     SparseVector,
 )
 
 from morag import shortid
+from morag.access import ACCESS_FIELD
 from morag.indexing.bm25 import tokenize, tokenize_trigram, to_sparse_vector
 from morag.indexing.embedder import Embedder, SparseEmbedder
 
@@ -38,13 +41,20 @@ logger = logging.getLogger(__name__)
 def build_payload_filter(
     exclude_source_names: list[str] | None,
     filters: dict[str, list[str]] | None,
+    required: list | None = None,
 ) -> Filter | None:
     """Один Qdrant Filter на все Prefetch'и: исключённые источники (must_not) и сужение
-    агента (must, по полю — MatchAny по списку значений). Пусто — None, поведение прежнее."""
+    агента (must, по полю — MatchAny по списку значений). Пусто — None, поведение прежнее.
+
+    `required` — обязательные условия запроса, не зависящие от агента (ADR-0034: доступ и
+    фильтры, выбранные человеком). Отдельным списком, а не ключами `filters`: сужение по
+    документам перезаписывает `filters['doc_id']`, а доступ перезаписываться не должен. Тот же
+    ключ поля в обоих местах — два условия через И, то есть агент сужает только внутри."""
     must = [
         FieldCondition(key=field, match=MatchAny(any=[str(v) for v in values]))
         for field, values in (filters or {}).items() if values
     ]
+    must.extend(required or [])
     must_not = [
         FieldCondition(key='source_name', match=MatchAny(any=exclude_source_names)),
     ] if exclude_source_names else []
@@ -173,6 +183,11 @@ class HybridSearcher:
         # Значения полей payload для схемы `search(filters=…)`: собираются из коллекции
         # документов, живут по TTL — после переиндексации новая категория появится сама.
         self._filter_values: dict[str, list[str]] = {}
+        # ADR-0034: доступ включён — перечень значений фильтров собирается только из открытых всем
+        # документов (он общий на все запросы и иначе выдал бы значения закрытых). Метки индекса —
+        # для пересечения с принципалами спрашивающего.
+        self._access_enabled = False
+        self._label_values: set[str] | None = None
 
     def _maybe_expire_caches(self) -> None:
         """Сбросить корпус-снапшот кэши по TTL — следующий доступ перечитает из Qdrant.
@@ -194,6 +209,7 @@ class HybridSearcher:
         self._doc_titles.clear()
         self._sparse_vector_names_cache.clear()
         self._filter_values.clear()
+        self._label_values = None
 
     # ── Schema helpers ────────────────────────────────────────────────────────
 
@@ -269,6 +285,7 @@ class HybridSearcher:
         limit: int,
         exclude_source_names: list[str] | None = None,
         filters: dict[str, list[str]] | None = None,
+        required: list | None = None,
     ) -> list[Prefetch]:
         """Двухуровневый RRF: dense `full` (1 голос) vs nested-RRF по sparse (1 голос).
 
@@ -287,7 +304,7 @@ class HybridSearcher:
         dense = await self._dense.embed_query(text)
         available_sparse = await self.get_sparse_vector_names(collection)
 
-        kind_filter = build_payload_filter(exclude_source_names, filters)
+        kind_filter = build_payload_filter(exclude_source_names, filters, required)
 
         lexical: list[Prefetch] = []
         if 'keywords' in available_sparse and self._sparse_query:
@@ -343,6 +360,7 @@ class HybridSearcher:
         kinds: list[str] | None = None,
         scope_active: bool = False,
         filters: dict[str, list[str]] | None = None,
+        required: list | None = None,
     ) -> list[dict]:
         """RRF-поиск по chunks collection. Возвращает до `limit` chunk-dict'ов.
 
@@ -358,7 +376,7 @@ class HybridSearcher:
         prefetch = await self._build_rrf_prefetch(
             self._chunks_collection, text, limit,
             exclude_source_names=self._excluded_source_names(kinds, scope_active),
-            filters=filters,
+            filters=filters, required=required,
         )
         result = await self._qdrant.query_points(
             collection_name=self._chunks_collection,
@@ -385,6 +403,7 @@ class HybridSearcher:
                 points, offset = await self._qdrant.scroll(
                     collection_name=self._docs_collection,
                     limit=256, offset=offset,
+                    scroll_filter=self._open_only_filter(),
                     with_payload=[*missing, 'structural'], with_vectors=False,
                 )
                 for pt in points:
@@ -402,12 +421,42 @@ class HybridSearcher:
                 self._filter_values[f] = sorted(vals)
         return {f: list(self._filter_values.get(f, [])) for f in fields}
 
+    def _open_only_filter(self) -> Filter | None:
+        """При включённом доступе — только документы без метки (открытые всем)."""
+        if not getattr(self, '_access_enabled', False):
+            return None
+        return Filter(must=[IsEmptyCondition(is_empty=PayloadField(key=ACCESS_FIELD))])
+
+    async def label_values(self) -> set[str]:
+        """Все строки, встречающиеся в метках доступа документов (кэш по TTL). В условие поиска
+        идёт только пересечение с принципалами спрашивающего — их бывают сотни."""
+        self._maybe_expire_caches()
+        if self._label_values is None:
+            found: set[str] = set()
+            offset = None
+            while True:
+                points, offset = await self._qdrant.scroll(
+                    collection_name=self._docs_collection,
+                    limit=256, offset=offset,
+                    scroll_filter=Filter(must_not=[
+                        IsEmptyCondition(is_empty=PayloadField(key=ACCESS_FIELD))]),
+                    with_payload=[ACCESS_FIELD], with_vectors=False,
+                )
+                for pt in points:
+                    label = (pt.payload or {}).get(ACCESS_FIELD)
+                    found.update(str(x) for x in (label if isinstance(label, list) else [label]) if x)
+                if offset is None:
+                    break
+            self._label_values = found
+        return set(self._label_values)
+
     async def search_docs(
         self,
         text: str,
         limit: int,
         kinds: list[str] | None = None,
         scope_active: bool = False,
+        required: list | None = None,
     ) -> list[dict]:
         """RRF-поиск по docs collection (doc-level эмбеддинги полного текста).
 
@@ -421,6 +470,7 @@ class HybridSearcher:
         prefetch = await self._build_rrf_prefetch(
             self._docs_collection, text, limit,
             exclude_source_names=self._excluded_source_names(kinds, scope_active),
+            required=required,
         )
         result = await self._qdrant.query_points(
             collection_name=self._docs_collection,
