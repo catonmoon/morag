@@ -77,8 +77,9 @@ async def get_knowledge_map(request: Request) -> KMResponse:
             )
             for p in points:
                 payload = p.payload or {}
-                # Служебные точки flat_topics (без map_text) пропускаем.
-                if 'map_text' not in payload:
+                # Служебные точки flat_topics (без map_text) и узлы Карты по одному
+                # (`kind='node'`, для тула `sections`) пропускаем — показываем то, что в промпте.
+                if 'map_text' not in payload or payload.get('kind', 'system_prompt') != 'system_prompt':
                     continue
                 nodes.append(KMNode(
                     doc_id=str(payload.get('doc_id', '')),

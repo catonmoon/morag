@@ -821,8 +821,18 @@ class RetrievalCatalogToolConfig(_RetrievalToolBase):
         return v
 
 
+class RetrievalSectionsToolConfig(_RetrievalToolBase):
+    """`sections` — описания разделов базы по запросу агента (узлы Карты знаний по одному).
+    Читает ту же коллекцию, что `indexing.knowledge_map.collection`; работает и при
+    `knowledge_map.enabled: false` (флаг выключает Карту В ПРОМПТЕ, не её данные)."""
+    type: Literal['sections'] = 'sections'
+
+
 RetrievalToolConfig = Annotated[
-    Union[RetrievalCoreToolConfig, RetrievalLookupToolConfig, RetrievalCatalogToolConfig],
+    Union[
+        RetrievalCoreToolConfig, RetrievalLookupToolConfig, RetrievalCatalogToolConfig,
+        RetrievalSectionsToolConfig,
+    ],
     Field(discriminator='type'),
 ]
 

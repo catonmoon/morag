@@ -236,6 +236,10 @@ class KnowledgeMapGenerator:
         self._subtree_depth_limit = subtree_depth_limit
         self._intermediate_max_tokens = intermediate_max_tokens
         self._per_element_min_tokens = per_element_min_tokens
+        # Узлы Карты по одному: тот же текст, что ушёл в системный промпт, но доступный по id —
+        # для агентского тула `sections` (описание раздела по запросу, а не вся Карта в каждом
+        # ходе). Заполняется рендером weighted-стратегии, пишется точками `kind='node'`.
+        self._node_maps: dict[str, dict] = {}
         # Точный overhead промпта-шаблона (без children_summaries).
         self._prompt_overhead_tokens = self._counter.count(
             _KM_INTERMEDIATE_PROMPT.format(
@@ -344,15 +348,22 @@ class KnowledgeMapGenerator:
             len(all_docs), len(roots), self._prompt_strategy,
         )
 
+        self._node_maps = {}
         system_prompt = await self._build_weighted_prompt(roots, children_map)
         maps: dict[str, str] = {'_system_prompt': system_prompt}
         logger.info(
-            'KnowledgeMap: system prompt built (%d chars, %d tok)',
-            len(system_prompt), self._counter.count(system_prompt),
+            'KnowledgeMap: system prompt built (%d chars, %d tok, %d node(s))',
+            len(system_prompt), self._counter.count(system_prompt), len(self._node_maps),
         )
 
-        # Сохраняем в Qdrant
-        await self._save_maps(maps)
+        # Сохраняем в Qdrant: промпт целиком + каждый узел отдельной точкой (паритет: у тула
+        # ровно то, что напечатано в Карте, — развёрнутый узел или его brief-строка).
+        await self._save_maps(
+            maps,
+            extra_points=[
+                (doc_id, {'kind': 'node', **node}) for doc_id, node in self._node_maps.items()
+            ],
+        )
 
         logger.info('KnowledgeMap: generated %d maps + system prompt', len(maps) - 1)
         return maps
@@ -594,7 +605,8 @@ class KnowledgeMapGenerator:
         """
         children = children_map.get(doc.id, [])
         if depth >= _KM_MAX_DEPTH or not children:
-            return await self._render_collapse(doc, budget, depth, children_map)
+            text = await self._render_collapse(doc, budget, depth, children_map)
+            return self._capture_node(doc, depth, text)
 
         # Pre-check
         per_element = budget / (len(children) + 1)
@@ -605,20 +617,49 @@ class KnowledgeMapGenerator:
                 doc.id, per_element, self._per_element_min_tokens,
                 len(children), budget,
             )
-            return await self._render_collapse(doc, budget, depth, children_map)
+            text = await self._render_collapse(doc, budget, depth, children_map)
+            return self._capture_node(doc, depth, text)
 
         expanded = await self._render_expandable(
             doc, budget, depth, children_map, weights,
         )
         expanded_tokens = self._counter.count(expanded)
         if expanded_tokens <= budget:
-            return expanded
+            return self._capture_node(doc, depth, expanded)
 
         logger.info(
             'KnowledgeMap: expand %s overflow %d > budget %d → fallback to collapse',
             doc.id, expanded_tokens, budget,
         )
-        return await self._render_collapse(doc, budget, depth, children_map)
+        # Отброшенный expandable-проход успел захватить потомков — их тексты в промпт не попадут,
+        # значит и в узлах их быть не должно.
+        self._drop_subtree_nodes(doc, children_map)
+        text = await self._render_collapse(doc, budget, depth, children_map)
+        return self._capture_node(doc, depth, text)
+
+    def _capture_node(self, doc: Document, depth: int, text: str) -> str:
+        """Запомнить отрендеренный узел под его doc_id; вернуть текст как есть.
+
+        `brief` — заголовок + первый абзац (self-summary или summary поддерева), без подразделов
+        и перечня детей: из него собирается перечень верхнеуровневых разделов у тула.
+        """
+        paragraphs = [p for p in text.split('\n\n') if p.strip()]
+        brief = paragraphs[0] if paragraphs else text.strip()
+        if len(paragraphs) > 1 and not paragraphs[1].lstrip().startswith(('#', '- ')):
+            brief = f'{paragraphs[0]}\n\n{paragraphs[1]}'
+        self._node_maps[doc.id] = {
+            'short_id': _node_id(doc), 'title': _node_title(doc), 'depth': depth,
+            'map_text': text, 'brief': brief,
+        }
+        return text
+
+    def _drop_subtree_nodes(self, doc: Document, children_map: dict[str, list[Document]]) -> None:
+        """Убрать из `_node_maps` всех потомков узла (сам узел не трогаем)."""
+        stack = list(children_map.get(doc.id, []))
+        while stack:
+            child = stack.pop()
+            self._node_maps.pop(child.id, None)
+            stack.extend(children_map.get(child.id, []))
 
     async def _render_expandable(
         self,
@@ -684,9 +725,16 @@ class KnowledgeMapGenerator:
             hint_budget = max(_KM_BRIEF_LINE_TOKENS - prefix_tokens, 6)
             text = c.payload.get('doc_summary', '') or ''
             if not text:
-                return f'- {ctitle} (id: {_node_id(c)})'
-            hint = await self._compact_until_fits(ctitle, text, hint_budget)
-            return f'- {ctitle} (id: {_node_id(c)}) — {hint}' if hint else f'- {ctitle} (id: {_node_id(c)})'
+                line = f'- {ctitle} (id: {_node_id(c)})'
+            else:
+                hint = await self._compact_until_fits(ctitle, text, hint_budget)
+                line = f'- {ctitle} (id: {_node_id(c)}) — {hint}' if hint else f'- {ctitle} (id: {_node_id(c)})'
+            # Brief-ребёнок — тоже узел Карты: у тула на его id ровно эта строка, не больше.
+            self._node_maps[c.id] = {
+                'short_id': _node_id(c), 'title': ctitle, 'depth': depth + 1,
+                'map_text': line, 'brief': line,
+            }
+            return line
 
         self_text, big_texts, brief_lines = await asyncio.gather(
             self._compact_until_fits(title, doc.payload.get('doc_summary', '') or '', self_budget),
@@ -1387,6 +1435,7 @@ class KnowledgeMapGenerator:
                 payload={
                     'doc_id': doc_id,
                     'map_text': map_text,
+                    'kind': 'system_prompt',
                 },
             ))
         if extra_points:

@@ -1336,6 +1336,13 @@ class Pipeline:
             if note:
                 notes.append(note)
             args['doc_id'] = doc_id or args['doc_id']
+        if args.get('section_id'):   # тул `sections`: код раздела → doc_id узла Карты
+            raw = str(args['section_id'])
+            doc_id, note = self._resolve_id_arg(raw, want='section')
+            self._log_id_arg(name, 'section_id', raw, doc_id, note)
+            if note:
+                notes.append(note)
+            args['section_id'] = doc_id or args['section_id']
         for key, want in (('doc_ids', 'doc'), ('section_ids', 'section')):
             refs = args.get(key)
             if not isinstance(refs, list):
@@ -1394,7 +1401,8 @@ class Pipeline:
         inst = self._tool_instances.get(name)
         if inst is not None and inst[0].handler is not None:
             spec, cfg = inst
-            return spec.handler(self, cfg, args, ctx)
+            text, chunks = spec.handler(self, cfg, args, ctx)
+            return ('\n'.join([*notes, '', text]) if notes else text), chunks
         return f'Неизвестный инструмент: {name}', []
 
     # ── Доступ (ADR-0034) ─────────────────────────────────────────────────────
@@ -1498,6 +1506,32 @@ class Pipeline:
             lines.append(' | '.join(_fmt(f, r.get(f)) for f in fields))
         head = f'Каталог корпуса — {len(rows)} записей.'
         return head + '\n\n' + '\n'.join(lines), []
+
+    def _tool_sections(self, section_id: str, ctx: RequestContext = OPEN) -> tuple[str, list[dict]]:
+        """`sections`-тип: описания разделов по запросу — узлы Карты знаний по одному.
+
+        Без аргумента — перечень верхнеуровневых разделов (`brief` корней в порядке Карты);
+        с `section_id` (уже развёрнут в doc_id в `_normalize_tool_ids`) — полный текст узла.
+        Паритет с Картой в промпте: что в ней не напечатано, того тул не знает — никаких походов
+        в docs-коллекцию. Карта строится из открытых всем документов (ADR-0034), поэтому `ctx`
+        здесь ничего не фильтрует. Чанков нет — цитировать нечего."""
+        nodes = self._run(self._searcher.fetch_km_nodes())
+        if not nodes:
+            return ('Описаний разделов нет: Карта знаний не построена. '
+                    'Ищи через find_section/search.'), []
+        if not section_id:
+            top = min(int(n.get('depth', 1)) for n in nodes.values())
+            roots = [n for n in nodes.values() if int(n.get('depth', 1)) == top]
+            head = (f'Верхнеуровневые разделы базы знаний — {len(roots)}. '
+                    'Подробнее о разделе и его подразделах: sections(section_id).')
+            return head + '\n\n' + '\n\n'.join(
+                (n.get('brief') or n['map_text']).strip() for n in roots), []
+        node = nodes.get(section_id)
+        if node is None:
+            code = self._code_of(section_id)
+            return (f'Раздел {code} в Карте знаний не описан. '
+                    f'Ищи в нём напрямую: search(section_ids=[{code!r}]) или find_section.'), []
+        return node['map_text'].strip(), []
 
     async def _fetch_catalog_rows(self, fields: list[str], required: list | None = None) -> list[dict]:
         """Скан docs-коллекции → по строке (выбранные поля) на каждый

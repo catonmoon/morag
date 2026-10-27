@@ -4,7 +4,9 @@
   - `core.py`    — системные search / find_section / get_doc (нельзя выключить,
                    description тюнится конфигом; у find_section — политика required);
   - `lookup.py`  — точечное обращение к справочным страницам (бывш. glossary);
-  - `catalog.py` — структурный каталог корпуса (метаданные всех документов).
+  - `catalog.py` — структурный каталог корпуса (метаданные всех документов);
+  - `sections.py` — описания разделов базы по запросу (узлы Карты знаний по одному —
+                   альтернатива Карте целиком в системном промпте).
 
 ИНСТАНСЫ тулов объявляются в конфиге списком `retrieval.tools` — у одного типа
 может быть несколько инстансов с разными `name`/`description`/параметрами
@@ -42,8 +44,8 @@ class ToolSpec(NamedTuple):
 
 
 def _build_registry() -> dict[str, ToolSpec]:
-    from morag.retrieval.tools import catalog, core, lookup
-    specs = [*core.SPECS, lookup.SPEC, catalog.SPEC]
+    from morag.retrieval.tools import catalog, core, lookup, sections
+    specs = [*core.SPECS, lookup.SPEC, catalog.SPEC, sections.SPEC]
     return {s.type: s for s in specs}
 
 

@@ -170,6 +170,8 @@ class HybridSearcher:
         self._doc_titles: dict[str, str] = {}
         self._cluster_membership: dict[str, list[str]] | None = None
         self._knowledge_map: str | None = None
+        # Узлы Карты по одному (doc_id → payload точки `kind='node'`) — для тула `sections`.
+        self._km_nodes: dict[str, dict] | None = None
         # Короткие коды документов (ADR-0025), двусторонне. Живут в том же корпус-снапшот кэше,
         # что дерево и заголовки: у них один жизненный цикл — «состав корпуса на сейчас».
         self._short_to_doc: dict[str, str] | None = None
@@ -201,6 +203,7 @@ class HybridSearcher:
             return
         self._cache_expires_at = now + self._cache_ttl
         self._knowledge_map = None
+        self._km_nodes = None
         self._cluster_membership = None
         self._doc_tree = None
         self._indexed_doc_ids = None
@@ -740,6 +743,40 @@ class HybridSearcher:
             logger.warning('fetch_knowledge_map failed: %s', exc)
             self._knowledge_map = ''
         return self._knowledge_map
+
+    async def fetch_km_nodes(self) -> dict[str, dict]:
+        """Узлы Карты знаний по одному: doc_id → `{short_id, title, depth, map_text, brief}`.
+
+        Точки `kind='node'` той же коллекции, что и системный промпт; пишет их генератор Карты
+        (weighted-стратегия). Порядок — порядок записи (корни идут в порядке Карты). Кеш с TTL;
+        коллекции/точек нет → `{}`.
+        """
+        self._maybe_expire_caches()
+        if self._km_nodes is not None:
+            return self._km_nodes
+        nodes: dict[str, dict] = {}
+        offset = None
+        try:
+            while True:
+                records, offset = await self._qdrant.scroll(
+                    collection_name=self._km_collection,
+                    scroll_filter=Filter(must=[
+                        FieldCondition(key='kind', match=MatchValue(value='node')),
+                    ]),
+                    with_payload=True, with_vectors=False, limit=256, offset=offset,
+                )
+                for rec in records:
+                    pl = dict(rec.payload or {})
+                    doc_id = pl.get('doc_id')
+                    if doc_id and pl.get('map_text'):
+                        nodes[str(doc_id)] = pl
+                if offset is None:
+                    break
+        except Exception as exc:
+            logger.warning('fetch_km_nodes failed: %s', exc)
+            nodes = {}
+        self._km_nodes = nodes
+        return self._km_nodes
 
     async def fetch_short_id_maps(self) -> tuple[dict[str, str], dict[str, str]]:
         """`(код → doc_id, doc_id → код)` по всему корпусу. Кеш с TTL, один скролл.
