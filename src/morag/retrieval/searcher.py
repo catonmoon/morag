@@ -655,6 +655,28 @@ class HybridSearcher:
                 summaries[did] = summary
         return summaries
 
+    async def fetch_doc_briefs(self, doc_ids: list[str]) -> dict[str, dict]:
+        """`{doc_id: {title, doc_summary, structural}}` по списку doc_id — без текста документов."""
+        if not doc_ids:
+            return {}
+        try:
+            records, _ = await self._qdrant.scroll(
+                collection_name=self._docs_collection,
+                scroll_filter=Filter(must=[FieldCondition(key='id', match=MatchAny(any=list(doc_ids)))]),
+                with_payload=['id', 'title', 'doc_summary', 'structural'],
+                with_vectors=False,
+                limit=len(doc_ids),
+            )
+        except Exception as exc:
+            logger.warning('fetch_doc_briefs failed: %s', exc)
+            return {}
+        out: dict[str, dict] = {}
+        for rec in records:
+            pl = rec.payload or {}
+            if pl.get('id'):
+                out[str(pl['id'])] = pl
+        return out
+
     async def build_doc_tree(self) -> tuple[dict[str, list[str]], set[str]]:
         """Parent→children дерево + set всех indexed doc_id. Кеш с TTL."""
         self._maybe_expire_caches()

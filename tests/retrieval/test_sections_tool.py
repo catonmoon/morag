@@ -126,3 +126,30 @@ def test_methodology_override_keeps_tool_prompt_sections():
     text = Pipeline._tool_methodology('МОЯ МЕТОДИКА.', inst)
     assert text.startswith('МОЯ МЕТОДИКА.') and '`sections()`' in text
     assert Pipeline._tool_methodology('', {}) == CORE_EXECUTION_METHODOLOGY
+
+
+def test_live_mode_describes_a_non_map_document_with_its_children():
+    from morag.storage.repository import doc_point_id
+    pl = _pipeline()
+    client = pl._searcher._qdrant
+    docs = {
+        'confluence:c:500': {'id': 'confluence:c:500', 'title': 'Дежурства', 'doc_summary': 'Про дежурства.',
+                             'parent_doc_ids': [], 'structural': False},
+        'confluence:c:501': {'id': 'confluence:c:501', 'title': 'Дежурства Бояре', 'doc_summary': 'Бояре.',
+                             'parent_doc_ids': ['confluence:c:500'], 'structural': False},
+    }
+    pl._loop.run_until_complete(client.create_collection(
+        'docs', vectors_config=VectorParams(size=1, distance=Distance.COSINE)))
+    pl._loop.run_until_complete(client.upsert('docs', [
+        PointStruct(id=doc_point_id(d), vector=[0.0], payload=p) for d, p in docs.items()]))
+    short = {'S3P0NFD': PEOPLE, 'SWMKDMY': 'confluence:c:500', 'DNPGGAF': 'confluence:c:501'}
+    pl._searcher.fetch_short_id_maps = AsyncMock(return_value=(short, {v: k for k, v in short.items()}))
+    pl._tool_instances = {'sections': (REGISTRY['sections'], {'type': 'sections', 'live': True})}
+    text, _ = pl._execute_tool('sections', {'section_id': 'SWMKDMY'})
+    assert text.startswith('## Дежурства (SWMKDMY)') and 'Про дежурства.' in text
+    assert '- Дежурства Бояре (DNPGGAF)' in text
+    leaf, _ = pl._execute_tool('sections', {'section_id': 'DNPGGAF'})
+    assert 'Подразделов нет' in leaf and 'get_doc' in leaf
+    # без live — прежний отказ
+    pl._tool_instances = {'sections': (REGISTRY['sections'], {'type': 'sections'})}
+    assert 'не описан' in pl._execute_tool('sections', {'section_id': 'SWMKDMY'})[0]

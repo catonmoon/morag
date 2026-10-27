@@ -829,6 +829,10 @@ class RetrievalSectionsToolConfig(_RetrievalToolBase):
     без неё агент почти не зовёт тул сам."""
     type: Literal['sections'] = 'sections'
     hint: bool = True
+    # Раздел/документ, не описанный в Карте (не узел), описывать «вживую» из docs-коллекции:
+    # заголовок + doc_summary + перечень детей (заголовок, код). Замерено: агент зовёт тул
+    # почти только по кодам из выдачи find_section, которых в Карте нет.
+    live: bool = False
 
 
 RetrievalToolConfig = Annotated[

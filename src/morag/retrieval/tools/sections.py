@@ -31,7 +31,13 @@ def sections_description(note: str = '') -> str:
 
 
 def _describe(cfg: dict) -> str:
-    return cfg.get('description') or sections_description()
+    if cfg.get('description'):
+        return cfg['description']
+    base = sections_description()
+    if cfg.get('live'):
+        base += (' section_id принимает любой код раздела или документа — из перечня, из выдачи '
+                 'find_section или search: получишь, о чём он и какие у него подразделы.')
+    return base
 
 
 def _status(cfg: dict, args: dict, resolve_title) -> str:
@@ -69,7 +75,8 @@ SPEC = ToolSpec(
     },
     describe=_describe,
     prompt_section=_prompt_section,
-    handler=lambda p, cfg, args, ctx: p._tool_sections(args.get('section_id') or '', ctx),
+    handler=lambda p, cfg, args, ctx: p._tool_sections(
+        args.get('section_id') or '', ctx, live=bool(cfg.get('live', False))),
     status=_status,
     icon='🗂️',
 )

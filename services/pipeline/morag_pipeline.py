@@ -1516,7 +1516,8 @@ class Pipeline:
         head = f'Каталог корпуса — {len(rows)} записей.'
         return head + '\n\n' + '\n'.join(lines), []
 
-    def _tool_sections(self, section_id: str, ctx: RequestContext = OPEN) -> tuple[str, list[dict]]:
+    def _tool_sections(self, section_id: str, ctx: RequestContext = OPEN, *,
+                       live: bool = False) -> tuple[str, list[dict]]:
         """`sections`-тип: описания разделов по запросу — узлы Карты знаний по одному.
 
         Без аргумента — перечень верхнеуровневых разделов (`brief` корней в порядке Карты);
@@ -1536,11 +1537,46 @@ class Pipeline:
             return head + '\n\n' + '\n\n'.join(
                 (n.get('brief') or n['map_text']).strip() for n in roots), []
         node = nodes.get(section_id)
-        if node is None:
-            code = self._code_of(section_id)
-            return (f'Раздел {code} в Карте знаний не описан. '
-                    f'Ищи в нём напрямую: search(section_ids=[{code!r}]) или find_section.'), []
-        return node['map_text'].strip(), []
+        if node is not None:
+            logger.info('[sections] %s node chars=%d', self._code_of(section_id), len(node['map_text']))
+            return node['map_text'].strip(), []
+        code = self._code_of(section_id)
+        if live:
+            text = self._describe_doc_live(section_id, ctx)
+            if text:
+                logger.info('[sections] %s live chars=%d', code, len(text))
+                return text, []
+        logger.info('[sections] %s missing', code)
+        return (f'Раздел {code} в Карте знаний не описан. '
+                f'Ищи в нём напрямую: search(section_ids=[{code!r}]) или find_section.'), []
+
+    def _describe_doc_live(self, doc_id: str, ctx: RequestContext) -> str:
+        """Описание раздела/документа из docs-коллекции (режим `live` тула `sections`):
+        заголовок + doc_summary + перечень детей «- Заголовок (код)». Детей не описываем —
+        агент раскроет нужного тем же тулом (иначе у «Требований» с 183 детьми вышла бы простыня).
+        ADR-0034: сам документ и каждый ребёнок проходят проверку доступа, как в get_doc."""
+        tree, _ = self._run(self._searcher.build_doc_tree())
+        children = list(tree.get(doc_id, []))
+        briefs = self._run(self._searcher.fetch_doc_briefs([doc_id, *children]))
+        own = briefs.get(doc_id)
+        if own is None:
+            return ''
+        if ctx.active:
+            allowed = self._live_allowed(ctx, [d for d in briefs if visible(briefs[d], ctx.principals)])
+            if doc_id not in allowed:
+                return ''
+            children = [c for c in children if c in allowed]
+        title = own.get('title') or self._get_doc_title(doc_id)
+        parts = [f'## {title} ({self._code_of(doc_id)})', '']
+        summary = (own.get('doc_summary') or '').strip()
+        parts.append(summary or '(описания нет)')
+        kids = [c for c in children if c in briefs]
+        if kids:
+            parts += ['', f'Подразделы ({len(kids)}) — раскрыть: sections(код); искать в них: search(section_ids=[код]):']
+            parts += [f"- {briefs[c].get('title') or c} ({self._code_of(c)})" for c in kids]
+        else:
+            parts += ['', f'Подразделов нет — это страница-документ: читай get_doc({self._code_of(doc_id)!r}).']
+        return '\n'.join(parts)
 
     async def _fetch_catalog_rows(self, fields: list[str], required: list | None = None) -> list[dict]:
         """Скан docs-коллекции → по строке (выбранные поля) на каждый
