@@ -824,8 +824,11 @@ class RetrievalCatalogToolConfig(_RetrievalToolBase):
 class RetrievalSectionsToolConfig(_RetrievalToolBase):
     """`sections` — описания разделов базы по запросу агента (узлы Карты знаний по одному).
     Читает ту же коллекцию, что `indexing.knowledge_map.collection`; работает и при
-    `knowledge_map.enabled: false` (флаг выключает Карту В ПРОМПТЕ, не её данные)."""
+    `knowledge_map.enabled: false` (флаг выключает Карту В ПРОМПТЕ, не её данные).
+    `hint` — строка в методике промпта «структуру базы даёт этот тул, начни с него»;
+    без неё агент почти не зовёт тул сам."""
     type: Literal['sections'] = 'sections'
+    hint: bool = True
 
 
 RetrievalToolConfig = Annotated[

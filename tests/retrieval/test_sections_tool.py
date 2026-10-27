@@ -109,11 +109,13 @@ def test_empty_collection_sends_agent_to_find_section():
     assert 'Карта знаний не построена' in text
 
 
-def test_schema_has_optional_section_id_and_no_prompt_section():
+def test_schema_has_optional_section_id_and_a_switchable_prompt_hint():
     spec = REGISTRY['sections']
     schema = build_tool_schema(spec, {'type': 'sections'})
     assert schema['function']['name'] == 'sections'
     assert schema['function']['parameters']['required'] == []
     assert 'section_id' in schema['function']['parameters']['properties']
-    assert spec.prompt_section({'type': 'sections'}) == ''
+    assert '`sections()`' in spec.prompt_section({'type': 'sections'})
+    assert '`map()`' in spec.prompt_section({'type': 'sections', 'name': 'map'})
+    assert spec.prompt_section({'type': 'sections', 'hint': False}) == ''
     assert build_tool_schema(spec, {'type': 'sections', 'description': 'Своё.'})['function']['description'] == 'Своё.'

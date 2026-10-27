@@ -7,7 +7,9 @@
 с промптом; Карта строится только из открытых всем документов, ADR-0034).
 
 ОДНО описание на инстанс = ПОЛНЫЙ текст, который видит агент (cfg.description перебивает
-дефолт). Секции в системном промпте нет: вся подсказка живёт в описании функции.
+дефолт). В методику системного промпта идёт одна строка-подсказка (`hint`, по умолчанию
+включена) — аналог шапки Карты «используй для навигации»: без неё агент тянется к тулу
+только когда уже заблудился (замерено на smoke: 1 вызов на 5 вопросов, и тот седьмым шагом).
 """
 from __future__ import annotations
 
@@ -37,6 +39,17 @@ def _status(cfg: dict, args: dict, resolve_title) -> str:
     return f'описание раздела {sid}' if sid else 'перечень разделов базы'
 
 
+def _prompt_section(cfg: dict) -> str:
+    if not cfg.get('hint', True):
+        return ''
+    name = cfg.get('name') or 'sections'
+    return (
+        f'\n\nСтруктуру базы знаний (разделы, их описания и коды) даёт инструмент `{name}`: '
+        f'вызови `{name}()` в начале, чтобы понять, где может лежать ответ, и '
+        f'`{name}(section_id)` — чтобы раскрыть подразделы выбранного раздела.'
+    )
+
+
 SPEC = ToolSpec(
     type='sections',
     default_name='sections',
@@ -55,7 +68,7 @@ SPEC = ToolSpec(
         'required': [],
     },
     describe=_describe,
-    prompt_section=lambda cfg: '',
+    prompt_section=_prompt_section,
     handler=lambda p, cfg, args, ctx: p._tool_sections(args.get('section_id') or '', ctx),
     status=_status,
     icon='🗂️',
