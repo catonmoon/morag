@@ -106,9 +106,11 @@ indexing:
   doc_vector:
     max_tokens: 28672                # head-heavy truncation (Qwen3-Embedding ctx=32K, запас 3584)
 
-  # Knowledge Map (карта документации, ADR-0010)
+  # Knowledge Map (карта документации, ADR-0010). Выключена по умолчанию: на иерархическом корпусе
+  # с обязательным find_section качество ответов не повышает, а стоит тысячи токенов на каждый
+  # запрос (ADR-0035). Плоский корпус или find_section OPTIONAL — сначала замерить.
   knowledge_map:
-    enabled: true
+    enabled: false
     prompt_strategy: weighted        # 'weighted' (adaptive, глубина=2) | 'flat_topics'
     prompt_budget: 8192              # целевой размер system prompt в токенах
     node_min_tokens: 256             # порог big-vs-brief: ниже — узел уходит в перечень одной строкой
