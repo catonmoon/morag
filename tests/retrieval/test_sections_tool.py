@@ -7,12 +7,12 @@ import threading
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-import pytest
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
 from morag.retrieval.searcher import HybridSearcher
 from morag.retrieval.tools import REGISTRY, build_tool_schema
+from morag.retrieval.tools.core import CORE_EXECUTION_METHODOLOGY
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'services' / 'pipeline'))
 from morag_pipeline import Pipeline  # noqa: E402
@@ -119,3 +119,10 @@ def test_schema_has_optional_section_id_and_a_switchable_prompt_hint():
     assert '`map()`' in spec.prompt_section({'type': 'sections', 'name': 'map'})
     assert spec.prompt_section({'type': 'sections', 'hint': False}) == ''
     assert build_tool_schema(spec, {'type': 'sections', 'description': 'Своё.'})['function']['description'] == 'Своё.'
+
+
+def test_methodology_override_keeps_tool_prompt_sections():
+    inst = {'sections': (REGISTRY['sections'], {'type': 'sections'})}
+    text = Pipeline._tool_methodology('МОЯ МЕТОДИКА.', inst)
+    assert text.startswith('МОЯ МЕТОДИКА.') and '`sections()`' in text
+    assert Pipeline._tool_methodology('', {}) == CORE_EXECUTION_METHODOLOGY

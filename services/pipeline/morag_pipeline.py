@@ -750,6 +750,12 @@ class Pipeline:
             tool_instances[name] = (spec, t)
         return tools, tool_instances
 
+    @staticmethod
+    def _tool_methodology(core_override: str, tool_instances: dict[str, tuple]) -> str:
+        """Текст секции методики: core (оверрайд из конфига либо дефолт) + секции тулов."""
+        core = core_override or CORE_EXECUTION_METHODOLOGY
+        return core + ''.join(spec.prompt_section(cfg) for _n, (spec, cfg) in tool_instances.items())
+
     def _run(self, coro: Coroutine[Any, Any, _T]) -> _T:
         """Выполнить async-корутину в нашем persistent event loop. Sync-обёртка для pipe().
 
@@ -806,11 +812,14 @@ class Pipeline:
         # 2. Собрать system prompt из именованных секций (morag.retrieval.prompt —
         #    единый источник; console показывает ту же структуру в превью).
         #    Методика тулов = core-методика + prompt_section optional-тулов (обычно '').
-        tool_methodology = CORE_EXECUTION_METHODOLOGY + ''.join(
-            spec.prompt_section(cfg) for _n, (spec, cfg) in self._tool_instances.items()
-        )
+        #    Оверрайд секции `tool_methodology` из конфига заменяет ТОЛЬКО core-методику:
+        #    секции optional-тулов (напр. подсказка `sections`) дописываются после неё всегда —
+        #    иначе на деплое с правленой методикой тул молча теряет свою строку в промпте.
+        overrides = dict(self._s['section_overrides'])
+        tool_methodology = self._tool_methodology(overrides.pop('tool_methodology', ''),
+                                                  self._tool_instances)
         system_content = build_system_prompt(
-            section_overrides=self._s['section_overrides'],
+            section_overrides=overrides,
             require_find_section=self._s['require_find_section'],
             tool_methodology=tool_methodology,
             completeness_check=self._s['completeness_check'],
